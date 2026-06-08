@@ -26,7 +26,7 @@ from app.runtime.models import (
     StateNodeStatus,
 )
 from app.runtime.repository import Repository
-from app.runtime.state_tree import active_path_node_ids
+from app.runtime.state_tree import active_path_chain, active_path_node_ids
 
 # Lifecycle states that are eligible to be retrieval candidates. Superseded /
 # archived / dormant / deleted memories are lifecycle-invalid and must never be
@@ -72,7 +72,7 @@ class RetrievalController:
 
         # ---- phase: retrieval (candidate selection) -------------------- #
         t0 = time.perf_counter()
-        active_node, active_ids = await self._load_active_state(request.run_id)
+        active_node, active_ids, active_path = await self._load_active_state(request.run_id)
         candidates = await self._select_candidates(
             workspace_id=workspace_id,
             run_id=request.run_id,
@@ -138,6 +138,7 @@ class RetrievalController:
             active_node=active_node,
             accepted=accepted_memories,
             token_budget=budget,
+            active_path=active_path,
         )
         packing_ms = int((time.perf_counter() - t2) * 1000)
         await profiler.record(
@@ -174,11 +175,14 @@ class RetrievalController:
         )
 
     # ------------------------------------------------------------------ #
-    async def _load_active_state(self, run_id: str) -> tuple[Optional[StateNode], set[str]]:
+    async def _load_active_state(
+        self, run_id: str
+    ) -> tuple[Optional[StateNode], set[str], list[StateNode]]:
         nodes = await self._repo.list_state_nodes(run_id)
         if not nodes:
-            return None, set()
+            return None, set(), []
         active_ids = active_path_node_ids(nodes)
+        chain = active_path_chain(nodes)
         # active node = deepest active, non-root node on the active path
         active_candidates = [
             n for n in nodes
@@ -186,7 +190,7 @@ class RetrievalController:
         ]
         active_candidates.sort(key=lambda n: (n.depth, n.created_at))
         active = active_candidates[-1] if active_candidates else None
-        return active, active_ids
+        return active, active_ids, chain
 
     async def _select_candidates(
         self,

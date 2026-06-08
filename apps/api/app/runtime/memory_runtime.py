@@ -24,6 +24,7 @@ from app.runtime.models import (
     AgentRun,
     AgentStep,
     BranchStatus,
+    DashboardTables,
     EventType,
     FinishStepRequest,
     FinishStepResult,
@@ -333,6 +334,22 @@ class MemoryRuntime:
     ) -> list[MemoryItem]:
         return await self._repo.list_memories(workspace_id=workspace_id, run_id=run_id)
 
+    async def dashboard_tables(self, *, workspace_id: Optional[str] = None) -> DashboardTables:
+        """Return minimal table payload for the P1 dashboard/API view."""
+        runs = await self._repo.list_runs(workspace_id=workspace_id)
+        accesses = await self._repo.list_access_logs(workspace_id=workspace_id)
+        profile_events = await self._repo.list_profile_events()
+        cases = await self._repo.list_benchmark_cases()
+        results = await self._repo.list_benchmark_results()
+        return DashboardTables(
+            runs=runs,
+            accesses=accesses,
+            profile_events=profile_events,
+            benchmark_cases=cases,
+            benchmark_results=results,
+            benchmark_summary=_benchmark_summary_from_records(results),
+        )
+
     async def inspect_access(self, access_id: str):
         """Rebuild the full retrieval story for GET /v1/access/{access_id}.
 
@@ -380,12 +397,14 @@ class MemoryRuntime:
             reverse=True,
         )
         active_node = None
+        active_path: list = []
         if access.run_id:
-            active_node, _ = await self._retrieval._load_active_state(access.run_id)
+            active_node, _, active_path = await self._retrieval._load_active_state(access.run_id)
         blocks, _ = pack_context(
             active_node=active_node,
             accepted=accepted_mems,
             token_budget=access.token_budget or 512,
+            active_path=active_path,
         )
         profile = self._retrieval._profile_summary(access)
         return AccessInspection(
@@ -398,6 +417,31 @@ class MemoryRuntime:
             context_blocks=blocks,
             profile=profile,
         )
+
+
+def _avg(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 4)
+
+
+def _benchmark_summary_from_records(results) -> dict[str, dict[str, float]]:
+    by_strategy: dict[str, list] = {}
+    for row in results:
+        by_strategy.setdefault(row.strategy, []).append(row.metrics)
+    summary: dict[str, dict[str, float]] = {}
+    for strategy, rows in by_strategy.items():
+        summary[strategy] = {
+            "task_success_rate": _avg([float(r.get("task_success", 0)) for r in rows]),
+            "correct_active_path_hit_rate": _avg([float(r.get("correct_active_path_hit", 0)) for r in rows]),
+            "failed_branch_contamination_rate": _avg([float(r.get("failed_branch_contamination", 0)) for r in rows]),
+            "stale_memory_injection_rate": _avg([float(r.get("stale_memory_injection", 0)) for r in rows]),
+            "cross_workspace_leakage_rate": _avg([float(r.get("cross_workspace_leakage", 0)) for r in rows]),
+            "tool_sensitive_blocked_rate": _avg([
+                float(r.get("tool_sensitive_blocked", 0)) for r in rows if r.get("tool_sensitive_present")
+            ]),
+        }
+    return summary
 
 
 __all__ = ["MemoryRuntime", "RunNotFoundError", "StepNotFoundError"]

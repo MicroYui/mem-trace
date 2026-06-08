@@ -42,6 +42,16 @@ def test_english_uses_constraint():
     assert keys.get("project.runtime.excluded") == "nodejs"
 
 
+def test_negative_only_constraint_is_not_misread_as_positive():
+    """mvp.md §5.2: a bare "不用 X" / "不使用 X" must yield ONLY the excluded
+    constraint, never a positive project.runtime=X."""
+    for text in ("不用 Node.js", "不使用 Node.js"):
+        results = writer.write_from_user_message(_user_event(text))
+        keys = {r.memory.key: r.memory.value for r in results}
+        assert keys.get("project.runtime.excluded") == "nodejs"
+        assert "project.runtime" not in keys  # no false positive constraint
+
+
 def test_explicit_correction_supersedes_old_key():
     results = writer.write_from_user_message(_user_event("不是 Node.js，是 Bun"))
     assert len(results) == 1

@@ -17,6 +17,8 @@ from app.runtime.models import (
     MemoryType,
     Provenance,
     StateNode,
+    StateNodeStatus,
+    StateNodeType,
 )
 from app.retrieval.similarity import tokenize
 
@@ -28,11 +30,12 @@ def estimate_tokens(text: str | None) -> int:
 
 _TYPE_ORDER = {
     "active_state": 0,
-    "tool_evidence": 1,
-    "project_memory": 2,
-    "profile": 3,
-    "procedural": 4,
-    "episodic": 5,
+    "active_path": 1,
+    "tool_evidence": 2,
+    "project_memory": 3,
+    "profile": 4,
+    "procedural": 5,
+    "episodic": 6,
 }
 
 
@@ -85,16 +88,48 @@ def build_project_constraint_block(memories: list[MemoryItem]) -> Optional[Conte
     )
 
 
+def build_active_path_block(active_path: list[StateNode]) -> Optional[ContextBlock]:
+    """Summarize the active path (root -> current) as a single context block.
+
+    Only completed steps on the path contribute progress text; the current
+    active leaf is described separately by the active_state block. Failed /
+    rolled_back nodes are never on the active path by construction.
+    """
+    if not active_path:
+        return None
+    steps = [
+        n for n in active_path
+        if n.node_type != StateNodeType.root and n.status == StateNodeStatus.completed
+    ]
+    if not steps:
+        return None
+    parts = []
+    for n in steps:
+        label = n.summary or n.goal or (n.step_id or n.node_id)
+        parts.append(label)
+    content = "Progress so far: " + " -> ".join(parts) + "."
+    leaf = active_path[-1]
+    return ContextBlock(
+        type="active_path",
+        content=content,
+        source="state_tree",
+        provenance=Provenance(run_id=leaf.run_id, state_node_id=leaf.node_id, step_id=leaf.step_id),
+        tokens=estimate_tokens(content),
+    )
+
+
 def pack_context(
     *,
     active_node: Optional[StateNode],
     accepted: list[MemoryItem],
     token_budget: int,
+    active_path: Optional[list[StateNode]] = None,
 ) -> tuple[list[ContextBlock], int]:
     """Build ordered, budget-bounded context blocks.
 
     Returns (blocks, actual_tokens). Project memories are merged; other accepted
-    memories are emitted as their own typed blocks.
+    memories are emitted as their own typed blocks. When `active_path` is given,
+    an `active_path` progress block is inserted after the active_state block.
     """
     blocks: list[ContextBlock] = []
 
@@ -114,6 +149,12 @@ def pack_context(
                 tokens=estimate_tokens(content),
             )
         )
+
+    # Active path progress block (P1 active-path context builder).
+    if active_path:
+        path_block = build_active_path_block(active_path)
+        if path_block is not None:
+            blocks.append(path_block)
 
     # Merged project constraints.
     proj_block = build_project_constraint_block(accepted)
@@ -156,4 +197,4 @@ def pack_context(
     return packed, used
 
 
-__all__ = ["pack_context", "build_project_constraint_block", "estimate_tokens"]
+__all__ = ["pack_context", "build_project_constraint_block", "build_active_path_block", "estimate_tokens"]

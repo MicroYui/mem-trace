@@ -13,12 +13,14 @@
 
 ## P1 MVP Differentiation
 
-1. Implement active path context builder.
-2. Add state-aware candidate scoring/reranking.
-3. Generalize failed/rolled-back branch isolation.
-4. Add benchmark cases for project preference, failed branch, workspace isolation, and tool safety.
-5. Produce JSON/Markdown demo and benchmark reports.
-6. Add basic table-style dashboard or API views only if the core path is stable.
+Status: implemented locally and verified on 2026-06-09.
+
+1. Implement active path context builder. ✅
+2. Add state-aware candidate scoring/reranking. ✅
+3. Generalize failed/rolled-back branch isolation. ✅
+4. Add benchmark cases for project preference, failed branch, workspace isolation, and tool safety. ✅
+5. Produce JSON/Markdown demo and benchmark reports. ✅
+6. Add basic table-style dashboard or API views only if the core path is stable. ✅ (`GET /v1/dashboard/tables`)
 
 ## P2 Advanced Features
 
@@ -29,9 +31,9 @@
 5. Elasticsearch hybrid retrieval if pgvector limits become visible.
 6. Neo4j provenance graph, richer dashboard, replay UI, OpenTelemetry integration.
 
-## Suggested First Coding Task
+## Suggested Next Coding Task
 
-Implement the data model and service contract for `start_run`, `start_step`, `write_event`, `finish_step`, and state tree creation, with tests for sequence ordering and recovery node placement. Do not start with retrieval or dashboard.
+Review and commit the P1 working-tree changes. Then select the next P2 slice: either completed-run reuse/procedural memory, LLM extraction with schema validation, or pgvector semantic retrieval restoration.
 
 ## Suggested Test Strategy
 
@@ -47,4 +49,3 @@ Implement the data model and service contract for `start_run`, `start_step`, `wr
 - LLM extraction should not enter P0 hot path.
 - Dashboard should not precede trace/state/gate correctness.
 - Recovery tree semantics are easy to implement incorrectly.
-

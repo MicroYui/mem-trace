@@ -16,6 +16,7 @@ from app.runtime.models import (
     AgentEvent,
     AgentRun,
     AgentStep,
+    DashboardTables,
     FinishStepRequest,
     FinishStepResult,
     MemoryContext,
@@ -123,6 +124,14 @@ async def list_memories(
     rt: MemoryRuntime = Depends(get_runtime),
 ) -> list[MemoryItem]:
     return await rt.list_memories(workspace_id=workspace_id, run_id=run_id)
+
+
+@router.get("/dashboard/tables", response_model=DashboardTables)
+async def dashboard_tables(
+    workspace_id: Optional[str] = Query(default=None),
+    rt: MemoryRuntime = Depends(get_runtime),
+) -> DashboardTables:
+    return await rt.dashboard_tables(workspace_id=workspace_id)
 
 
 __all__ = ["router"]

@@ -15,6 +15,8 @@ from app.runtime.models import (
     AgentRun,
     AgentStep,
     MemoryAccessLog,
+    BenchmarkCaseRecord,
+    BenchmarkResultRecord,
     MemoryGateLog,
     MemoryItem,
     ProfileEvent,
@@ -31,6 +33,7 @@ class Repository(Protocol):
     async def add_run(self, run: AgentRun) -> AgentRun: ...
     async def get_run(self, run_id: str) -> Optional[AgentRun]: ...
     async def update_run(self, run: AgentRun) -> AgentRun: ...
+    async def list_runs(self, *, workspace_id: Optional[str] = None) -> list[AgentRun]: ...
 
     # steps
     async def add_step(self, step: AgentStep) -> AgentStep: ...
@@ -64,12 +67,19 @@ class Repository(Protocol):
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog: ...
     async def get_access_log(self, access_id: str) -> Optional[MemoryAccessLog]: ...
+    async def list_access_logs(self, *, workspace_id: Optional[str] = None) -> list[MemoryAccessLog]: ...
     async def add_gate_log(self, log: MemoryGateLog) -> MemoryGateLog: ...
     async def list_gate_logs(self, access_id: str) -> list[MemoryGateLog]: ...
     async def add_profile_event(self, event: ProfileEvent) -> ProfileEvent: ...
     async def list_profile_events(
         self, *, run_id: Optional[str] = None, access_id: Optional[str] = None
     ) -> list[ProfileEvent]: ...
+
+    # benchmark / dashboard tables
+    async def add_benchmark_case(self, case: BenchmarkCaseRecord) -> BenchmarkCaseRecord: ...
+    async def add_benchmark_result(self, result: BenchmarkResultRecord) -> BenchmarkResultRecord: ...
+    async def list_benchmark_cases(self) -> list[BenchmarkCaseRecord]: ...
+    async def list_benchmark_results(self) -> list[BenchmarkResultRecord]: ...
 
 
 class InMemoryRepository:
@@ -85,6 +95,8 @@ class InMemoryRepository:
         self._access_logs: dict[str, MemoryAccessLog] = {}
         self._gate_logs: list[MemoryGateLog] = []
         self._profile_events: list[ProfileEvent] = []
+        self._benchmark_cases: dict[str, BenchmarkCaseRecord] = {}
+        self._benchmark_results: dict[str, BenchmarkResultRecord] = {}
         self._seq_counters: dict[str, int] = {}
 
     # runs
@@ -99,6 +111,15 @@ class InMemoryRepository:
     async def update_run(self, run: AgentRun) -> AgentRun:
         self._runs[run.run_id] = run.model_copy(deep=True)
         return run
+
+    async def list_runs(self, *, workspace_id: Optional[str] = None) -> list[AgentRun]:
+        runs = []
+        for r in self._runs.values():
+            if workspace_id is not None and r.workspace_id != workspace_id:
+                continue
+            runs.append(r.model_copy(deep=True))
+        runs.sort(key=lambda r: r.created_at)
+        return runs
 
     # steps
     async def add_step(self, step: AgentStep) -> AgentStep:
@@ -192,6 +213,15 @@ class InMemoryRepository:
         a = self._access_logs.get(access_id)
         return a.model_copy(deep=True) if a else None
 
+    async def list_access_logs(self, *, workspace_id: Optional[str] = None) -> list[MemoryAccessLog]:
+        logs = []
+        for a in self._access_logs.values():
+            if workspace_id is not None and a.workspace_id != workspace_id:
+                continue
+            logs.append(a.model_copy(deep=True))
+        logs.sort(key=lambda a: a.created_at)
+        return logs
+
     async def add_gate_log(self, log: MemoryGateLog) -> MemoryGateLog:
         self._gate_logs.append(log.model_copy(deep=True))
         return log
@@ -214,6 +244,23 @@ class InMemoryRepository:
                 continue
             out.append(p.model_copy(deep=True))
         return out
+
+    # benchmark / dashboard tables
+    async def add_benchmark_case(self, case: BenchmarkCaseRecord) -> BenchmarkCaseRecord:
+        self._benchmark_cases[case.case_id] = case.model_copy(deep=True)
+        return case
+
+    async def add_benchmark_result(self, result: BenchmarkResultRecord) -> BenchmarkResultRecord:
+        self._benchmark_results[result.result_id] = result.model_copy(deep=True)
+        return result
+
+    async def list_benchmark_cases(self) -> list[BenchmarkCaseRecord]:
+        rows = sorted(self._benchmark_cases.values(), key=lambda c: c.case_id)
+        return [r.model_copy(deep=True) for r in rows]
+
+    async def list_benchmark_results(self) -> list[BenchmarkResultRecord]:
+        rows = sorted(self._benchmark_results.values(), key=lambda r: (r.case_id, r.strategy, r.created_at))
+        return [r.model_copy(deep=True) for r in rows]
 
 
 __all__ = ["Repository", "InMemoryRepository"]

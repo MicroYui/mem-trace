@@ -329,6 +329,22 @@ class ProfileEvent(_Base):
     created_at: datetime = Field(default_factory=_now)
 
 
+class BenchmarkCaseRecord(_Base):
+    case_id: str
+    name: str
+    description: Optional[str] = None
+    config: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class BenchmarkResultRecord(_Base):
+    result_id: str = Field(default_factory=lambda: _new_id("bench"))
+    case_id: str
+    strategy: str
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=_now)
+
+
 # --------------------------------------------------------------------------- #
 # Context blocks (retrieve_context output)
 # --------------------------------------------------------------------------- #
@@ -385,6 +401,17 @@ class AccessInspection(_Base):
     gate_decisions: list[GateDecisionView] = Field(default_factory=list)
     context_blocks: list[ContextBlock] = Field(default_factory=list)
     profile: dict[str, Any] = Field(default_factory=dict)
+
+
+class DashboardTables(_Base):
+    """Minimal P1 table-style dashboard payload."""
+
+    runs: list[AgentRun] = Field(default_factory=list)
+    accesses: list[MemoryAccessLog] = Field(default_factory=list)
+    profile_events: list[ProfileEvent] = Field(default_factory=list)
+    benchmark_cases: list[BenchmarkCaseRecord] = Field(default_factory=list)
+    benchmark_results: list[BenchmarkResultRecord] = Field(default_factory=list)
+    benchmark_summary: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #

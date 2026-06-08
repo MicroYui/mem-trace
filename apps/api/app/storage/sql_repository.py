@@ -15,6 +15,8 @@ from app.runtime.models import (
     AgentRun,
     AgentStep,
     MemoryAccessLog,
+    BenchmarkCaseRecord,
+    BenchmarkResultRecord,
     MemoryGateLog,
     MemoryItem,
     ProfileEvent,
@@ -217,6 +219,46 @@ def _profile_from_orm(o: orm.ProfileEventORM) -> ProfileEvent:
     )
 
 
+def _benchmark_case_to_orm(c: BenchmarkCaseRecord) -> orm.BenchmarkCaseORM:
+    return orm.BenchmarkCaseORM(
+        case_id=c.case_id,
+        name=c.name,
+        description=c.description,
+        config=c.config,
+        created_at=c.created_at,
+    )
+
+
+def _benchmark_case_from_orm(o: orm.BenchmarkCaseORM) -> BenchmarkCaseRecord:
+    return BenchmarkCaseRecord(
+        case_id=o.case_id,
+        name=o.name,
+        description=o.description,
+        config=o.config or {},
+        created_at=o.created_at,
+    )
+
+
+def _benchmark_result_to_orm(r: BenchmarkResultRecord) -> orm.BenchmarkResultORM:
+    return orm.BenchmarkResultORM(
+        result_id=r.result_id,
+        case_id=r.case_id,
+        strategy=r.strategy,
+        metrics=r.metrics,
+        created_at=r.created_at,
+    )
+
+
+def _benchmark_result_from_orm(o: orm.BenchmarkResultORM) -> BenchmarkResultRecord:
+    return BenchmarkResultRecord(
+        result_id=o.result_id,
+        case_id=o.case_id,
+        strategy=o.strategy,
+        metrics=o.metrics or {},
+        created_at=o.created_at,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Repository
 # --------------------------------------------------------------------------- #
@@ -241,6 +283,15 @@ class SqlRepository:
 
     async def update_run(self, run: AgentRun) -> AgentRun:
         return await self.add_run(run)
+
+    async def list_runs(self, *, workspace_id: Optional[str] = None) -> list[AgentRun]:
+        async with self._sf() as s:
+            stmt = select(orm.RunORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.RunORM.workspace_id == workspace_id)
+            stmt = stmt.order_by(orm.RunORM.created_at)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_run_from_orm(o) for o in rows]
 
     # steps
     async def add_step(self, step: AgentStep) -> AgentStep:
@@ -357,6 +408,15 @@ class SqlRepository:
             o = await s.get(orm.AccessLogORM, access_id)
             return _access_from_orm(o) if o else None
 
+    async def list_access_logs(self, *, workspace_id: Optional[str] = None) -> list[MemoryAccessLog]:
+        async with self._sf() as s:
+            stmt = select(orm.AccessLogORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.AccessLogORM.workspace_id == workspace_id)
+            stmt = stmt.order_by(orm.AccessLogORM.created_at)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_access_from_orm(o) for o in rows]
+
     async def add_gate_log(self, log: MemoryGateLog) -> MemoryGateLog:
         async with self._sf() as s:
             s.add(_gate_to_orm(log))
@@ -389,6 +449,37 @@ class SqlRepository:
             stmt = stmt.order_by(orm.ProfileEventORM.created_at)
             rows = (await s.execute(stmt)).scalars().all()
             return [_profile_from_orm(o) for o in rows]
+
+    # benchmark / dashboard tables
+    async def add_benchmark_case(self, case: BenchmarkCaseRecord) -> BenchmarkCaseRecord:
+        async with self._sf() as s:
+            await s.merge(_benchmark_case_to_orm(case))
+            await s.commit()
+        return case
+
+    async def add_benchmark_result(self, result: BenchmarkResultRecord) -> BenchmarkResultRecord:
+        async with self._sf() as s:
+            await s.merge(_benchmark_result_to_orm(result))
+            await s.commit()
+        return result
+
+    async def list_benchmark_cases(self) -> list[BenchmarkCaseRecord]:
+        async with self._sf() as s:
+            rows = (await s.execute(
+                select(orm.BenchmarkCaseORM).order_by(orm.BenchmarkCaseORM.case_id)
+            )).scalars().all()
+            return [_benchmark_case_from_orm(o) for o in rows]
+
+    async def list_benchmark_results(self) -> list[BenchmarkResultRecord]:
+        async with self._sf() as s:
+            rows = (await s.execute(
+                select(orm.BenchmarkResultORM).order_by(
+                    orm.BenchmarkResultORM.case_id,
+                    orm.BenchmarkResultORM.strategy,
+                    orm.BenchmarkResultORM.created_at,
+                )
+            )).scalars().all()
+            return [_benchmark_result_from_orm(o) for o in rows]
 
 
 __all__ = ["SqlRepository"]

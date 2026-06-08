@@ -53,9 +53,11 @@ _CORRECTION_PATTERNS = [
     re.compile(r"不是\s*(?P<old>[A-Za-z0-9_.\-]+)[，,\s]*是\s*(?P<new>[A-Za-z0-9_.\-]+)"),
     re.compile(r"不用\s*(?P<old>[A-Za-z0-9_.\-]+)[，,\s]*用\s*(?P<new>[A-Za-z0-9_.\-]+)"),
 ]
-# positive: "使用 X" / "用 X" / "uses X"
+# positive: "使用 X" / "用 X" / "uses X". The lookbehinds prevent matching the
+# "使用"/"用" inside a negation like "不用" / "不使用" (mvp.md §5.2): `(?<!不)`
+# rejects "不使用"/"不用", and `(?<!不使)` rejects the bare "用" tail of "不使用".
 _POSITIVE_PATTERNS = [
-    re.compile(r"(?:使用|用)\s*(?P<rt>[A-Za-z0-9_.\-]+)"),
+    re.compile(r"(?<!不)(?<!不使)(?:使用|用)\s*(?P<rt>[A-Za-z0-9_.\-]+)"),
     re.compile(r"(?i)\buses?\s+(?P<rt>[A-Za-z0-9_.\-]+)"),
 ]
 # negative: "不用 Y" / "不使用 Y" / "should not use Y"

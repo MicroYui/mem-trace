@@ -155,6 +155,25 @@ def active_path_node_ids(all_nodes: list[StateNode]) -> set[str]:
     return active
 
 
+def active_path_chain(all_nodes: list[StateNode]) -> list[StateNode]:
+    """Return the active path as an ordered progress list (root -> current).
+
+    In the P0/P1 simplified tree, steps are siblings under root (or under a
+    shared parent), so a strict parent walk would skip completed sibling steps.
+    The active path is therefore all on-path nodes that are NOT failed/
+    rolled_back and NOT descendants of a failed node, ordered by (depth,
+    created_at). Failed branches are excluded by `active_path_node_ids`.
+    """
+    if not all_nodes:
+        return []
+    active_ids = active_path_node_ids(all_nodes)
+    on_path = [n for n in all_nodes if n.node_id in active_ids]
+    if not on_path:
+        return []
+    on_path.sort(key=lambda n: (n.depth, n.created_at))
+    return on_path
+
+
 __all__ = [
     "make_root_node",
     "make_step_node",
@@ -163,4 +182,5 @@ __all__ = [
     "apply_rollback",
     "descendants",
     "active_path_node_ids",
+    "active_path_chain",
 ]
