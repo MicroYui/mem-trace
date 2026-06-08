@@ -1,0 +1,23 @@
+services:
+  postgres:
+    # pgvector/pgvector:pg16 is preferred, but if Docker Hub is unreachable this
+    # plain Postgres image works for P0 (retrieval is lexical; embedding_vector
+    # is stored as float[]). Override with MEMTRACE_PG_IMAGE if needed.
+    image: ${MEMTRACE_PG_IMAGE:-public.ecr.aws/docker/library/postgres:15.6}
+    container_name: memtrace-postgres
+    environment:
+      POSTGRES_USER: memtrace
+      POSTGRES_PASSWORD: memtrace
+      POSTGRES_DB: memtrace
+    ports:
+      - "5433:5432"
+    volumes:
+      - memtrace_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memtrace -d memtrace"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  memtrace_pgdata:
