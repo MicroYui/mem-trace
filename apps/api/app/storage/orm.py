@@ -9,7 +9,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    ARRAY,
     BigInteger,
     DateTime,
     Float,
@@ -20,6 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 
 EMBED_DIM = 256
 
@@ -146,9 +146,10 @@ class MemoryORM(Base):
     freshness_score: Mapped[float] = mapped_column(Float, default=1.0)
     trust_score: Mapped[float] = mapped_column(Float, default=0.5)
     risk_score: Mapped[float] = mapped_column(Float, default=0.0)
-    # P0 retrieval is lexical; embedding stored as float[] so the schema runs
-    # without the pgvector extension. Swap to pgvector.Vector when available.
-    embedding_vector: Mapped[list | None] = mapped_column(ARRAY(Float), nullable=True)
+    # Semantic retrieval vector (pgvector). Cosine distance is used for KNN;
+    # embeddings are deterministic hashed bag-of-words so results are
+    # reproducible without an external embedding provider.
+    embedding_vector: Mapped[list | None] = mapped_column(Vector(EMBED_DIM), nullable=True)
     risk_flags: Mapped[dict] = mapped_column(JSONB, default=dict)
     status: Mapped[str] = mapped_column(String, index=True)
     sensitivity: Mapped[str] = mapped_column(String, default="internal")

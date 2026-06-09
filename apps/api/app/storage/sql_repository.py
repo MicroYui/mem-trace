@@ -10,6 +10,7 @@ from typing import Optional
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.runtime.repository import ensure_embedding
 from app.runtime.models import (
     AgentEvent,
     AgentRun,
@@ -370,6 +371,7 @@ class SqlRepository:
 
     # memories
     async def add_memory(self, memory: MemoryItem) -> MemoryItem:
+        ensure_embedding(memory)
         async with self._sf() as s:
             await s.merge(_mem_to_orm(memory))
             await s.commit()
@@ -395,6 +397,30 @@ class SqlRepository:
             stmt = stmt.order_by(orm.MemoryORM.created_at)
             rows = (await s.execute(stmt)).scalars().all()
             return [_mem_from_orm(o) for o in rows]
+
+    async def search_memories_by_vector(
+        self,
+        *,
+        embedding: list[float],
+        workspace_id: Optional[str] = None,
+        top_k: int = 10,
+    ) -> list[tuple[MemoryItem, float]]:
+        # pgvector cosine distance (<=>) is in [0, 2]; convert to a [0, 1]
+        # similarity (1 - distance, clamped) so it matches the in-memory path.
+        distance = orm.MemoryORM.embedding_vector.cosine_distance(embedding)
+        async with self._sf() as s:
+            stmt = select(orm.MemoryORM, distance.label("distance")).where(
+                orm.MemoryORM.embedding_vector.isnot(None)
+            )
+            if workspace_id is not None:
+                stmt = stmt.where(orm.MemoryORM.workspace_id == workspace_id)
+            stmt = stmt.order_by(distance).limit(top_k)
+            rows = (await s.execute(stmt)).all()
+            out: list[tuple[MemoryItem, float]] = []
+            for o, dist in rows:
+                sim = round(max(0.0, 1.0 - float(dist)), 6)
+                out.append((_mem_from_orm(o), sim))
+            return out
 
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog:

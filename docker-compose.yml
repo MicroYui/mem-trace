@@ -1,9 +1,9 @@
 services:
   postgres:
-    # pgvector/pgvector:pg16 is preferred, but if Docker Hub is unreachable this
-    # plain Postgres image works for P0 (retrieval is lexical; embedding_vector
-    # is stored as float[]). Override with MEMTRACE_PG_IMAGE if needed.
-    image: ${MEMTRACE_PG_IMAGE:-public.ecr.aws/docker/library/postgres:15.6}
+    # pgvector image is required for semantic (vector KNN) retrieval. Override
+    # with MEMTRACE_PG_IMAGE only if you need a different registry mirror; a
+    # plain Postgres image will fail the pgvector migration.
+    image: ${MEMTRACE_PG_IMAGE:-pgvector/pgvector:pg16}
     container_name: memtrace-postgres
     environment:
       POSTGRES_USER: memtrace

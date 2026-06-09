@@ -41,7 +41,7 @@
 
 ## Environment Pitfalls
 
-- **pgvector image may be unreachable.** Docker Hub `pgvector/pgvector` was blocked here; only an ECR-mirrored plain `postgres` image was available. P0 stores `embedding_vector` as `float[]` and uses lexical retrieval. Do not assume pgvector is present; gate any KNN code behind extension availability.
+- **pgvector restored (2026-06-09).** The `pgvector/pgvector:pg16` image is now available, so semantic retrieval is back: `embedding_vector` is `vector(256)` with an HNSW cosine index. Pitfalls learned: (1) PG15 data volumes are incompatible with the pg16 image — switching requires `docker-compose down -v` (destructive, recreates the volume); (2) this env has standalone `docker-compose` only (the `docker compose` subcommand errors out); (3) alembic must run from the repo root (where `alembic.ini` lives) with `PYTHONPATH=apps/api` so `app.*` imports resolve; (4) embeddings MUST use a process-stable hash (blake2b), not Python's salted built-in `hash`, or persisted vectors won't match query vectors across processes.
 
 ## Over-Engineering Warnings
 

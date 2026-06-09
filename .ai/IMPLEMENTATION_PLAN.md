@@ -33,7 +33,7 @@ Status: implemented locally and verified on 2026-06-09.
 
 ## Suggested Next Coding Task
 
-Review and commit the P1 working-tree changes. Then select the next P2 slice: either completed-run reuse/procedural memory, LLM extraction with schema validation, or pgvector semantic retrieval restoration.
+pgvector semantic retrieval is restored (hybrid lexical + deterministic-vector cosine on `pgvector/pgvector:pg16`). Review and commit those working-tree changes. Then select the next P2 slice: completed-run reuse/procedural memory, LLM extraction with schema validation, or extending P2 benchmark cases 5-8.
 
 ## Suggested Test Strategy
 

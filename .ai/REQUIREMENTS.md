@@ -35,7 +35,7 @@ Per `mvp.md` §2.2 and §10, the P1 scope is now implemented:
 - Benchmark cases/results can be persisted through the repository into `benchmark_cases` and `benchmark_results` tables.
 - Basic dashboard table API is exposed at `GET /v1/dashboard/tables`.
 - P1 benchmark acceptance observed: `variant_2.failed_branch_contamination_rate=0.0`, `baseline_1.failed_branch_contamination_rate=0.25`, `cross_workspace_leakage_rate=0.0`, `tool_sensitive_blocked_rate=1.0`.
-- Optional pgvector + semantic retrieval remains deferred until a reachable pgvector image/provider is available.
+- pgvector semantic retrieval is restored (`pgvector/pgvector:pg16`): hybrid lexical + deterministic-vector cosine, `vector(256)` column with an HNSW index (migration `0002_pgvector`).
 
 ### P1 Non-Goals
 
@@ -54,8 +54,8 @@ apps/api/app/
   api/       deps.py, routes.py
   demo/      run_demo.py
   config.py, main.py
-apps/api/tests/   runtime/, memory/, retrieval/, benchmark/, api/ (50 tests)
-migrations/       env.py, versions/0001_initial.py
+apps/api/tests/   runtime/, memory/, retrieval/, benchmark/, api/ (55 tests)
+migrations/       env.py, versions/0001_initial.py, versions/0002_pgvector.py
 ```
 
 ## Standing Requirements From Design Docs

@@ -114,3 +114,16 @@ Sources:
 - **Context:** `mvp.md` asks for basic dashboard tables in P1 while explicitly deferring a full React dashboard.
 - **Decision:** Implement `GET /v1/dashboard/tables` returning table-shaped runtime/profiler/benchmark data from the repository; do not add a frontend app yet.
 - **Consequences:** P1 supports inspection and reportability without dashboard scope creep. A future UI can consume the same endpoint or replace it with richer paginated views.
+
+### ADR-014: Restore pgvector semantic retrieval with deterministic hashed embeddings
+
+- **Date:** 2026-06-09
+- **Status:** accepted (supersedes the P0 `float[]` workaround in ADR-007/decision notes)
+- **Context:** P0 stored `embedding_vector` as `float[]` and retrieved lexically because the `pgvector/pgvector` image was unreachable. The image is now available locally (`pgvector/pgvector:pg16`), so the mvp.md §4 requirement (PostgreSQL + pgvector) can be met without giving up reproducibility or pulling in an external embedding provider.
+- **Decision:**
+  - Embeddings are deterministic, process-stable hashed bag-of-words vectors (`similarity.stable_embedding`, blake2b — not Python's salted `hash`), L2-normalized, dim 256. No external/LLM embedding provider, so benchmark/demo stay reproducible.
+  - `memory_items.embedding_vector` is a `pgvector.Vector(256)` column (migration `0002_pgvector`: hard `CREATE EXTENSION vector`, type change, HNSW cosine index). The compose default image is now `pgvector/pgvector:pg16`.
+  - Retrieval is hybrid: `RetrievalController._select_candidates` blends lexical overlap with vector cosine (`retrieval_vector_weight`, default 0.5) and falls back to lexical-only when vectors are absent/disabled (`retrieval_use_vector`).
+  - Embeddings are backfilled at the single write chokepoint `Repository.add_memory` via `ensure_embedding`, so every stored memory (rule-written or test-seeded) is vector-searchable; benchmark fairness (identical seeded items per strategy) is preserved.
+  - New protocol method `search_memories_by_vector`: InMemory uses Python cosine; SQL uses pgvector `<=>` cosine distance converted to a [0,1] similarity.
+- **Consequences:** Semantic + lexical retrieval both contribute to relevance while all existing differentiation results hold (variant_2 contamination 0.0 < baseline_1 0.25; tool-sensitive blocked; zero cross-workspace leakage). PG15 volumes are incompatible with the pg16 image, so switching requires recreating the data volume (`docker-compose down -v`). Hashed embeddings are a similarity proxy, not true semantics; swapping in a real embedding model later only requires changing `stable_embedding` (keep determinism for benchmarks or gate it behind config).

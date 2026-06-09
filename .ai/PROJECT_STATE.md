@@ -18,11 +18,11 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 ## Resolved Blocking Decisions
 
 1. **Package manager / scaffold:** `uv` + `apps/api/app/...` monorepo layout.
-2. **Storage:** PostgreSQL source of truth via SQLAlchemy 2.0 async + Alembic (docker-compose). pgvector image unreachable here, so `embedding_vector` is `float[]` (P0 retrieval is lexical). Compose defaults to `public.ecr.aws/docker/library/postgres:15.6`, overridable via `MEMTRACE_PG_IMAGE`.
-3. **Retrieval similarity:** deterministic lexical (token overlap), no external embedding provider.
+2. **Storage:** PostgreSQL source of truth via SQLAlchemy 2.0 async + Alembic (docker-compose). **pgvector semantic retrieval is now restored** (`pgvector/pgvector:pg16`): `embedding_vector` is a `Vector(256)` column with an HNSW cosine index (migration `0002_pgvector`); retrieval is hybrid lexical + deterministic-vector cosine. Compose defaults to `pgvector/pgvector:pg16`, overridable via `MEMTRACE_PG_IMAGE`.
+3. **Retrieval similarity:** hybrid — lexical token overlap blended with deterministic hashed-embedding cosine (no external embedding provider; reproducible).
 4. **Demo:** deterministic scripted loop, no external LLM.
 
-(See `.ai/DECISIONS.md` ADR-006..013 for rationale.)
+(See `.ai/DECISIONS.md` ADR-006..014 for rationale.)
 
 ## Implemented (P0)
 
@@ -52,14 +52,16 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 - P1 benchmark: `uv run python -m app.benchmark.runner --output-dir reports` generated JSON/Markdown reports with an `acceptance.passed=true` block. Summary: `variant_2.failed_branch_contamination_rate=0.0 < baseline_1=0.25`, `variant_2.cross_workspace_leakage_rate=0.0`, `variant_2.tool_sensitive_blocked_rate=1.0`, `variant_2.task_success_rate=1.0`.
 - SQL backend re-verified on live Postgres: benchmark persists 4 cases + 16 results and `dashboard_tables()` returns them with a per-strategy summary.
 - Targeted P1 gap tests passed: benchmark persistence stores 4 cases + 16 results; `/v1/dashboard/tables` returns benchmark/dashboard table rows and summary.
+- pgvector restoration verified (2026-06-09): `uv run pytest -q` -> **55 passed** (added embedding stability / cosine / in-memory vector KNN tests). Recreated the data volume on `pgvector/pgvector:pg16`, `alembic upgrade head` ran `0001` + `0002_pgvector` (extension + `vector(256)` column + HNSW index confirmed via psql). SQL-backend demo: baseline_1 contamination=1, variant_2 contamination=0, contamination_eliminated=True; all 10 stored memories carry embeddings (`embedding_status=embedded`) and pgvector `<=>` cosine ranking is correct. Benchmark acceptance still `passed=true`.
 
 ## Open Risks / Notes
 
-- pgvector deferred to `float[]`; KNN/semantic retrieval pending a reachable pgvector image (re-enable: swap ORM column + `CREATE EXTENSION vector`).
-- Cross-workspace leakage prevented by workspace-scoped candidate retrieval; gate `workspace_mismatch` is defense-in-depth (unit-tested).
-- Lifecycle filtering of superseded/archived memory lives only in the retrieval candidate stage (see PITFALLS); keep it in sync if a second retrieval path is added.
+- pgvector semantic retrieval is restored; embeddings are deterministic hashed bag-of-words (not learned), so similarity is a proxy. Swapping in a real embedding model later only touches `similarity.stable_embedding` (keep determinism for benchmarks or gate behind config).
+- PG15 data volumes are incompatible with the `pg16` image; switching requires `docker-compose down -v` (destructive). This env uses standalone `docker-compose` (the `docker compose` subcommand is unavailable).
+- Cross-workspace leakage prevented by workspace-scoped candidate retrieval (lexical AND vector KNN both filter by workspace_id); gate `workspace_mismatch` is defense-in-depth (unit-tested).
+- Lifecycle filtering of superseded/archived memory lives only in the retrieval candidate stage (see PITFALLS); the new vector path reuses the same `list_memories` lifecycle filter, so it stays in sync.
 - Generated reports live under ignored `reports/`; regenerate them with the benchmark runner rather than treating them as source artifacts.
 
 ## Next Recommended Action
 
-Review and commit the P1 working-tree changes. After that, choose P2 scope (LLM extraction/conflict handling/completed-run reuse) or restore pgvector/semantic retrieval when a reliable image/provider is available.
+Review and commit the pgvector restoration working-tree changes. After that, choose the next P2 slice (LLM extraction / conflict handling / completed-run reuse) or extend P2 benchmark cases 5-8.

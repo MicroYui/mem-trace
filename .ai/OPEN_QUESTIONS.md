@@ -10,7 +10,7 @@
 
 ## Remaining Implementation Questions
 
-1. **pgvector restoration:** keep lexical retrieval until a reliable pgvector image/provider is available, or implement optional pgvector KNN behind capability detection now?
+1. **pgvector restoration:** RESOLVED (2026-06-09, ADR-014). pgvector is restored on `pgvector/pgvector:pg16` with a `vector(256)` column + HNSW cosine index; retrieval is hybrid lexical + deterministic-vector cosine. Open follow-up: whether to replace the deterministic hashed embedding with a real embedding model (and how to keep benchmarks reproducible if so).
 2. **P2 scope order:** choose the next slice among completed-run reuse/procedural memory, LLM extraction, conflict resolution, or richer dashboard/replay UI.
 3. **Auth model:** MVP still runs without full API-key/workspace auth. Decide whether P2 needs an API-key stub before any hosted demo.
 4. **Raw secret payloads:** current implementation redacts persisted content and does not preserve original secret payloads. Decide whether future `raw_payload_ref` should ever store encrypted raw events.

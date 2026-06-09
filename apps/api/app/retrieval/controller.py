@@ -11,7 +11,8 @@ from typing import Optional
 from app.retrieval import gate as gatemod
 from app.retrieval.packer import pack_context
 from app.retrieval.profiler import Profiler
-from app.retrieval.similarity import lexical_similarity
+from app.retrieval.similarity import cosine_similarity, lexical_similarity, stable_embedding
+from app.config import get_settings
 from app.runtime.models import (
     BranchStatus,
     MemoryAccessLog,
@@ -48,6 +49,10 @@ class RetrievalController:
     def __init__(self, repo: Repository, *, default_token_budget: int = 512):
         self._repo = repo
         self._default_budget = default_token_budget
+        settings = get_settings()
+        self._use_vector = settings.retrieval_use_vector
+        self._vector_weight = settings.retrieval_vector_weight
+        self._embed_dim = settings.embedding_dim
 
     async def retrieve(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
         budget = request.token_budget or self._default_budget
@@ -204,11 +209,29 @@ class RetrievalController:
         # memories never become candidates, so leakage is impossible by
         # construction. The gate's workspace_mismatch rule is defense-in-depth.
         memories = await self._repo.list_memories(workspace_id=workspace_id)
+
+        # Vector signal: deterministic embedding cosine via pgvector KNN (SQL)
+        # or in-memory cosine. Map memory_id -> cosine so we can blend it with
+        # the lexical signal per candidate. Falls back to lexical-only if vector
+        # retrieval is disabled or yields nothing (e.g. no embeddings stored).
+        vector_scores: dict[str, float] = {}
+        if self._use_vector:
+            q_vec = stable_embedding(query, self._embed_dim)
+            knn = await self._repo.search_memories_by_vector(
+                embedding=q_vec, workspace_id=workspace_id, top_k=max(top_k * 2, top_k)
+            )
+            vector_scores = {m.memory_id: sim for m, sim in knn}
+
+        w_vec = self._vector_weight if (self._use_vector and vector_scores) else 0.0
+        w_lex = 1.0 - w_vec
+
         scored: list[tuple[MemoryItem, float]] = []
         for m in memories:
             if m.status not in _RETRIEVABLE_STATUSES:
                 continue  # skip superseded/archived/dormant/deleted lifecycle states
-            rel = lexical_similarity(query, m.content)
+            lex = lexical_similarity(query, m.content)
+            vec = vector_scores.get(m.memory_id, 0.0)
+            rel = round(w_lex * lex + w_vec * vec, 6)
             # project constraints are always relevant to coding queries
             if m.memory_type.value == "project" and rel == 0.0:
                 rel = 0.2

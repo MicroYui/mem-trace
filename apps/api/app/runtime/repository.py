@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from typing import Optional, Protocol, runtime_checkable
 
+from app.retrieval.similarity import cosine_similarity, stable_embedding
 from app.runtime.models import (
     AgentEvent,
     AgentRun,
     AgentStep,
+    EmbeddingStatus,
     MemoryAccessLog,
     BenchmarkCaseRecord,
     BenchmarkResultRecord,
@@ -22,6 +24,23 @@ from app.runtime.models import (
     ProfileEvent,
     StateNode,
 )
+
+EMBED_DIM = 256
+
+
+def ensure_embedding(memory: MemoryItem, *, dim: int = EMBED_DIM) -> MemoryItem:
+    """Backfill a deterministic embedding so the memory is vector-searchable.
+
+    Applied at the single write chokepoint (``add_memory``) so every stored
+    memory carries an embedding regardless of whether it came from the rule
+    writer or was seeded directly in tests/benchmarks. The embedding is a
+    process-stable hashed bag-of-words vector, so it is reproducible and needs
+    no external provider.
+    """
+    if memory.embedding_vector is None and memory.content:
+        memory.embedding_vector = stable_embedding(memory.content, dim)
+        memory.embedding_status = EmbeddingStatus.embedded
+    return memory
 
 
 @runtime_checkable
@@ -63,6 +82,13 @@ class Repository(Protocol):
         workspace_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> list[MemoryItem]: ...
+    async def search_memories_by_vector(
+        self,
+        *,
+        embedding: list[float],
+        workspace_id: Optional[str] = None,
+        top_k: int = 10,
+    ) -> list[tuple[MemoryItem, float]]: ...
 
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog: ...
@@ -177,6 +203,7 @@ class InMemoryRepository:
 
     # memories
     async def add_memory(self, memory: MemoryItem) -> MemoryItem:
+        ensure_embedding(memory)
         self._memories[memory.memory_id] = memory.model_copy(deep=True)
         return memory
 
@@ -203,6 +230,25 @@ class InMemoryRepository:
             out.append(m.model_copy(deep=True))
         out.sort(key=lambda m: m.created_at)
         return out
+
+    async def search_memories_by_vector(
+        self,
+        *,
+        embedding: list[float],
+        workspace_id: Optional[str] = None,
+        top_k: int = 10,
+    ) -> list[tuple[MemoryItem, float]]:
+        scored: list[tuple[MemoryItem, float]] = []
+        for m in self._memories.values():
+            if workspace_id is not None and m.workspace_id != workspace_id:
+                continue
+            if not m.embedding_vector:
+                continue
+            sim = cosine_similarity(embedding, m.embedding_vector)
+            if sim > 0.0:
+                scored.append((m.model_copy(deep=True), sim))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
 
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog:
