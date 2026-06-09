@@ -13,6 +13,8 @@ Cases:
   4. tool_safety          - old memory has --force / production key -> gate rejects
   5. explicit_correction  - Node corrected to Bun -> superseded Node never recalled
   6. completed_run_reuse  - prior successful run -> later similar run recalls procedure
+  7. stale_rejection      - expired legacy endpoint memory -> gate rejects as stale
+  8. no_memory_baseline   - constraint only in memory -> no-memory baseline fails
 """
 from __future__ import annotations
 
@@ -214,6 +216,56 @@ async def _seed_completed_run_reuse(rt: MemoryRuntime, ws: str) -> SeedResult:
                       "How did we fix the failing pytest suite last time?", ws)
 
 
+# --------------------------------------------------------------------------- #
+# Case 7: stale memory rejection (mvp.md section 10.4)
+# --------------------------------------------------------------------------- #
+async def _seed_stale_rejection(rt: MemoryRuntime, ws: str) -> SeedResult:
+    """An old API-endpoint memory has expired (``expires_at`` in the past). It is
+    highly relevant to the query, so a naive (baseline_1) strategy injects it,
+    but the risk-policy gate (variant_2) must reject it as ``stale`` and never
+    let the outdated endpoint reach context.
+    """
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="call the users API", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await rt.write_event(_ev(run.run_id, s1.step_id, EventRole.user, EventType.message,
+                             content="这个项目使用 Bun"))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed project uses Bun"))
+    # inject an expired API-endpoint memory directly (active + completed branch,
+    # but past its expires_at -> the risk gate must drop it as stale).
+    await rt._repo.add_memory(  # noqa: SLF001 - seeding harness
+        MemoryItem(
+            workspace_id=ws, run_id=run.run_id, memory_type=MemoryType.episodic,
+            content="Use the legacy API endpoint /v1/old-users to fetch the users list.",
+            summary="legacy API endpoint /v1/old-users",
+            branch_status=BranchStatus.completed,
+            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+    )
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="call the users API"))
+    return SeedResult(run.run_id, s2.step_id,
+                      "Which API endpoint should I call to fetch the users list?", ws,
+                      extra={"stale_markers": ["/v1/old-users", "old-users"]})
+
+
+# --------------------------------------------------------------------------- #
+# Case 8: no-memory baseline fails where state-aware succeeds (mvp.md 10.4)
+# --------------------------------------------------------------------------- #
+async def _seed_no_memory_baseline(rt: MemoryRuntime, ws: str) -> SeedResult:
+    """The project constraint (use Bun) lives only in memory. A no-memory
+    baseline (baseline_0) cannot keep the constraint and fails the task, while
+    the state-aware strategies recall the Bun constraint and succeed.
+    """
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="run tests", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await rt.write_event(_ev(run.run_id, s1.step_id, EventRole.user, EventType.message,
+                             content="这个项目使用 Bun，不用 Node.js"))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed project uses Bun"))
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="choose test runner"))
+    return SeedResult(run.run_id, s2.step_id, "How should I run the test suite?", ws)
+
+
 CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_1_project_preference", "Project preference persistence",
                   "User states Bun, not Node.js; later commands should use bun.",
@@ -233,6 +285,12 @@ CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_6_completed_run_reuse", "Completed-run reuse / procedural memory",
                   "A prior run succeeded fixing pytest failures; a later similar run should recall the procedural success path.",
                   _seed_completed_run_reuse),
+    BenchmarkCase("case_7_stale_rejection", "Stale memory rejection",
+                  "An expired legacy API-endpoint memory is highly relevant but must be rejected as stale, not injected.",
+                  _seed_stale_rejection),
+    BenchmarkCase("case_8_no_memory_baseline", "No-memory baseline fails",
+                  "The Bun constraint lives only in memory; a no-memory baseline fails while state-aware retrieval succeeds.",
+                  _seed_no_memory_baseline),
 ]
 
 ALL_STRATEGIES = [

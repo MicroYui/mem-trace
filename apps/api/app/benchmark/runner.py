@@ -47,7 +47,9 @@ def _summarize(results: list[CaseMetrics]) -> dict[str, dict[str, float]]:
             "task_success_rate": _average([r.task_success for r in rows]),
             "correct_active_path_hit_rate": _average([r.correct_active_path_hit for r in rows]),
             "failed_branch_contamination_rate": _average([r.failed_branch_contamination for r in rows]),
-            "stale_memory_injection_rate": _average([r.stale_memory_injection for r in rows]),
+            "stale_memory_injection_rate": _average(
+                [r.stale_memory_injection for r in rows if r.stale_memory_injection_present]
+            ),
             "cross_workspace_leakage_rate": _average([r.cross_workspace_leakage for r in rows]),
             "tool_sensitive_blocked_rate": _average(
                 [r.tool_sensitive_blocked for r in rows if r.tool_sensitive_present]
@@ -98,6 +100,7 @@ async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | N
                 other_workspace_markers=_other_workspace_markers(case),
                 procedural_reuse_case=(case.case_id == "case_6_completed_run_reuse"),
                 correction_case=(case.case_id == "case_5_explicit_correction"),
+                stale_markers=seed.extra.get("stale_markers"),
             )
         )
     return metrics
@@ -183,6 +186,7 @@ def _acceptance(summary: dict[str, dict[str, float]]) -> dict[str, Any]:
     covered by unit tests; criteria 1-3 are checked here against the summary.
     """
     b1 = summary.get("baseline_1", {})
+    b0 = summary.get("baseline_0", {})
     v2 = summary.get("variant_2", {})
     checks = {
         "variant_2_contamination_below_baseline_1": (
@@ -200,6 +204,13 @@ def _acceptance(summary: dict[str, dict[str, float]]) -> dict[str, Any]:
         ),
         "variant_2_excludes_superseded_memory": (
             v2.get("superseded_injection_rate", 1.0) == 0.0
+        ),
+        "variant_2_excludes_stale_memory": (
+            v2.get("stale_memory_injection_rate", 1.0) == 0.0
+            and b1.get("stale_memory_injection_rate", 0.0) > 0.0
+        ),
+        "variant_2_succeeds_where_no_memory_baseline_fails": (
+            v2.get("task_success_rate", 0.0) > b0.get("task_success_rate", 1.0)
         ),
     }
     return {"passed": all(checks.values()), "checks": checks}

@@ -1,11 +1,25 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; P2 slices **completed-run reuse / procedural memory**, **dedup/merge + conflict resolver**, and **candidate buffer / idle flush** implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `027e110`.
-- **Last updated:** 2026-06-09 (P2 candidate buffer / idle flush).
+- **Current state:** P0 + P1 complete; P2 slices **completed-run reuse / procedural memory**, **dedup/merge + conflict resolver**, **candidate buffer / idle flush**, and **benchmark cases 7-8 (stale rejection + no-memory baseline)** implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `1ed8655`.
+- **Last updated:** 2026-06-09 (P2 benchmark cases 7-8).
 
 ## Current Goal
 
-P2 slice "candidate buffer / idle flush" is implemented: an optional `buffered` extraction mode (architecture.md §12.1) defers memory extraction off the hot write path into a session-keyed in-process buffer, flushed explicitly via `POST /v1/sessions/{session_id}/flush` or lazily at natural window boundaries (retrieve_context / finish_step / complete_run). Default stays `sync` so demo/benchmark behavior is unchanged. Next milestone is review/commit, then the remaining P2 work: LLM extraction (config-gated to preserve determinism) and optional benchmark cases 7-8 (stale rejection, no-memory baseline).
+P2 optional benchmark cases 7-8 are implemented, completing the mvp.md §10.4 case set (8/8). Case 7 (stale rejection) seeds an expired legacy API-endpoint memory: baseline_1/variant_1 inject it, variant_2's risk gate rejects it as `stale`. Case 8 (no-memory baseline) proves baseline_0 fails the task with no memory while state-aware retrieval succeeds. Next milestone is review/commit, then the remaining P2 work: LLM extraction (config-gated to preserve determinism).
+
+## Implemented (P2 — benchmark cases 7-8)
+
+- **Case 7 `case_7_stale_rejection`** (`app/benchmark/cases.py`): seeds an expired (`expires_at` in the past) high-relevance `episodic` memory pointing at a legacy endpoint `/v1/old-users`, plus a Bun constraint. The query asks which endpoint to call. Returns `stale_markers` in `SeedResult.extra`.
+- **Case 8 `case_8_no_memory_baseline`** (`app/benchmark/cases.py`): seeds only the Bun constraint; baseline_0 (no memory) returns `unknown` (task fails), state-aware strategies recall Bun and succeed.
+- **Evaluator** (`app/benchmark/evaluator.py`): `stale_memory_injection` is now really computed (was hardcoded 0) — a memory whose `stale_markers` appear in any context block counts as injected. Added `stale_memory_injection_present` so the rate is averaged only over cases that seed stale memory (mirrors the `tool_sensitive_present` / `procedural_reuse_present` convention, incl. baseline_0 present=1/inj=0).
+- **Runner** (`app/benchmark/runner.py`): passes `stale_markers` through; `stale_memory_injection_rate` now filtered by `_present`; two new acceptance checks: `variant_2_excludes_stale_memory` (variant_2 rate 0 AND baseline_1 rate > 0) and `variant_2_succeeds_where_no_memory_baseline_fails` (variant_2 task_success_rate > baseline_0).
+- **Tests:** `tests/benchmark/test_runner.py` (6→8 cases, 24→32 results, two new acceptance asserts) and `tests/api/test_dashboard.py` (runs 8→10, accesses 24→32, cases 6→8, results 24→32).
+
+## Latest Verification (2026-06-09 P2 cases 7-8)
+
+- `uv run pytest -q` -> **84 passed** (test count unchanged; benchmark/dashboard counts updated in place).
+- Benchmark: **8 cases / 32 results**; `acceptance.passed=true` with all 7 checks true. Case 7 per-strategy stale_injection: baseline_1=1, variant_1=1, variant_2=0. Case 8 task_success: baseline_0=0, variant_2=1. variant_2 overall task_success_rate=1.0, baseline_0=0.0.
+- Demo re-verified: baseline_1 contamination=1, variant_2 contamination=0, contamination_eliminated=True.
 
 ## Implemented (P2 — candidate buffer / idle flush)
 

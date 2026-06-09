@@ -54,6 +54,7 @@ class CaseMetrics:
     correct_active_path_hit: int = 0
     cross_workspace_leakage: int = 0
     stale_memory_injection: int = 0
+    stale_memory_injection_present: int = 0
     tool_sensitive_blocked: int = 0
     tool_sensitive_present: int = 0
     procedural_reuse_hit: int = 0
@@ -80,6 +81,7 @@ def evaluate_case(
     other_workspace_markers: Optional[list[str]] = None,
     procedural_reuse_case: bool = False,
     correction_case: bool = False,
+    stale_markers: Optional[list[str]] = None,
 ) -> CaseMetrics:
     """Build metrics for one (case, strategy) run.
 
@@ -88,7 +90,8 @@ def evaluate_case(
     name seeded in another workspace). `procedural_reuse_case` marks the
     completed-run reuse case so the procedural recall metric is scored.
     `correction_case` marks the explicit-correction case so the
-    superseded-memory injection metric is scored.
+    superseded-memory injection metric is scored. `stale_markers` are substrings
+    of an expired memory that, if present in context, indicate stale injection.
     """
     m = CaseMetrics(case_id=case_id, strategy=strategy.value)
     prof = ctx.profile or {}
@@ -119,8 +122,15 @@ def evaluate_case(
         joined = " ".join(b.content.lower() for b in ctx.context_blocks)
         m.cross_workspace_leakage = 1 if any(mk.lower() in joined for mk in other_workspace_markers) else 0
 
-    # stale injection (any expired memory that still appears)
-    m.stale_memory_injection = 0  # cases here do not seed stale; kept for parity
+    # stale injection: an expired memory (identified by its markers) that still
+    # reached context. Only scored for the stale case; other cases seed no stale
+    # memory, so the metric stays 0 there.
+    if stale_markers:
+        joined = " ".join(b.content.lower() for b in ctx.context_blocks)
+        m.stale_memory_injection_present = 1
+        m.stale_memory_injection = 1 if any(mk.lower() in joined for mk in stale_markers) else 0
+    else:
+        m.stale_memory_injection = 0
 
     # tool-sensitive handling (from gate decisions)
     if access is not None:
