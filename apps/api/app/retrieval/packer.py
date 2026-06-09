@@ -164,6 +164,7 @@ def pack_context(
         MemoryType.tool_evidence: "tool_evidence",
         MemoryType.working_state: "active_state",
         MemoryType.profile: "profile",
+        MemoryType.procedural: "procedural",
         MemoryType.episodic: "episodic",
     }
     for mem in accepted:

@@ -83,6 +83,7 @@ class MemoryType(str, Enum):
     project = "project"
     episodic = "episodic"
     tool_evidence = "tool_evidence"
+    procedural = "procedural"
 
 
 class MemoryScope(str, Enum):
@@ -476,6 +477,19 @@ class RollbackResult(_Base):
     rolled_back_step_ids: list[str] = Field(default_factory=list)
     rolled_back_node_ids: list[str] = Field(default_factory=list)
     affected_memory_ids: list[str] = Field(default_factory=list)
+
+
+class CompleteRunRequest(_Base):
+    run_id: Optional[str] = None
+    status: RunStatus = RunStatus.completed
+    summary: Optional[str] = None
+
+
+class CompleteRunResult(_Base):
+    run: AgentRun
+    summary_memory_id: Optional[str] = None
+    procedural_memory_id: Optional[str] = None
+    created_memory_ids: list[str] = Field(default_factory=list)
 
 
 class RetrievalRequest(_Base):

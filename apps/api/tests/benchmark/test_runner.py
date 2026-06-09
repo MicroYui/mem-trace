@@ -10,14 +10,15 @@ from app.runtime.repository import InMemoryRepository
 async def test_run_benchmark_writes_markdown_and_json_reports(tmp_path):
     report = await run_benchmark(output_dir=tmp_path)
 
-    assert len(report["cases"]) == 4
+    assert len(report["cases"]) == 5
     assert {c["case_id"] for c in report["cases"]} == {
         "case_1_project_preference",
         "case_2_failed_branch",
         "case_3_workspace_isolation",
         "case_4_tool_safety",
+        "case_6_completed_run_reuse",
     }
-    assert len(report["results"]) == 16  # 4 cases x 4 strategies
+    assert len(report["results"]) == 20  # 5 cases x 4 strategies
 
     json_path = tmp_path / "benchmark_results.json"
     md_path = tmp_path / "benchmark_report.md"
@@ -41,6 +42,7 @@ async def test_run_benchmark_meets_mvp_acceptance(tmp_path):
     assert acc["checks"]["variant_2_contamination_below_baseline_1"] is True
     assert acc["checks"]["variant_2_zero_cross_workspace_leakage"] is True
     assert acc["checks"]["variant_2_blocks_tool_sensitive"] is True
+    assert acc["checks"]["variant_2_reuses_procedural_memory"] is True
 
 
 async def test_run_benchmark_persists_cases_and_results(tmp_path):
@@ -50,8 +52,8 @@ async def test_run_benchmark_persists_cases_and_results(tmp_path):
 
     cases = await repo.list_benchmark_cases()
     results = await repo.list_benchmark_results()
-    assert len(cases) == 4
-    assert len(results) == 16
+    assert len(cases) == 5
+    assert len(results) == 20
     assert {r.strategy for r in results} == {"baseline_0", "baseline_1", "variant_1", "variant_2"}
     assert any(
         r.case_id == "case_4_tool_safety" and r.strategy == "variant_2"

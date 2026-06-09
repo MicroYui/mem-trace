@@ -16,6 +16,8 @@ from app.runtime.models import (
     AgentEvent,
     AgentRun,
     AgentStep,
+    CompleteRunRequest,
+    CompleteRunResult,
     DashboardTables,
     FinishStepRequest,
     FinishStepResult,
@@ -80,6 +82,18 @@ async def rollback_branch(req: RollbackRequest, rt: MemoryRuntime = Depends(get_
     try:
         return await rt.rollback_branch(req)
     except StepNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/runs/{run_id}/complete", response_model=CompleteRunResult)
+async def complete_run(
+    run_id: str, req: CompleteRunRequest, rt: MemoryRuntime = Depends(get_runtime)
+) -> CompleteRunResult:
+    # The path parameter is authoritative for the run id.
+    req = req.model_copy(update={"run_id": run_id})
+    try:
+        return await rt.complete_run(req)
+    except RunNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 

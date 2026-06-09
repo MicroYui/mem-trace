@@ -21,6 +21,7 @@ from typing import Awaitable, Callable, Optional
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     BranchStatus,
+    CompleteRunRequest,
     EventRole,
     EventType,
     FinishStepRequest,
@@ -151,6 +152,42 @@ async def _seed_tool_safety(rt: MemoryRuntime, ws: str) -> SeedResult:
     return SeedResult(run.run_id, s2.step_id, "How did we deploy and push to production with force last time?", ws)
 
 
+# --------------------------------------------------------------------------- #
+# Case 6: completed-run reuse / procedural memory (P2)
+# --------------------------------------------------------------------------- #
+async def _seed_completed_run_reuse(rt: MemoryRuntime, ws: str) -> SeedResult:
+    """First run succeeds fixing a failing pytest suite, then is completed so a
+    procedural memory is distilled. A second, similar run should be able to
+    recall that procedural success path.
+    """
+    # ---- first run: successfully fix the failing pytest suite ---------- #
+    run1 = await rt.start_run(StartRunRequest(session_id="bench_prev",
+                                              task="fix failing pytest suite", workspace_id=ws))
+    p1 = await rt.start_step(StartStepRequest(run_id=run1.run_id, intent="planning"))
+    await rt.write_event(_ev(run1.run_id, p1.step_id, EventRole.user, EventType.message,
+                             content="这个项目使用 Bun"))
+    await rt.finish_step(FinishStepRequest(run_id=run1.run_id, step_id=p1.step_id,
+                                           status=StepStatus.completed, summary="confirmed project uses Bun"))
+    d1 = await rt.start_step(StartStepRequest(run_id=run1.run_id, intent="debugging",
+                                              goal="fix failing pytest suite"))
+    await rt.write_event(_ev(run1.run_id, d1.step_id, EventRole.tool, EventType.tool_call,
+                             tool_name="bash", content="bun test"))
+    await rt.write_event(_ev(run1.run_id, d1.step_id, EventRole.tool, EventType.tool_result, status="success",
+                             content="Fixed the failing pytest suite by running bun test; all tests passed."))
+    await rt.finish_step(FinishStepRequest(run_id=run1.run_id, step_id=d1.step_id,
+                                           status=StepStatus.completed, summary="fixed pytest suite with bun test"))
+    # cold path: sediment completed-run summary + procedural memory
+    await rt.complete_run(CompleteRunRequest(run_id=run1.run_id))
+
+    # ---- second run: a similar task that should reuse the procedure ---- #
+    run2 = await rt.start_run(StartRunRequest(session_id="bench",
+                                              task="fix failing pytest suite again", workspace_id=ws))
+    s2 = await rt.start_step(StartStepRequest(run_id=run2.run_id, intent="debugging",
+                                              goal="fix failing pytest suite"))
+    return SeedResult(run2.run_id, s2.step_id,
+                      "How did we fix the failing pytest suite last time?", ws)
+
+
 CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_1_project_preference", "Project preference persistence",
                   "User states Bun, not Node.js; later commands should use bun.",
@@ -164,6 +201,9 @@ CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_4_tool_safety", "Tool-call safety",
                   "Old memory carries --force / production; gate must reject it.",
                   _seed_tool_safety),
+    BenchmarkCase("case_6_completed_run_reuse", "Completed-run reuse / procedural memory",
+                  "A prior run succeeded fixing pytest failures; a later similar run should recall the procedural success path.",
+                  _seed_completed_run_reuse),
 ]
 
 ALL_STRATEGIES = [

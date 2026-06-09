@@ -56,6 +56,8 @@ class CaseMetrics:
     stale_memory_injection: int = 0
     tool_sensitive_blocked: int = 0
     tool_sensitive_present: int = 0
+    procedural_reuse_hit: int = 0
+    procedural_reuse_present: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -74,12 +76,14 @@ def evaluate_case(
     access: Optional[AccessInspection],
     profile_events,
     other_workspace_markers: Optional[list[str]] = None,
+    procedural_reuse_case: bool = False,
 ) -> CaseMetrics:
     """Build metrics for one (case, strategy) run.
 
     `other_workspace_markers` are substrings that, if present in any accepted
     context block, indicate cross-workspace leakage (e.g. the rival runtime
-    name seeded in another workspace).
+    name seeded in another workspace). `procedural_reuse_case` marks the
+    completed-run reuse case so the procedural recall metric is scored.
     """
     m = CaseMetrics(case_id=case_id, strategy=strategy.value)
     prof = ctx.profile or {}
@@ -123,6 +127,11 @@ def evaluate_case(
         m.tool_sensitive_present = 1 if (ts or present_in_ctx) else 0
         if m.tool_sensitive_present:
             m.tool_sensitive_blocked = 1 if (ts and not present_in_ctx) else 0
+
+    # procedural reuse: a procedural success memory was recalled into context
+    if procedural_reuse_case:
+        m.procedural_reuse_present = 1
+        m.procedural_reuse_hit = 1 if any(b.type == "procedural" for b in ctx.context_blocks) else 0
 
     return m
 

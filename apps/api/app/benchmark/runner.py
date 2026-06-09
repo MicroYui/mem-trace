@@ -26,6 +26,7 @@ _METRIC_FIELDS = [
     "stale_memory_injection",
     "cross_workspace_leakage",
     "tool_sensitive_blocked",
+    "procedural_reuse_hit",
     "retrieval_latency_ms",
     "gate_latency_ms",
 ]
@@ -49,6 +50,9 @@ def _summarize(results: list[CaseMetrics]) -> dict[str, dict[str, float]]:
             "cross_workspace_leakage_rate": _average([r.cross_workspace_leakage for r in rows]),
             "tool_sensitive_blocked_rate": _average(
                 [r.tool_sensitive_blocked for r in rows if r.tool_sensitive_present]
+            ),
+            "procedural_reuse_hit_rate": _average(
+                [r.procedural_reuse_hit for r in rows if r.procedural_reuse_present]
             ),
             "avg_retrieval_latency_ms": _average([r.retrieval_latency_ms for r in rows]),
             "avg_gate_latency_ms": _average([r.gate_latency_ms for r in rows]),
@@ -88,6 +92,7 @@ async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | N
                 access=access,
                 profile_events=profile_events,
                 other_workspace_markers=_other_workspace_markers(case),
+                procedural_reuse_case=(case.case_id == "case_6_completed_run_reuse"),
             )
         )
     return metrics
@@ -125,14 +130,14 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         "## Summary",
         "",
-        "| Strategy | task_success_rate | correct_active_path_hit_rate | failed_branch_contamination_rate | cross_workspace_leakage_rate | tool_sensitive_blocked_rate | avg_memory_token_overhead |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Strategy | task_success_rate | correct_active_path_hit_rate | failed_branch_contamination_rate | cross_workspace_leakage_rate | tool_sensitive_blocked_rate | procedural_reuse_hit_rate | avg_memory_token_overhead |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for strategy, row in payload["summary"].items():
         lines.append(
             "| {strategy} | {task_success_rate} | {correct_active_path_hit_rate} | "
             "{failed_branch_contamination_rate} | {cross_workspace_leakage_rate} | "
-            "{tool_sensitive_blocked_rate} | {avg_memory_token_overhead} |".format(
+            "{tool_sensitive_blocked_rate} | {procedural_reuse_hit_rate} | {avg_memory_token_overhead} |".format(
                 strategy=strategy,
                 **row,
             )
@@ -184,6 +189,9 @@ def _acceptance(summary: dict[str, dict[str, float]]) -> dict[str, Any]:
         ),
         "variant_2_blocks_tool_sensitive": (
             v2.get("tool_sensitive_blocked_rate", 0.0) == 1.0
+        ),
+        "variant_2_reuses_procedural_memory": (
+            v2.get("procedural_reuse_hit_rate", 0.0) == 1.0
         ),
     }
     return {"passed": all(checks.values()), "checks": checks}

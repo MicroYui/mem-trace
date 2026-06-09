@@ -1,11 +1,28 @@
 # Project State
 
-- **Current state:** P0 + P1 fully implemented and re-verified end-to-end against mvp.md (uncommitted working-tree changes on top of P0 commit `b2923b9`).
-- **Last updated:** 2026-06-09 (full P0/P1 correctness audit).
+- **Current state:** P0 + P1 complete; first P2 slice (**completed-run reuse / procedural memory**) implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `a2097d2`.
+- **Last updated:** 2026-06-09 (P2 completed-run reuse / procedural memory).
 
 ## Current Goal
 
-P1 code path is complete: active-path context, state-aware strategy modes, four deterministic benchmark cases, benchmark persistence, JSON/Markdown reports, and a minimal dashboard tables API. Next milestone is review/commit, then optional P2 scope selection.
+P2 slice "completed-run reuse / procedural memory" is implemented: a cold-path `complete_run` summarizes a finished run into a completed-run episodic memory plus (for successful runs) a reusable procedural memory, which a later similar run recalls as a `procedural` context block. Next milestone is review/commit, then the next P2 slice (LLM extraction / dedup-merge / conflict resolver).
+
+## Implemented (P2 — completed-run reuse / procedural memory)
+
+- **MemoryType.procedural** added (`app/runtime/models.py`); `CompleteRunRequest`/`CompleteRunResult` request/result models added.
+- **Summarizer** `app/memory/summarizer.py`: pure, deterministic, no-LLM. `build_run_summary` emits an episodic completed-run summary (active-path progress) and, for successful runs only, a procedural memory distilling the successful approach (positive project constraint + successful non-risky tool evidence on the active path). Failed/rolled-back branches and tool-sensitive/destructive evidence are never distilled.
+- **Runtime** `MemoryRuntime.complete_run` (cold path, not on hot retrieve path): marks run completed, runs the summarizer, persists memories, and supersedes prior same-(run-scoped-)key summaries so re-running is idempotent. Stable keys `run.summary.<run_id>` / `procedure.<run_id>`.
+- **Packer** maps `MemoryType.procedural` to the reserved `procedural` block (mvp.md §8 ordering).
+- **HTTP** `POST /v1/runs/{run_id}/complete` (path param is authoritative; request body `run_id` optional).
+- **Failed-branch isolation extended to summaries:** a failed run's episodic summary is written with `branch_status=failed` (not `completed`), so it is never recalled as a successful path.
+- **Benchmark** P2 case 6 (`case_6_completed_run_reuse`): first run fixes a pytest suite and is completed (procedural extracted); a second similar run recalls it. New evaluator metric `procedural_reuse_hit` + summary `procedural_reuse_hit_rate` + acceptance check `variant_2_reuses_procedural_memory`.
+- **Tests:** `tests/runtime/test_completed_run_reuse.py` (episodic+procedural write, failed-run produces no procedural, idempotency, later-run recall). Updated benchmark/dashboard counts (now 5 cases / 20 results / 7 runs).
+
+## Latest Verification (2026-06-09 P2)
+
+- `uv run pytest -q` -> **59 passed** (was 55; +4 procedural tests, benchmark/dashboard counts updated).
+- Benchmark `acceptance.passed=true` with new check `variant_2_reuses_procedural_memory=true`; case 6 per-strategy: baseline_0 hit=0 (no memory), baseline_1/variant_1/variant_2 hit=1.
+- Demo unchanged: baseline_1 contamination=1 (`npm test`), variant_2 contamination=0 (`bun test`), contamination_eliminated=True.
 
 ## Latest Verification (2026-06-09 full audit)
 

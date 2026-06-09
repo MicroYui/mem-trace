@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.memory import secrets, writer
+from app.memory import secrets, summarizer, writer
 from app.retrieval.controller import RetrievalController
 from app.runtime import state_tree
 from app.runtime.models import (
@@ -24,6 +24,8 @@ from app.runtime.models import (
     AgentRun,
     AgentStep,
     BranchStatus,
+    CompleteRunRequest,
+    CompleteRunResult,
     DashboardTables,
     EventType,
     FinishStepRequest,
@@ -271,6 +273,46 @@ class MemoryRuntime:
             affected_memory_ids=affected_mem_ids,
         )
 
+    async def complete_run(self, request: CompleteRunRequest) -> CompleteRunResult:
+        """Cold-path: mark the run finished and sediment durable memory.
+
+        Summarizes the run's active path into a completed-run episodic memory and
+        (for successful runs) a reusable procedural memory, so a later similar
+        run can recall the approach that worked. This is intentionally NOT on the
+        hot retrieve path. Re-running it supersedes the prior same-key summaries
+        for this run so the operation is idempotent (no duplicates).
+        """
+        run = await self._repo.get_run(request.run_id)
+        if run is None:
+            raise RunNotFoundError(request.run_id)
+
+        run.status = request.status
+        run.finished_at = _now()
+        run.updated_at = _now()
+        await self._repo.update_run(run)
+
+        nodes = await self._repo.list_state_nodes(run.run_id)
+        memories = await self._repo.list_memories(workspace_id=run.workspace_id)
+
+        result = summarizer.build_run_summary(
+            run=run, nodes=nodes, memories=memories, summary=request.summary
+        )
+
+        created_ids: list[str] = []
+        # Supersede any prior summary/procedural memories for THIS run so a
+        # re-run of the cold path does not accumulate duplicates.
+        for mem in result.created:
+            await self._supersede_run_summary_key(run.workspace_id, mem.key)
+            await self._repo.add_memory(mem)
+            created_ids.append(mem.memory_id)
+
+        return CompleteRunResult(
+            run=run,
+            summary_memory_id=result.episodic.memory_id,
+            procedural_memory_id=result.procedural.memory_id if result.procedural else None,
+            created_memory_ids=created_ids,
+        )
+
     async def retrieve_context(self, request: RetrievalRequest) -> MemoryContext:
         run = await self._repo.get_run(request.run_id)
         if run is None:
@@ -303,6 +345,21 @@ class MemoryRuntime:
             if mem.status != MemoryStatus.active or mem.key is None:
                 continue
             if (mem.key, mem.scope.value) in wanted:
+                mem.status = MemoryStatus.superseded
+                mem.updated_at = _now()
+                await self._repo.update_memory(mem)
+
+    async def _supersede_run_summary_key(self, workspace_id: str, key: Optional[str]) -> None:
+        """Supersede prior active memories with the same summary/procedural key.
+
+        Keys are run-scoped (e.g. ``run.summary.<run_id>``), so this only ever
+        affects re-summarization of the SAME run, keeping complete_run idempotent
+        without disturbing other runs' memories.
+        """
+        if not key:
+            return
+        for mem in await self._repo.list_memories(workspace_id=workspace_id):
+            if mem.status == MemoryStatus.active and mem.key == key:
                 mem.status = MemoryStatus.superseded
                 mem.updated_at = _now()
                 await self._repo.update_memory(mem)
@@ -439,6 +496,9 @@ def _benchmark_summary_from_records(results) -> dict[str, dict[str, float]]:
             "cross_workspace_leakage_rate": _avg([float(r.get("cross_workspace_leakage", 0)) for r in rows]),
             "tool_sensitive_blocked_rate": _avg([
                 float(r.get("tool_sensitive_blocked", 0)) for r in rows if r.get("tool_sensitive_present")
+            ]),
+            "procedural_reuse_hit_rate": _avg([
+                float(r.get("procedural_reuse_hit", 0)) for r in rows if r.get("procedural_reuse_present")
             ]),
         }
     return summary
