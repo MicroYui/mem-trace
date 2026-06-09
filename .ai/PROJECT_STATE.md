@@ -1,11 +1,29 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; P2 slices **completed-run reuse / procedural memory** and **dedup/merge + conflict resolver** implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `c383813`.
-- **Last updated:** 2026-06-09 (P2 dedup/merge + conflict resolver).
+- **Current state:** P0 + P1 complete; P2 slices **completed-run reuse / procedural memory**, **dedup/merge + conflict resolver**, and **candidate buffer / idle flush** implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `027e110`.
+- **Last updated:** 2026-06-09 (P2 candidate buffer / idle flush).
 
 ## Current Goal
 
-P2 slice "dedup/merge + conflict resolver" is implemented: the hot write path now reconciles each incoming keyed memory against same-identity (`workspace_id`+`key`+`scope`) actives — deduping equal values into one representative and resolving single-valued-key conflicts by trust→recency, with a `superseded_by` lineage column. Next milestone is review/commit, then the next P2 slice (LLM extraction / candidate buffer).
+P2 slice "candidate buffer / idle flush" is implemented: an optional `buffered` extraction mode (architecture.md §12.1) defers memory extraction off the hot write path into a session-keyed in-process buffer, flushed explicitly via `POST /v1/sessions/{session_id}/flush` or lazily at natural window boundaries (retrieve_context / finish_step / complete_run). Default stays `sync` so demo/benchmark behavior is unchanged. Next milestone is review/commit, then the remaining P2 work: LLM extraction (config-gated to preserve determinism) and optional benchmark cases 7-8 (stale rejection, no-memory baseline).
+
+## Implemented (P2 — candidate buffer / idle flush)
+
+- **`ExtractionMode` enum** (`sync` / `buffered`) in `app/runtime/models.py`; `WriteEventRequest.extraction_mode` per-request override (sync_flush for explicit corrections); `WriteEventResult.buffered` flag; new `FlushRequest`/`FlushResult` models.
+- **`CandidateBuffer`** `app/memory/candidate_buffer.py`: pure, deterministic, in-process, session-keyed FIFO of candidate events (append/pending/size/total_size/drain/sessions). Ephemeral — only holds event ids/copies; raw events already persisted to PG, so no DB table/migration is needed. Falls back to `run_id` grouping when an event has no session.
+- **Runtime wiring** `MemoryRuntime` (`app/runtime/memory_runtime.py`): constructor takes `extraction_mode` (default `sync`) + owns a `CandidateBuffer`. `write_event` buffers non-secret events in buffered mode (honoring per-request `sync` override); secrets are never buffered. New public `flush_session()` (drains + replays `_apply_write_rules` in write order, so dedup/conflict resolution stays order-correct; idempotent). Lazy `_flush_session` hooked into `retrieve_context`, `finish_step`, `rollback_branch`, and `complete_run` so deferred extraction is materialized before reads/summaries/branch-isolation.
+- **Failed-branch isolation parity:** `rollback_branch` flushes the session *before* flipping branch memories. Without this, a buffered branch's tool-evidence would stay pending and a later flush would resurrect it as a completed-branch memory; flushing first lets rollback flip it to `rolled_back`, keeping buffered-mode isolation identical to sync mode.
+- **Config/wiring**: `Settings.extraction_mode` (`app/config.py`, default `sync`); `deps.py` injects `ExtractionMode(settings.extraction_mode)` into the runtime.
+- **HTTP**: `POST /v1/sessions/{session_id}/flush` -> `FlushResult` (`app/api/routes.py`).
+- **Tests:** `tests/memory/test_candidate_buffer.py` (pure buffer: grouping, order-preserving pending, drain empties + idempotent, unknown session, session→run fallback) and `tests/runtime/test_candidate_buffer_flush.py` (buffered defers extraction but persists raw event, explicit flush extracts, flush idempotent, lazy flush on retrieve_context / finish_step, per-request sync override, secret not buffered, buffered conflict resolves in write order with lineage, rollback-before-flush isolates buffered branch memory).
+
+## Latest Verification (2026-06-09 P2 candidate buffer)
+
+- `uv run pytest -q` -> **84 passed** (was 70; +14 buffer/flush tests incl. rollback isolation).
+- Benchmark `acceptance.passed=true` (default `sync` mode unchanged; buffer is opt-in).
+- Demo re-verified: baseline_1 contamination=1, variant_2 contamination=0, contamination_eliminated=True (sync default path intact).
+- No new DB migration required (buffer is ephemeral; raw events remain the durable source of truth in PG).
+- Correctness review note: in-process buffer is single-process and not shared across workers; acceptable for the deterministic MVP (raw events are durable in PG; architecture.md defers the Redis-backed buffer to post-P2).
 
 ## Implemented (P2 — dedup/merge + conflict resolver)
 

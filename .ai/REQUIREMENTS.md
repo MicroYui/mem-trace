@@ -47,14 +47,14 @@ Per `mvp.md` §2.2 and §10, the P1 scope is now implemented:
 ```text
 apps/api/app/
   runtime/   models.py, repository.py, state_tree.py, memory_runtime.py
-  memory/    writer.py, secrets.py, summarizer.py, resolver.py
+  memory/    writer.py, secrets.py, summarizer.py, resolver.py, candidate_buffer.py
   retrieval/ similarity.py, gate.py, packer.py, profiler.py, controller.py
   benchmark/ cases.py, evaluator.py, runner.py
   storage/   orm.py, db.py, sql_repository.py
   api/       deps.py, routes.py
   demo/      run_demo.py
   config.py, main.py
-apps/api/tests/   runtime/, memory/, retrieval/, benchmark/, api/ (70 tests)
+apps/api/tests/   runtime/, memory/, retrieval/, benchmark/, api/ (84 tests)
 migrations/       env.py, versions/0001_initial.py, versions/0002_pgvector.py, versions/0003_memory_superseded_by.py
 ```
 

@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     embedding_dim: int = 256
     retrieval_token_budget: int = 512
     retrieval_timeout_ms: int = 2000
+    # Extraction freshness/latency policy (architecture.md §12.1): "sync" extracts
+    # inline on write_event (default; keeps demo/benchmark deterministic), while
+    # "buffered" defers extraction to an explicit or lazy flush.
+    extraction_mode: str = "sync"
     # Blend deterministic vector (pgvector KNN) similarity with lexical overlap.
     # When the backend lacks usable embeddings the controller falls back to
     # lexical-only scoring, so this stays safe to leave enabled.

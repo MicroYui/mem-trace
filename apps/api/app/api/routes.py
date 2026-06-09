@@ -21,6 +21,7 @@ from app.runtime.models import (
     DashboardTables,
     FinishStepRequest,
     FinishStepResult,
+    FlushResult,
     MemoryContext,
     MemoryItem,
     ProfileEvent,
@@ -95,6 +96,12 @@ async def complete_run(
         return await rt.complete_run(req)
     except RunNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/flush", response_model=FlushResult)
+async def flush_session(session_id: str, rt: MemoryRuntime = Depends(get_runtime)) -> FlushResult:
+    """Force extraction of a session's buffered candidates (architecture.md §12.1)."""
+    return await rt.flush_session(session_id)
 
 
 # --------------------------------------------------------------------------- #

@@ -9,6 +9,7 @@ from typing import Optional
 
 from app.config import get_settings
 from app.runtime.memory_runtime import MemoryRuntime
+from app.runtime.models import ExtractionMode
 from app.storage.db import make_engine, make_session_factory
 from app.storage.sql_repository import SqlRepository
 
@@ -27,6 +28,7 @@ class AppState:
             repo,
             default_workspace_id=settings.default_workspace_id,
             token_budget=settings.retrieval_token_budget,
+            extraction_mode=ExtractionMode(settings.extraction_mode),
         )
 
     async def shutdown(self) -> None:

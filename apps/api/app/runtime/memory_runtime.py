@@ -18,6 +18,7 @@ from typing import Optional
 
 from app.memory import secrets, summarizer, writer
 from app.memory import resolver
+from app.memory.candidate_buffer import CandidateBuffer
 from app.retrieval.controller import RetrievalController
 from app.runtime import state_tree
 from app.runtime.models import (
@@ -29,8 +30,10 @@ from app.runtime.models import (
     CompleteRunResult,
     DashboardTables,
     EventType,
+    ExtractionMode,
     FinishStepRequest,
     FinishStepResult,
+    FlushResult,
     MemoryContext,
     MemoryItem,
     MemoryStatus,
@@ -68,10 +71,16 @@ class MemoryRuntime:
         *,
         default_workspace_id: str = "ws_default",
         token_budget: int = 512,
+        extraction_mode: ExtractionMode = ExtractionMode.sync,
     ):
         self._repo = repo
         self._default_ws = default_workspace_id
         self._retrieval = RetrievalController(repo, default_token_budget=token_budget)
+        # Default freshness/latency policy (architecture.md §12.1). ``sync``
+        # keeps the demo/benchmark inline-extracting; ``buffered`` defers
+        # extraction to a flush. A per-event override can still force sync.
+        self._extraction_mode = extraction_mode
+        self._buffer = CandidateBuffer()
 
     # ------------------------------------------------------------------ #
     # Run / step / event lifecycle
@@ -186,8 +195,17 @@ class MemoryRuntime:
         await self._repo.add_event(event)
 
         created_ids: list[str] = []
+        buffered = False
         if not is_secret:
-            created_ids = await self._apply_write_rules(event)
+            # Secret events never produce retrievable memory and are never
+            # buffered. For non-secret events, honor the effective extraction
+            # mode: inline (sync) or defer to a flush (buffered).
+            effective_mode = request.extraction_mode or self._extraction_mode
+            if effective_mode == ExtractionMode.buffered:
+                self._buffer.append(event)
+                buffered = True
+            else:
+                created_ids = await self._apply_write_rules(event)
 
         # cache event id on the state node (denormalized; best-effort)
         if step.state_node_id:
@@ -197,12 +215,20 @@ class MemoryRuntime:
                 node.updated_at = _now()
                 await self._repo.update_state_node(node)
 
-        return WriteEventResult(event=event, created_memory_ids=created_ids)
+        return WriteEventResult(event=event, created_memory_ids=created_ids, buffered=buffered)
 
     async def finish_step(self, request: FinishStepRequest) -> FinishStepResult:
         step = await self._repo.get_step(request.step_id)
         if step is None:
             raise StepNotFoundError(request.step_id)
+
+        # finish_step is a natural window boundary: lazily flush any buffered
+        # candidates for this run's session so the step's working-state memory
+        # is written on top of an already-extracted buffer (architecture.md §12.1).
+        run = await self._repo.get_run(step.run_id)
+        if run is not None:
+            await self._flush_session(run.session_id)
+
         step.status = request.status
         step.error_message = request.error_message
         step.finished_at = _now()
@@ -233,6 +259,15 @@ class MemoryRuntime:
         step = await self._repo.get_step(request.step_id)
         if step is None:
             raise StepNotFoundError(request.step_id)
+
+        # Flush before rolling back: in buffered mode the branch's memories may
+        # still be pending extraction. Materializing them first lets rollback
+        # flip them to rolled_back, keeping failed-branch isolation identical to
+        # sync mode (otherwise a later flush would resurrect them as completed).
+        run = await self._repo.get_run(request.run_id)
+        if run is not None:
+            await self._flush_session(run.session_id)
+
         all_nodes = await self._repo.list_state_nodes(request.run_id)
         by_id = {n.node_id: n for n in all_nodes}
         target_node = by_id.get(step.state_node_id) if step.state_node_id else None
@@ -287,6 +322,10 @@ class MemoryRuntime:
         if run is None:
             raise RunNotFoundError(request.run_id)
 
+        # Drain any pending buffered candidates before summarizing so the run
+        # summary / procedural memory reflect every written event.
+        await self._flush_session(run.session_id)
+
         run.status = request.status
         run.finished_at = _now()
         run.updated_at = _now()
@@ -318,8 +357,33 @@ class MemoryRuntime:
         run = await self._repo.get_run(request.run_id)
         if run is None:
             raise RunNotFoundError(request.run_id)
+        # Lazy flush: extraction is deferred in buffered mode, so before reading
+        # context we drain this session's buffer so freshly-written events are
+        # reflected in the retrieved memory (architecture.md §12.1 "lazy").
+        await self._flush_session(run.session_id)
         ws = request.workspace_id or run.workspace_id
         return await self._retrieval.retrieve(request, workspace_id=ws)
+
+    async def flush_session(self, session_id: str) -> FlushResult:
+        """Force extraction of all buffered candidates for a session.
+
+        Backs ``POST /v1/sessions/{session_id}/flush`` (architecture.md §6 /
+        explicit flush). Safe to call in any mode: with an empty buffer it is a
+        no-op. Draining before extraction makes repeated flushes idempotent.
+        """
+        events = self._buffer.drain(session_id)
+        created: list[str] = []
+        for event in events:
+            created.extend(await self._apply_write_rules(event))
+        return FlushResult(
+            session_id=session_id,
+            processed_event_count=len(events),
+            created_memory_ids=created,
+        )
+
+    async def _flush_session(self, session_id: str) -> list[str]:
+        """Lazy-flush a session at a window boundary; returns created ids."""
+        return (await self.flush_session(session_id)).created_memory_ids
 
     # ------------------------------------------------------------------ #
     # Internal helpers

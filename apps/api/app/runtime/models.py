@@ -152,6 +152,20 @@ class ProfilePhase(str, Enum):
     context_packing = "context_packing"
 
 
+class ExtractionMode(str, Enum):
+    """Freshness-vs-latency policy for turning events into memory (architecture.md §12.1).
+
+    - ``sync``: extract inline on write_event (default; deterministic demo/benchmark).
+    - ``buffered``: append the event to a candidate buffer and defer extraction
+      until an explicit or lazy flush (a natural window boundary such as
+      retrieve_context / finish_step). Raw events are still persisted on write,
+      so the buffer only holds derivation work, never unrecoverable facts.
+    """
+
+    sync = "sync"
+    buffered = "buffered"
+
+
 # --------------------------------------------------------------------------- #
 # Domain models
 # --------------------------------------------------------------------------- #
@@ -446,11 +460,29 @@ class WriteEventRequest(_Base):
     token_input: int = 0
     token_output: int = 0
     latency_ms: int = 0
+    # Per-request override of the runtime extraction mode. ``sync`` forces inline
+    # extraction even when the runtime defaults to buffered (architecture.md
+    # §12.1 sync_flush: explicit correction / key preference). ``None`` uses the
+    # runtime default.
+    extraction_mode: Optional[ExtractionMode] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class WriteEventResult(_Base):
     event: AgentEvent
+    created_memory_ids: list[str] = Field(default_factory=list)
+    # True when the event was appended to the candidate buffer instead of being
+    # extracted inline; extraction is deferred to a flush.
+    buffered: bool = False
+
+
+class FlushRequest(_Base):
+    session_id: str
+
+
+class FlushResult(_Base):
+    session_id: str
+    processed_event_count: int = 0
     created_memory_ids: list[str] = Field(default_factory=list)
 
 
