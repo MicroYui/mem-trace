@@ -26,14 +26,14 @@ Status: implemented locally and verified on 2026-06-09.
 
 1. LLM extraction with schema validation and confidence/source-trust metadata.
 2. Candidate buffer, idle flush, and optional async worker.
-3. Dedup/merge, simple conflict resolver, superseded memory handling.
+3. Dedup/merge, simple conflict resolver, superseded memory handling. ✅ (write-path `resolver.resolve`; dedup-merge same value, trust→recency conflict resolution on single-valued keys, `superseded_by` lineage + migration `0003`; benchmark case 5)
 4. Completed run summaries and procedural memory extraction. ✅ (cold-path `complete_run` -> episodic summary + procedural memory; benchmark case 6)
 5. Elasticsearch hybrid retrieval if pgvector limits become visible.
 6. Neo4j provenance graph, richer dashboard, replay UI, OpenTelemetry integration.
 
 ## Suggested Next Coding Task
 
-Completed-run reuse / procedural memory (P2 item 4) is implemented and verified (59 tests, benchmark acceptance passes with `variant_2_reuses_procedural_memory`). Review/commit these working-tree changes, then select the next P2 slice: LLM extraction with schema validation, dedup/merge + conflict resolver, or candidate buffer / idle flush.
+Dedup/merge + conflict resolver (P2 item 3) is implemented and verified (70 tests; benchmark acceptance passes with `variant_2_excludes_superseded_memory`). Review/commit these working-tree changes, then select the next P2 slice: LLM extraction with schema validation, or candidate buffer / idle flush.
 
 ## Suggested Test Strategy
 

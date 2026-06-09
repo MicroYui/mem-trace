@@ -152,6 +152,7 @@ class MemoryORM(Base):
     embedding_vector: Mapped[list | None] = mapped_column(Vector(EMBED_DIM), nullable=True)
     risk_flags: Mapped[dict] = mapped_column(JSONB, default=dict)
     status: Mapped[str] = mapped_column(String, index=True)
+    superseded_by: Mapped[str | None] = mapped_column(String, nullable=True)
     sensitivity: Mapped[str] = mapped_column(String, default="internal")
     embedding_status: Mapped[str] = mapped_column(String, default="pending")
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

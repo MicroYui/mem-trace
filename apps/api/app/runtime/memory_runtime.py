@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.memory import secrets, summarizer, writer
+from app.memory import resolver
 from app.retrieval.controller import RetrievalController
 from app.runtime import state_tree
 from app.runtime.models import (
@@ -327,15 +328,50 @@ class MemoryRuntime:
         created: list[str] = []
         if event.event_type == EventType.message and event.role.value == "user":
             for result in writer.write_from_user_message(event):
+                # Explicit correction retires the old key first (decisive); the
+                # resolver then dedups/reconciles the incoming against whatever
+                # same-identity actives remain.
                 await self._supersede_keys(event.workspace_id, result.supersede_keys)
-                await self._repo.add_memory(result.memory)
-                created.append(result.memory.memory_id)
+                created_id = await self._resolve_and_persist(event.workspace_id, result.memory)
+                if created_id is not None:
+                    created.append(created_id)
         elif event.event_type == EventType.tool_result:
             mem = writer.write_from_tool_result(event)
             if mem is not None:
                 await self._repo.add_memory(mem)
                 created.append(mem.memory_id)
         return created
+
+    async def _resolve_and_persist(self, workspace_id: str, incoming: MemoryItem) -> Optional[str]:
+        """Dedup/merge + conflict-resolve ``incoming`` against same-identity actives.
+
+        Returns the new memory id if a fresh row was added, or ``None`` when the
+        incoming write was folded into an existing memory (deduped).
+        """
+        existing = await self._same_identity_actives(workspace_id, incoming)
+        result = resolver.resolve(incoming, existing)
+        for mem in result.updates:
+            await self._repo.update_memory(mem)
+        if result.add is not None:
+            await self._repo.add_memory(result.add)
+            return result.add.memory_id
+        return None
+
+    async def _same_identity_actives(
+        self, workspace_id: str, incoming: MemoryItem
+    ) -> list[MemoryItem]:
+        if incoming.key is None:
+            return []
+        out: list[MemoryItem] = []
+        for mem in await self._repo.list_memories(workspace_id=workspace_id):
+            if (
+                mem.status == MemoryStatus.active
+                and mem.memory_id != incoming.memory_id
+                and mem.key == incoming.key
+                and mem.scope.value == incoming.scope.value
+            ):
+                out.append(mem)
+        return out
 
     async def _supersede_keys(self, workspace_id: str, keys: list[tuple[str, str]]) -> None:
         if not keys:

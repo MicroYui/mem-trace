@@ -1,11 +1,25 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; first P2 slice (**completed-run reuse / procedural memory**) implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `a2097d2`.
-- **Last updated:** 2026-06-09 (P2 completed-run reuse / procedural memory).
+- **Current state:** P0 + P1 complete; P2 slices **completed-run reuse / procedural memory** and **dedup/merge + conflict resolver** implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `c383813`.
+- **Last updated:** 2026-06-09 (P2 dedup/merge + conflict resolver).
 
 ## Current Goal
 
-P2 slice "completed-run reuse / procedural memory" is implemented: a cold-path `complete_run` summarizes a finished run into a completed-run episodic memory plus (for successful runs) a reusable procedural memory, which a later similar run recalls as a `procedural` context block. Next milestone is review/commit, then the next P2 slice (LLM extraction / dedup-merge / conflict resolver).
+P2 slice "dedup/merge + conflict resolver" is implemented: the hot write path now reconciles each incoming keyed memory against same-identity (`workspace_id`+`key`+`scope`) actives — deduping equal values into one representative and resolving single-valued-key conflicts by trust→recency, with a `superseded_by` lineage column. Next milestone is review/commit, then the next P2 slice (LLM extraction / candidate buffer).
+
+## Implemented (P2 — dedup/merge + conflict resolver)
+
+- **`superseded_by` lineage column** added: `MemoryItem.superseded_by` (`app/runtime/models.py`), `MemoryORM.superseded_by` (`app/storage/orm.py`), `_mem_to_orm`/`_mem_from_orm` mappings (`app/storage/sql_repository.py`), and migration `0003_memory_superseded_by` (down_revision `0002_pgvector`).
+- **Resolver** `app/memory/resolver.py`: pure, deterministic, no-LLM. `resolve(incoming, existing_active) -> ResolveResult(add, updates)`. Same value (normalized) → dedup/merge into the strongest representative (union `source_event_ids`, max scores), retire other duplicates to `superseded`. Different value on a single-valued key (`project.runtime`) → conflict resolved by `trust_score` then `updated_at`; loser `superseded` with `superseded_by`=winner; a genuine tie marks both `conflicted` (gate degrades). Multi-valued keys (`project.runtime.excluded`) coexist.
+- **Runtime hook** `MemoryRuntime._apply_write_rules` (`app/runtime/memory_runtime.py`): user-message memories now flow through `_resolve_and_persist` / `_same_identity_actives`; the existing explicit-correction `_supersede_keys` path is preserved and runs first. The resolver never rewrites `content`, so embeddings never go stale.
+- **Benchmark** P2 case 5 (`case_5_explicit_correction`): user states Node then states Bun (conflicting positive prefs); the older Node preference is superseded at write time and never recalled. New evaluator metric `superseded_injection` (+`superseded_injection_present`) + summary `superseded_injection_rate` + acceptance check `variant_2_excludes_superseded_memory`.
+- **Tests:** `tests/memory/test_resolver.py` (pure-function: dedup-merge, duplicate supersede, trust/recency conflict, tie→conflicted, multi-valued coexist, lineage) and `tests/runtime/test_dedup_merge.py` (dedup to one active, conflict supersede + lineage, superseded not recalled, idempotency). Updated benchmark/dashboard counts (now 6 cases / 24 results / 8 runs / 24 accesses).
+
+## Latest Verification (2026-06-09 P2 dedup/merge)
+
+- `uv run pytest -q` -> **70 passed** (was 59; +11 resolver/dedup tests, benchmark/dashboard counts updated).
+- Benchmark `acceptance.passed=true` with new check `variant_2_excludes_superseded_memory=true`; case 5 per-strategy `superseded_injection=0` for all strategies (resolver retires the loser at write time, so it is strategy-independent).
+- Migration chain validated: `0003_memory_superseded_by` down_revision `0002_pgvector`, upgrade/downgrade callable.
 
 ## Implemented (P2 — completed-run reuse / procedural memory)
 
@@ -81,4 +95,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-Review and commit the pgvector restoration working-tree changes. After that, choose the next P2 slice (LLM extraction / conflict handling / completed-run reuse) or extend P2 benchmark cases 5-8.
+Review and commit the dedup/merge + conflict-resolver working-tree changes (incl. migration `0003`). After that, choose the next P2 slice: LLM extraction with schema validation, or candidate buffer / idle flush; optionally extend P2 benchmark cases 7-8 (stale rejection, no-memory baseline).

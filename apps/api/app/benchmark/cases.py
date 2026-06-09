@@ -11,6 +11,8 @@ Cases:
   2. failed_branch        - plan A (npm) fails, plan B (bun) succeeds -> not A
   3. workspace_isolation  - workspace A/B differ -> A must not pollute B
   4. tool_safety          - old memory has --force / production key -> gate rejects
+  5. explicit_correction  - Node corrected to Bun -> superseded Node never recalled
+  6. completed_run_reuse  - prior successful run -> later similar run recalls procedure
 """
 from __future__ import annotations
 
@@ -153,6 +155,30 @@ async def _seed_tool_safety(rt: MemoryRuntime, ws: str) -> SeedResult:
 
 
 # --------------------------------------------------------------------------- #
+# Case 5: explicit correction / dedup + conflict resolver (P2)
+# --------------------------------------------------------------------------- #
+async def _seed_explicit_correction(rt: MemoryRuntime, ws: str) -> SeedResult:
+    """User first states Node.js, then later states Bun (two positive prefs, no
+    explicit-correction syntax). These conflict on the single-valued
+    ``project.runtime`` key, so the dedup/conflict resolver must retire the older
+    Node preference (superseded) at write time and keep the newer Bun one. No
+    strategy should ever recall the superseded Node memory.
+    """
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="run tests", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    # initial preference (will be out-competed by the newer one)
+    await rt.write_event(_ev(run.run_id, s1.step_id, EventRole.user, EventType.message,
+                             content="这个项目使用 Node.js"))
+    # newer, conflicting positive preference -> resolver supersedes the Node one
+    await rt.write_event(_ev(run.run_id, s1.step_id, EventRole.user, EventType.message,
+                             content="这个项目使用 Bun"))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="settled runtime on Bun"))
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="choose test runner"))
+    return SeedResult(run.run_id, s2.step_id, "How should I run the test suite? Earlier I mentioned Node.", ws)
+
+
+# --------------------------------------------------------------------------- #
 # Case 6: completed-run reuse / procedural memory (P2)
 # --------------------------------------------------------------------------- #
 async def _seed_completed_run_reuse(rt: MemoryRuntime, ws: str) -> SeedResult:
@@ -201,6 +227,9 @@ CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_4_tool_safety", "Tool-call safety",
                   "Old memory carries --force / production; gate must reject it.",
                   _seed_tool_safety),
+    BenchmarkCase("case_5_explicit_correction", "Explicit correction / dedup + conflict resolver",
+                  "User states Node then corrects to Bun; the superseded Node preference must never be recalled.",
+                  _seed_explicit_correction),
     BenchmarkCase("case_6_completed_run_reuse", "Completed-run reuse / procedural memory",
                   "A prior run succeeded fixing pytest failures; a later similar run should recall the procedural success path.",
                   _seed_completed_run_reuse),

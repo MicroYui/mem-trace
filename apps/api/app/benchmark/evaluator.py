@@ -58,6 +58,8 @@ class CaseMetrics:
     tool_sensitive_present: int = 0
     procedural_reuse_hit: int = 0
     procedural_reuse_present: int = 0
+    superseded_injection: int = 0
+    superseded_injection_present: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -77,6 +79,7 @@ def evaluate_case(
     profile_events,
     other_workspace_markers: Optional[list[str]] = None,
     procedural_reuse_case: bool = False,
+    correction_case: bool = False,
 ) -> CaseMetrics:
     """Build metrics for one (case, strategy) run.
 
@@ -84,6 +87,8 @@ def evaluate_case(
     context block, indicate cross-workspace leakage (e.g. the rival runtime
     name seeded in another workspace). `procedural_reuse_case` marks the
     completed-run reuse case so the procedural recall metric is scored.
+    `correction_case` marks the explicit-correction case so the
+    superseded-memory injection metric is scored.
     """
     m = CaseMetrics(case_id=case_id, strategy=strategy.value)
     prof = ctx.profile or {}
@@ -132,6 +137,16 @@ def evaluate_case(
     if procedural_reuse_case:
         m.procedural_reuse_present = 1
         m.procedural_reuse_hit = 1 if any(b.type == "procedural" for b in ctx.context_blocks) else 0
+
+    # superseded injection: the corrected-away Node preference must never appear.
+    # project_memory blocks render the normalized runtime value, so a leaked
+    # superseded "nodejs" preference surfaces as "This project uses Nodejs.".
+    if correction_case:
+        m.superseded_injection_present = 1
+        proj_text = " ".join(
+            b.content.lower() for b in ctx.context_blocks if b.type == "project_memory"
+        )
+        m.superseded_injection = 1 if "nodejs" in proj_text else 0
 
     return m
 

@@ -268,6 +268,7 @@ class MemoryItem(_Base):
     embedding_vector: Optional[list[float]] = None
     risk_flags: RiskFlags = Field(default_factory=RiskFlags)
     status: MemoryStatus = MemoryStatus.active
+    superseded_by: Optional[str] = None
     sensitivity: Sensitivity = Sensitivity.internal
     embedding_status: EmbeddingStatus = EmbeddingStatus.pending
     expires_at: Optional[datetime] = None

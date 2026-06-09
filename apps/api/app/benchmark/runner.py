@@ -27,6 +27,7 @@ _METRIC_FIELDS = [
     "cross_workspace_leakage",
     "tool_sensitive_blocked",
     "procedural_reuse_hit",
+    "superseded_injection",
     "retrieval_latency_ms",
     "gate_latency_ms",
 ]
@@ -53,6 +54,9 @@ def _summarize(results: list[CaseMetrics]) -> dict[str, dict[str, float]]:
             ),
             "procedural_reuse_hit_rate": _average(
                 [r.procedural_reuse_hit for r in rows if r.procedural_reuse_present]
+            ),
+            "superseded_injection_rate": _average(
+                [r.superseded_injection for r in rows if r.superseded_injection_present]
             ),
             "avg_retrieval_latency_ms": _average([r.retrieval_latency_ms for r in rows]),
             "avg_gate_latency_ms": _average([r.gate_latency_ms for r in rows]),
@@ -93,6 +97,7 @@ async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | N
                 profile_events=profile_events,
                 other_workspace_markers=_other_workspace_markers(case),
                 procedural_reuse_case=(case.case_id == "case_6_completed_run_reuse"),
+                correction_case=(case.case_id == "case_5_explicit_correction"),
             )
         )
     return metrics
@@ -192,6 +197,9 @@ def _acceptance(summary: dict[str, dict[str, float]]) -> dict[str, Any]:
         ),
         "variant_2_reuses_procedural_memory": (
             v2.get("procedural_reuse_hit_rate", 0.0) == 1.0
+        ),
+        "variant_2_excludes_superseded_memory": (
+            v2.get("superseded_injection_rate", 1.0) == 0.0
         ),
     }
     return {"passed": all(checks.values()), "checks": checks}
