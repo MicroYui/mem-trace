@@ -17,8 +17,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.memory import secrets, summarizer, writer
-from app.memory import resolver
+from app.memory import llm_extractor, resolver
 from app.memory.candidate_buffer import CandidateBuffer
+from app.memory.llm_extractor import ExtractionProvider
 from app.retrieval.controller import RetrievalController
 from app.runtime import state_tree
 from app.runtime.models import (
@@ -64,6 +65,11 @@ class StepNotFoundError(Exception):
     pass
 
 
+class StateTreeError(Exception):
+    """Raised when the execution state tree is structurally inconsistent."""
+    pass
+
+
 class MemoryRuntime:
     def __init__(
         self,
@@ -72,6 +78,7 @@ class MemoryRuntime:
         default_workspace_id: str = "ws_default",
         token_budget: int = 512,
         extraction_mode: ExtractionMode = ExtractionMode.sync,
+        extraction_provider: Optional[ExtractionProvider] = None,
     ):
         self._repo = repo
         self._default_ws = default_workspace_id
@@ -80,6 +87,10 @@ class MemoryRuntime:
         # keeps the demo/benchmark inline-extracting; ``buffered`` defers
         # extraction to a flush. A per-event override can still force sync.
         self._extraction_mode = extraction_mode
+        # Optional config-gated LLM extraction (P2). When set, user-message
+        # extraction goes through the provider instead of the rule-based writer;
+        # ``None`` (default) keeps the deterministic writer path.
+        self._extraction_provider = extraction_provider
         self._buffer = CandidateBuffer()
 
     # ------------------------------------------------------------------ #
@@ -117,6 +128,15 @@ class MemoryRuntime:
             failed_node = nodes.get(failed_step.state_node_id) if failed_step.state_node_id else None
             if failed_node is not None:
                 parent_node = state_tree.recovery_parent(failed_node, nodes)
+                # A recovery node must attach to the failed node's parent. If the
+                # failed node has a parent_id that cannot be resolved, the tree is
+                # inconsistent; do NOT silently reattach to root (which would
+                # misplace the recovery in a multi-level tree).
+                if parent_node is None and failed_node.parent_id is not None:
+                    raise StateTreeError(
+                        f"recovery parent {failed_node.parent_id} not found for "
+                        f"failed step {request.recovery_from_step_id}"
+                    )
             branch_reason = {
                 "type": "recovery",
                 "recovery_from_step_id": request.recovery_from_step_id,
@@ -293,15 +313,22 @@ class MemoryRuntime:
             await self._repo.update_step(step)
             rolled_step_ids.append(step.step_id)
 
-        # flip related memories to rolled_back
+        # Flip related memories to rolled_back. Match by the set of rolled-back
+        # node ids; in the degenerate case where the step's node is missing but
+        # its id is known, still target that id so the step's memories are
+        # flipped. We never match on a None node id (which would wrongly catch
+        # every memory lacking a source node).
+        affected_node_ids = set(rolled_node_ids)
+        if not affected_node_ids and step.state_node_id:
+            affected_node_ids.add(step.state_node_id)
         affected_mem_ids: list[str] = []
-        node_id_set = set(rolled_node_ids)
-        for mem in await self._repo.list_memories(run_id=request.run_id):
-            if mem.source_state_node_id in node_id_set or mem.source_state_node_id == step.state_node_id:
-                mem.branch_status = BranchStatus.rolled_back
-                mem.updated_at = _now()
-                await self._repo.update_memory(mem)
-                affected_mem_ids.append(mem.memory_id)
+        if affected_node_ids:
+            for mem in await self._repo.list_memories(run_id=request.run_id):
+                if mem.source_state_node_id in affected_node_ids:
+                    mem.branch_status = BranchStatus.rolled_back
+                    mem.updated_at = _now()
+                    await self._repo.update_memory(mem)
+                    affected_mem_ids.append(mem.memory_id)
 
         return RollbackResult(
             rolled_back_step_ids=rolled_step_ids,
@@ -388,10 +415,21 @@ class MemoryRuntime:
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+    def _extract_user_message(self, event: AgentEvent) -> list[writer.MemoryWriteResult]:
+        """Config-gated extraction: LLM provider when injected, else rule writer.
+
+        Both paths return the same ``MemoryWriteResult`` contract, so the
+        downstream supersede + resolver persistence is identical.
+        """
+        if self._extraction_provider is not None:
+            candidates = self._extraction_provider.extract(event)
+            return llm_extractor.build_results(event, candidates)
+        return writer.write_from_user_message(event)
+
     async def _apply_write_rules(self, event: AgentEvent) -> list[str]:
         created: list[str] = []
         if event.event_type == EventType.message and event.role.value == "user":
-            for result in writer.write_from_user_message(event):
+            for result in self._extract_user_message(event):
                 # Explicit correction retires the old key first (decisive); the
                 # resolver then dedups/reconciles the incoming against whatever
                 # same-identity actives remain.
@@ -564,12 +602,17 @@ class MemoryRuntime:
             active_path=active_path,
         )
         profile = self._retrieval._profile_summary(access)
+        # candidates: the retrieved candidate pool ranked by relevance (the
+        # gate's input view). gate_decisions: the per-candidate admission outcome
+        # in gate-processing order (the gate's output view). Both derive from the
+        # same gate logs (one per candidate) but expose distinct orderings/intent.
+        candidates = sorted(views, key=lambda v: v.relevance_score, reverse=True)
         return AccessInspection(
             access_id=access.access_id,
             query=access.query,
             task_intent=access.task_intent,
             retrieval_strategy=access.retrieval_strategy,
-            candidates=views,
+            candidates=candidates,
             gate_decisions=views,
             context_blocks=blocks,
             profile=profile,

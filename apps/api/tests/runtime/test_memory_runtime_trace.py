@@ -156,3 +156,25 @@ async def test_rollback_flips_related_memory_branch_status(runtime):
     mems = await runtime.list_memories(run_id=run.run_id)
     tool_ev = [m for m in mems if m.memory_type.value == "tool_evidence"]
     assert tool_ev and all(m.branch_status.value == "rolled_back" for m in tool_ev)
+
+
+async def test_recovery_raises_when_failed_node_parent_is_dangling(runtime):
+    # A structurally inconsistent tree (failed node points at a missing parent)
+    # must NOT silently reattach the recovery to root; it raises StateTreeError.
+    from app.runtime.memory_runtime import StateTreeError
+
+    run = await _start(runtime)
+    failed = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="debug"))
+    await runtime.finish_step(
+        FinishStepRequest(run_id=run.run_id, step_id=failed.step_id, status=StepStatus.failed, error_message="boom")
+    )
+    # Corrupt the tree: point the failed node at a non-existent parent.
+    nodes = {n.node_id: n for n in await runtime.get_state_tree(run.run_id)}
+    failed_node = nodes[failed.state_node_id]
+    failed_node.parent_id = "node_missing"
+    await runtime._repo.update_state_node(failed_node)
+
+    with pytest.raises(StateTreeError):
+        await runtime.start_step(
+            StartStepRequest(run_id=run.run_id, intent="debug", recovery_from_step_id=failed.step_id)
+        )

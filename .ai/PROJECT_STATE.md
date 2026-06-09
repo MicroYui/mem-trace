@@ -1,11 +1,42 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; P2 slices **completed-run reuse / procedural memory**, **dedup/merge + conflict resolver**, **candidate buffer / idle flush**, and **benchmark cases 7-8 (stale rejection + no-memory baseline)** implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `1ed8655`.
-- **Last updated:** 2026-06-09 (P2 benchmark cases 7-8).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** — completed-run reuse / procedural memory, dedup/merge + conflict resolver, candidate buffer / idle flush, benchmark cases 7-8, and the **config-gated LLM extraction pipeline**. A full MVP conformance audit (mvp.md §13 acceptance list + §3/§4/§7/§8/§9) was then performed and **4 audit findings were fixed**. All implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `b7b8828`.
+- **Last updated:** 2026-06-09 (MVP audit + fixes).
 
 ## Current Goal
 
-P2 optional benchmark cases 7-8 are implemented, completing the mvp.md §10.4 case set (8/8). Case 7 (stale rejection) seeds an expired legacy API-endpoint memory: baseline_1/variant_1 inject it, variant_2's risk gate rejects it as `stale`. Case 8 (no-memory baseline) proves baseline_0 fails the task with no memory while state-aware retrieval succeeds. Next milestone is review/commit, then the remaining P2 work: LLM extraction (config-gated to preserve determinism).
+P2 is feature-complete and a full MVP audit has been completed and remediated. The remaining milestone is review/commit. The audit confirmed all 15 mvp.md §13 acceptance items pass; the only gaps found were 1 real (§11 retrieval timeout never enforced) + 3 edge/hardening issues, all now fixed.
+
+## Implemented (MVP audit fixes — 2026-06-09)
+
+- **Retrieval hot-path timeout (mvp.md §11 / §12.3):** `RetrievalController.retrieve` now wraps `_retrieve_impl` in `asyncio.wait_for(timeout=settings.retrieval_timeout_ms/1000)`; on `TimeoutError` it degrades to an empty `MemoryContext` with a "timed out" warning instead of blocking. `retrieval_timeout_ms` was previously a dead config (`controller.py`).
+- **Rollback memory-flip degenerate branch (`memory_runtime.py` `rollback_branch`):** memories are now flipped via a single `affected_node_ids` set; when the step's node is missing but its id is known it is still targeted, and matching never falls back to a `None` source-node id (which previously could either skip the flip entirely or wrongly match every memory lacking a source node). Removed the redundant `== step.state_node_id` or-clause.
+- **Recovery parent dangling reference (`memory_runtime.py` `start_step` + new `StateTreeError`):** if a failed node has a `parent_id` that cannot be resolved, recovery no longer silently reattaches to root (which would misplace it in a multi-level tree); it raises `StateTreeError`. Root-level steps (no parent) still legitimately attach to root.
+- **Access inspection candidates vs gate_decisions (`memory_runtime.py` `inspect_access`):** `candidates` is now the retrieval-input view ranked by `relevance_score`; `gate_decisions` stays the gate-output view in processing order. Both cover the same memory set but expose distinct orderings/intent (mvp.md §3.2).
+- **Tests:** `tests/runtime/test_memory_runtime_trace.py` (dangling-parent recovery raises `StateTreeError`) and `tests/retrieval/test_retrieval_flow.py` (candidates ranked by relevance + cover same set as gate_decisions; retrieve times out to empty context with warning).
+
+## Latest Verification (2026-06-09 MVP audit + fixes)
+
+- `uv run pytest -q` -> **98 passed** (was 95; +3 audit-fix tests).
+- Benchmark: **8 cases / 32 results**, `acceptance.passed=true` (deterministic path unchanged).
+- Demo re-verified: baseline_1 contamination=1, variant_2 contamination=0, contamination_eliminated=True.
+- Audit result: all 15 mvp.md §13 acceptance items ✅; §3.1 endpoints 12/12; §4 entities + 12 ORM tables covered; Alembic chain 0001→0002→0003 intact.
+
+## Implemented (P2 — LLM extraction pipeline)
+
+- **`app/memory/llm_extractor.py`** (new, pure + storage-agnostic): `ExtractionCandidate` (fixed Pydantic schema, `extra="ignore"` per architecture.md §11.4), `ExtractionProvider` Protocol, deterministic `FakeExtractionProvider` (wraps the writer rules so output is identical to the rule-based path), and `build_results(event, candidates) -> list[MemoryWriteResult]` (validates + drops invalid candidates, stable `(scope, key, value)` sort, builds `MemoryItem` with provenance + risk flags, emits `supersede_keys` when `supersede=True`).
+- **Config** (`app/config.py`): `llm_extraction_enabled: bool = False` (env `MEMTRACE_LLM_EXTRACTION_ENABLED`).
+- **Runtime** (`app/runtime/memory_runtime.py`): `__init__` takes keyword-only `extraction_provider: Optional[ExtractionProvider] = None`; new `_extract_user_message` helper branches (provider when injected, else `writer.write_from_user_message`); `_apply_write_rules` calls it. Tool_result / working_state / summarizer paths unchanged. Buffered/idle-flush path reuses `_apply_write_rules`, so the provider works under deferred extraction too.
+- **DI** (`app/api/deps.py`): injects `FakeExtractionProvider()` when enabled, else `None` (TODO marker for a real LLM client).
+- **Secret safety:** secret events are redacted and skip the whole extraction branch in `write_event` before any provider is consulted (verified by test).
+- **Tests:** `tests/memory/test_llm_extractor.py` (pure-function: schema validation, invalid/extra-field dropping, provenance, supersede_keys, deterministic ordering) and `tests/runtime/test_llm_extraction_flow.py` (provider path persists via resolver, no-provider keeps rule-based, resolver dedup, secret skips provider, provider works under buffered flush).
+
+## Latest Verification (2026-06-09 P2 LLM extraction)
+
+- `uv run pytest -q` -> **95 passed** (was 84; +11 extractor/flow tests).
+- Benchmark: **8 cases / 32 results**, `acceptance.passed=true` (default-off path unchanged).
+- Demo re-verified: baseline_1 contamination=1, variant_2 contamination=0, contamination_eliminated=True.
+- Enabled-path manual check: `MemoryRuntime(..., extraction_provider=FakeExtractionProvider())` writing "这个项目使用 Bun" produces `project.runtime=bun` via the resolver.
 
 ## Implemented (P2 — benchmark cases 7-8)
 

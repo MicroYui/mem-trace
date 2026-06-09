@@ -201,3 +201,46 @@ async def test_superseded_memory_is_not_injected(runtime):
     joined = " ".join(b.content for b in ctx.context_blocks)
     assert "uses Node" not in joined  # superseded constraint never injected
     assert "Bun" in joined
+
+
+async def test_access_candidates_ranked_by_relevance(runtime):
+    run, s3 = await _seed_bun_vs_node(runtime)
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s3.step_id, query="run tests npm test",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+    access = await runtime.inspect_access(ctx.access_id)
+    assert access is not None
+    # candidates = retrieval-input view ranked by relevance (gate-agnostic);
+    # gate_decisions = gate-output view. Both cover the same memories.
+    rels = [c.relevance_score for c in access.candidates]
+    assert rels == sorted(rels, reverse=True)
+    assert {c.memory_id for c in access.candidates} == {g.memory_id for g in access.gate_decisions}
+
+
+async def test_retrieve_times_out_to_empty_context():
+    import asyncio
+
+    repo = InMemoryRepository()
+    rt = MemoryRuntime(repo, default_workspace_id="ws_t")
+    run = await rt.start_run(StartRunRequest(session_id="s", task="t", workspace_id="ws_t"))
+    s = await rt.start_step(StartStepRequest(run_id=run.run_id))
+    await repo.add_memory(MemoryItem(workspace_id="ws_t", memory_type=MemoryType.project,
+                                     key="project.runtime", value="bun",
+                                     content="This project uses Bun", branch_status=BranchStatus.completed))
+
+    # Force a tiny timeout and make candidate selection slow.
+    rt._retrieval._timeout_ms = 1  # noqa: SLF001
+    orig = rt._retrieval._select_candidates  # noqa: SLF001
+
+    async def _slow(*args, **kwargs):
+        await asyncio.sleep(0.2)
+        return await orig(*args, **kwargs)
+
+    rt._retrieval._select_candidates = _slow  # noqa: SLF001
+    ctx = await rt.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s.step_id, query="which runtime bun",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+    assert ctx.context_blocks == []
+    assert any("timed out" in w for w in ctx.warnings)

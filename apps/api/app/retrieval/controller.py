@@ -5,6 +5,7 @@ profiler, then persists access/gate logs and returns a structured MemoryContext.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Optional
 
@@ -53,8 +54,28 @@ class RetrievalController:
         self._use_vector = settings.retrieval_use_vector
         self._vector_weight = settings.retrieval_vector_weight
         self._embed_dim = settings.embedding_dim
+        self._timeout_ms = settings.retrieval_timeout_ms
 
     async def retrieve(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
+        # Hot-path timeout (architecture.md §11 / §12.3: retrieve_context should
+        # return within ~2s). On timeout we degrade to an empty context rather
+        # than blocking the caller; the partial work is abandoned. A non-positive
+        # budget disables the guard (mainly for tests).
+        if self._timeout_ms and self._timeout_ms > 0:
+            try:
+                return await asyncio.wait_for(
+                    self._retrieve_impl(request, workspace_id=workspace_id),
+                    timeout=self._timeout_ms / 1000.0,
+                )
+            except asyncio.TimeoutError:
+                return MemoryContext(
+                    access_id=MemoryAccessLog(workspace_id=workspace_id).access_id,
+                    query=request.query,
+                    warnings=[f"retrieval timed out after {self._timeout_ms}ms; returned empty context"],
+                )
+        return await self._retrieve_impl(request, workspace_id=workspace_id)
+
+    async def _retrieve_impl(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
         budget = request.token_budget or self._default_budget
         access = MemoryAccessLog(
             workspace_id=workspace_id,
