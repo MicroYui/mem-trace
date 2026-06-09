@@ -31,9 +31,20 @@ class _RecordingProvider:
         self._candidates = candidates
         self.seen: list[str] = []
 
-    def extract(self, event):
+    async def extract(self, event):
         self.seen.append(event.content or "")
         return list(self._candidates)
+
+
+class _FailingProvider:
+    """Provider that always raises, to exercise the rule-writer fallback."""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    async def extract(self, event):
+        self.seen.append(event.content or "")
+        raise RuntimeError("LLM unavailable")
 
 
 def _runtime(provider=None, *, mode=ExtractionMode.sync) -> MemoryRuntime:
@@ -118,5 +129,18 @@ async def test_provider_path_works_under_buffered_flush():
     flushed = await rt.flush_session("s")
     assert flushed.created_memory_ids
     assert provider.seen == ["deferred"]
+    mems = await _project_memories(rt)
+    assert len(mems) == 1 and mems[0].value == "bun"
+
+
+async def test_provider_failure_falls_back_to_rule_writer():
+    provider = _FailingProvider()
+    rt = _runtime(provider)
+    run, step = await _start(rt)
+    # The provider is consulted but raises; the runtime degrades to the rule
+    # writer, which extracts the Bun constraint from the message content.
+    res = await rt.write_event(_ev(run.run_id, step.step_id, "这个项目使用 Bun"))
+    assert provider.seen == ["这个项目使用 Bun"]
+    assert res.created_memory_ids  # no memory lost on LLM failure
     mems = await _project_memories(rt)
     assert len(mems) == 1 and mems[0].value == "bun"

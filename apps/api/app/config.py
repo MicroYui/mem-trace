@@ -27,9 +27,21 @@ class Settings(BaseSettings):
     # Config-gated LLM extraction pipeline (P2). Disabled by default so demo and
     # benchmark stay fully deterministic on the rule-based writer. When enabled,
     # user-message events are turned into memory candidates by an injected
-    # ExtractionProvider (see app/memory/llm_extractor.py); deps wires a
-    # deterministic FakeExtractionProvider until a real LLM client is added.
+    # ExtractionProvider (see app/memory/llm_extractor.py); deps wires a real
+    # LLMExtractionProvider when an API key is configured, else a deterministic
+    # FakeExtractionProvider.
     llm_extraction_enabled: bool = False
+    # Real LLM provider settings (OpenAI-compatible /chat/completions). The
+    # provider is only wired when llm_extraction_enabled is True AND llm_api_key
+    # is non-empty; otherwise deps falls back to the deterministic provider.
+    # Extraction is a cold-path operation, so the timeout is more generous than
+    # the retrieval hot path. On any failure the runtime degrades to the rule
+    # writer, so these stay safe to leave at defaults.
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = "gpt-4o-mini"
+    llm_timeout_ms: int = 8000
+    llm_max_tokens: int = 512
     # Blend deterministic vector (pgvector KNN) similarity with lexical overlap.
     # When the backend lacks usable embeddings the controller falls back to
     # lexical-only scoring, so this stays safe to leave enabled.

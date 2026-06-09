@@ -13,6 +13,7 @@ State-tree invariants enforced here:
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -55,6 +56,9 @@ from app.runtime.repository import Repository
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+logger = logging.getLogger(__name__)
 
 
 class RunNotFoundError(Exception):
@@ -415,21 +419,31 @@ class MemoryRuntime:
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
-    def _extract_user_message(self, event: AgentEvent) -> list[writer.MemoryWriteResult]:
+    async def _extract_user_message(self, event: AgentEvent) -> list[writer.MemoryWriteResult]:
         """Config-gated extraction: LLM provider when injected, else rule writer.
 
         Both paths return the same ``MemoryWriteResult`` contract, so the
-        downstream supersede + resolver persistence is identical.
+        downstream supersede + resolver persistence is identical. If the LLM
+        provider raises (network/timeout/invalid JSON), we degrade to the
+        deterministic rule writer so no memory is lost (architecture.md §12).
         """
         if self._extraction_provider is not None:
-            candidates = self._extraction_provider.extract(event)
-            return llm_extractor.build_results(event, candidates)
+            try:
+                candidates = await self._extraction_provider.extract(event)
+                return llm_extractor.build_results(event, candidates)
+            except Exception:
+                logger.warning(
+                    "LLM extraction failed for event %s; falling back to rule writer",
+                    event.event_id,
+                    exc_info=True,
+                )
+                return writer.write_from_user_message(event)
         return writer.write_from_user_message(event)
 
     async def _apply_write_rules(self, event: AgentEvent) -> list[str]:
         created: list[str] = []
         if event.event_type == EventType.message and event.role.value == "user":
-            for result in self._extract_user_message(event):
+            for result in await self._extract_user_message(event):
                 # Explicit correction retires the old key first (decisive); the
                 # resolver then dedups/reconciles the incoming against whatever
                 # same-identity actives remain.

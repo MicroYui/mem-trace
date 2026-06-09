@@ -19,9 +19,9 @@ def _user_event(content: str) -> AgentEvent:
     )
 
 
-def test_fake_provider_matches_rule_based_output():
+async def test_fake_provider_matches_rule_based_output():
     provider = FakeExtractionProvider()
-    candidates = provider.extract(_user_event("这个项目使用 Bun，不用 Node.js"))
+    candidates = await provider.extract(_user_event("这个项目使用 Bun，不用 Node.js"))
     kv = {c.key: c.value for c in candidates}
     assert kv.get("project.runtime") == "bun"
     assert kv.get("project.runtime.excluded") == "nodejs"

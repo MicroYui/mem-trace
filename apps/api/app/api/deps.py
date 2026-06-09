@@ -5,14 +5,21 @@ created at startup and injected into routes.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from app.config import get_settings
-from app.memory.llm_extractor import ExtractionProvider, FakeExtractionProvider
+from app.memory.llm_extractor import (
+    ExtractionProvider,
+    FakeExtractionProvider,
+    LLMExtractionProvider,
+)
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import ExtractionMode
 from app.storage.db import make_engine, make_session_factory
 from app.storage.sql_repository import SqlRepository
+
+logger = logging.getLogger(__name__)
 
 
 class AppState:
@@ -26,11 +33,26 @@ class AppState:
         sf = make_session_factory(self.engine)
         repo = SqlRepository(sf)
         # Config-gated LLM extraction (P2). Default-off keeps demo/benchmark
-        # deterministic. The shipped provider is a deterministic placeholder;
-        # swap in a real LLM client here when one is added.
-        provider: Optional[ExtractionProvider] = (
-            FakeExtractionProvider() if settings.llm_extraction_enabled else None
-        )
+        # deterministic. When enabled with an API key we wire the real
+        # OpenAI-compatible LLMExtractionProvider; enabled without a key falls
+        # back to the deterministic FakeExtractionProvider so the pipeline still
+        # runs (and the runtime degrades to the rule writer on any LLM failure).
+        provider: Optional[ExtractionProvider] = None
+        if settings.llm_extraction_enabled:
+            if settings.llm_api_key:
+                provider = LLMExtractionProvider(
+                    api_key=settings.llm_api_key,
+                    base_url=settings.llm_base_url,
+                    model=settings.llm_model,
+                    timeout_s=settings.llm_timeout_ms / 1000,
+                    max_tokens=settings.llm_max_tokens,
+                )
+            else:
+                logger.warning(
+                    "MEMTRACE_LLM_EXTRACTION_ENABLED is set but MEMTRACE_LLM_API_KEY "
+                    "is empty; using deterministic FakeExtractionProvider."
+                )
+                provider = FakeExtractionProvider()
         self.runtime = MemoryRuntime(
             repo,
             default_workspace_id=settings.default_workspace_id,

@@ -21,9 +21,11 @@ extraction branch for secret events before any extractor is consulted.
 """
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+import json
+from typing import Any, Optional, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.memory.writer import MemoryWriteResult, detect_risk_flags, write_from_user_message
 from app.runtime.models import (
@@ -49,14 +51,14 @@ class ExtractionCandidate(BaseModel):
     memory_type: MemoryType = MemoryType.project
     scope: MemoryScope = MemoryScope.workspace
     supersede: bool = False
-    confidence: float = 0.9
+    confidence: float = Field(default=0.9, ge=0.0, le=1.0)
 
 
 @runtime_checkable
 class ExtractionProvider(Protocol):
     """Turns a single user-message event into structured memory candidates."""
 
-    def extract(self, event: AgentEvent) -> list[ExtractionCandidate]: ...
+    async def extract(self, event: AgentEvent) -> list[ExtractionCandidate]: ...
 
 
 class FakeExtractionProvider:
@@ -64,11 +66,11 @@ class FakeExtractionProvider:
 
     It reuses the deterministic ``writer`` rules so its output is identical to the
     rule-based path (fixed key/value), but routes through the schema -> result
-    conversion so the full LLM pipeline skeleton is exercised. Swap this for a real
-    LLM client later without touching the runtime.
+    conversion so the full LLM pipeline skeleton is exercised. Used as a fallback
+    when LLM extraction is enabled but no API key is configured.
     """
 
-    def extract(self, event: AgentEvent) -> list[ExtractionCandidate]:
+    async def extract(self, event: AgentEvent) -> list[ExtractionCandidate]:
         candidates: list[ExtractionCandidate] = []
         for result in write_from_user_message(event):
             mem = result.memory
@@ -85,6 +87,109 @@ class FakeExtractionProvider:
                 )
             )
         return candidates
+
+
+_SYSTEM_PROMPT = """You extract durable memory facts from a single user message in an AI coding-agent session.
+
+Return ONLY a JSON object with a single key "candidates" whose value is a JSON array.
+Each array item is an object with exactly these fields:
+- "key": a stable dotted identifier, e.g. "project.runtime", "project.runtime.excluded".
+- "value": the extracted value, e.g. "bun", "npm".
+- "memory_type": one of "project", "episodic", "procedural", "working_state". Default "project".
+- "scope": one of "workspace", "session", "run", "global". Default "workspace".
+- "supersede": true if this fact explicitly corrects/replaces a previous preference, else false.
+- "confidence": a float in [0,1].
+
+Rules:
+- Extract only durable preferences, project constraints, and explicit corrections.
+- Do NOT invent facts. If the message contains nothing durable, return {"candidates": []}.
+- Output JSON only, no prose, no markdown fences."""
+
+
+class LLMExtractionProvider:
+    """Real extraction provider backed by an OpenAI-compatible chat API.
+
+    Calls ``{base_url}/chat/completions`` with a fixed system prompt that
+    constrains the model to the :class:`ExtractionCandidate` schema. Any failure
+    (network, timeout, non-2xx, invalid JSON) raises; the runtime catches it and
+    degrades to the deterministic rule writer so no memory is lost.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = "https://api.openai.com/v1",
+        model: str = "gpt-4o-mini",
+        timeout_s: float = 8.0,
+        max_tokens: int = 512,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> None:
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+        self._timeout_s = timeout_s
+        self._max_tokens = max_tokens
+        self._client = client
+
+    async def extract(self, event: AgentEvent) -> list[ExtractionCandidate]:
+        content = (event.content or "").strip()
+        if not content:
+            return []
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            "max_tokens": self._max_tokens,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self._base_url}/chat/completions"
+
+        if self._client is not None:
+            resp = await self._client.post(url, json=payload, headers=headers)
+            data = self._parse_response(resp)
+        else:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                data = self._parse_response(resp)
+        return data
+
+    def _parse_response(self, resp: httpx.Response) -> list[ExtractionCandidate]:
+        resp.raise_for_status()
+        body = resp.json()
+        message = body["choices"][0]["message"]["content"]
+        parsed = json.loads(message)
+        raw_candidates = _extract_candidate_list(parsed)
+        # Drop individually-invalid items here (a noisy item must not fail the
+        # whole batch). build_results re-validates as the schema gate of record.
+        candidates: list[ExtractionCandidate] = []
+        for raw in raw_candidates:
+            validated = _validate(raw)
+            if validated is not None:
+                candidates.append(validated)
+        return candidates
+
+
+def _extract_candidate_list(parsed: Any) -> list[Any]:
+    """Pull the candidate array out of a model response.
+
+    Accepts either a bare JSON array or an object with a ``candidates`` array
+    (the shape the system prompt asks for).
+    """
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        candidates = parsed.get("candidates")
+        if isinstance(candidates, list):
+            return candidates
+    return []
 
 
 def _validate(raw: object) -> Optional[ExtractionCandidate]:
@@ -143,5 +248,6 @@ __all__ = [
     "ExtractionCandidate",
     "ExtractionProvider",
     "FakeExtractionProvider",
+    "LLMExtractionProvider",
     "build_results",
 ]
