@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     # inline on write_event (default; keeps demo/benchmark deterministic), while
     # "buffered" defers extraction to an explicit or lazy flush.
     extraction_mode: str = "sync"
+    # Config-gated LLM extraction pipeline (P2). Disabled by default so demo and
+    # benchmark stay fully deterministic on the rule-based writer. When enabled,
+    # user-message events are turned into memory candidates by an injected
+    # ExtractionProvider (see app/memory/llm_extractor.py); deps wires a
+    # deterministic FakeExtractionProvider until a real LLM client is added.
+    llm_extraction_enabled: bool = False
     # Blend deterministic vector (pgvector KNN) similarity with lexical overlap.
     # When the backend lacks usable embeddings the controller falls back to
     # lexical-only scoring, so this stays safe to leave enabled.
