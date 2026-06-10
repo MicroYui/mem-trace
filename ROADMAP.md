@@ -8,13 +8,13 @@
 
 ---
 
-## 0. 即时待决策 (OPEN QUESTIONS)
+## 0. 即时待决策 (OPEN QUESTIONS) — 已全部拍板 (2026-06-10)
 
-来自 `.ai/OPEN_QUESTIONS.md` §Remaining，需先拍板再动手：
+来自 `.ai/OPEN_QUESTIONS.md` §Remaining，**已按推荐方案决策完毕**（见 `.ai/DECISIONS.md` ADR-015/016/017）。此处记录结论，落地实现各归对应章节：
 
-- [ ] **真实 embedding 模型替换**：当前是确定性 hashed bag-of-words（blake2b, dim 256），相似度是 proxy。**倾向方案：保留确定性 default 作为 benchmark 基线，真实 embedding 作为可选 provider（见 §10 Provider Registry，config-gate 切换）**。出处：OPEN_Q #1 / PROJECT_STATE 风险#1 / ADR-014。
-- [ ] **Auth model**：MVP 无 API-key/workspace auth。**倾向方案：托管 demo 前做轻量 Hosted-Demo Safety Mode（API-key stub + workspace-scoped demo token + 不持久化原文 secret + demo reset + rate limit + 只读公开报告），而非完整多租户治理（后者见 §3.4）**。出处：OPEN_Q #3 / MVP_SCOPE Out-of-Scope #5。
-- [ ] **Raw secret payload**：当前 redact 后持久化、不保留原始 secret。**倾向方案：默认不存原文；若做 `raw_payload_ref` 必须加密且默认关闭**。出处：OPEN_Q #4 / architecture §6.2。
+- [x] **真实 embedding 模型替换**：**决策 = 保留确定性 hashed default 作为 benchmark 基线，真实 embedding 作为可选 config-gated `EmbeddingProvider`**（ADR-015）。实现落到 §10 Provider Registry。出处：OPEN_Q #1 / PROJECT_STATE 风险#1 / ADR-014。
+- [x] **Auth model**：**决策 = 托管 demo 前先做轻量 Hosted-Demo Safety Mode（API-key stub + workspace-scoped demo token + 不持久化原文 secret + demo reset + rate limit + 只读公开报告）；完整多租户治理仍在计划内但后置到 Phase 4**（ADR-016）。完整治理落到 §3.4。出处：OPEN_Q #3 / MVP_SCOPE Out-of-Scope #5。
+- [x] **Raw secret payload**：**决策 = 默认不存原文；若做 `raw_payload_ref` 必须加密且默认关闭，归入 Phase 4 §3.4 的 redaction 状态机**（ADR-017）。出处：OPEN_Q #4 / architecture §6.2。
 
 ---
 
@@ -75,10 +75,13 @@ architecture §6.8 / §12 / §14 Phase 4、draft §8。**大量 Cold Path 能力
 - [ ] **`memory_conflicts` 表 + conflict_scan 后台任务**：同 subject+predicate 不同 object 标记。
 - [ ] **7 条完整冲突规则**（时间覆盖、tool result 优先、provenance 解释链）。出处：architecture §6.7 / draft §1.8。
 
-### 3.4 多租户治理
+### 3.4 多租户治理（★ 计划内，后置到 Phase 4）
+
+> **状态（2026-06-10）**：完整多租户治理**已确认在计划内**，但按性价比后置到 Phase 4——这是排期决策，不是降范围（见 ADR-016）。**前置依赖**：§3.1 异步基建（Redis/Celery，用于配额计数与限流）。**先行最小切片**：托管 demo 前先做 §0 决策的「轻量 Hosted-Demo Safety Mode」（API-key stub + workspace-scoped demo token + 不存原文 secret + demo reset + rate limit + 只读公开报告），它独立、不依赖重型基建，可在 §3.1 之前单独落地。下列为完整治理项：
+
 - [ ] **API Key / JWT / workspace 权限系统**（`api_keys` 表）。
-- [ ] **多租户配额 (quota) / 限流**。
-- [ ] **字段级脱敏 / 加密存储**（当前仅 digest）+ 完整 redaction 状态机（`none/redacted/digest_only/blocked`）。
+- [ ] **多租户配额 (quota) / 限流**（依赖 §3.1 Redis）。
+- [ ] **字段级脱敏 / 加密存储**（当前仅 digest）+ 完整 redaction 状态机（`none/redacted/digest_only/blocked`）。含 ADR-017 的「`raw_payload_ref` 必须加密且默认关闭」。
 - [ ] **人工审核 memory conflict 管理后台**（admin）。**降级为远期：先做 conflict scan + conflict API + conflict table view，完整 admin workflow 后置。**
 
 ---
@@ -193,15 +196,18 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 
 ## 附：推荐推进顺序（建议）
 
-> 原则：先补「展示/可观测/可复现」与「贴合定位的 compaction」，把「重型基建/高级存储/生态入口」后置并设触发条件，**严防范围膨胀**。
+> 原则：先补「展示/可观测/可复现」与「贴合定位的 compaction」，把「重型基建/高级存储/生态入口」后置并设触发条件，**严防范围膨胀**。下列顺序覆盖 §1–§12 的全部待办；§8 为明确不做、不参与排期。
 
-1. **清立即决策**（§0）：embedding 保留确定性 default + 真实作可选 provider；auth 走轻量 Hosted-Demo Safety Mode；secret 默认不存原文。
-2. **Phase 3-A 后端可观测性**（§2）：Retrieval Replay > eval 表 > Quality/Safety profiler > 最小 HTML 报告。**最高性价比。**
-3. **展示资产**（§12）：README + 架构图 + demo/benchmark 示例 + 博客，让项目「可被理解/复现」。
-4. **Context Compaction**（§9）：packer 超预算摘要补偿先做（不依赖重型基建），再做 rolling summary + 可配置 summarizer。
-5. **Phase 3.5 SDK / Adapter**（§6）：Python SDK + LangGraph Adapter + custom-loop 示例，证明「可插拔 runtime」。
-6. **完整 6 策略对比**（§7）：逐层量化各机制收益（优先于 LoCoMo）。
-7. **Phase 4 异步基建 + 生命周期**（§3）：Redis buffer → Celery → score/decay/archive/conflict_scan → audit log。配套 §10 Provider Registry、§11 Key Ontology。
-8. **Phase 3-B 前端可视化**（§2）：Timeline → State Tree Viewer → Gate Analysis → Sankey。
-9. **Phase 5 高级存储**（§4）：仅在触发条件满足时启动。
-10. 远期/scale-only：Go/Rust、MCP/IDE 插件、TS SDK（§6）、LoCoMo（§7）。
+1. ~~**清立即决策**（§0）~~ ✅ **已完成 (2026-06-10)**：embedding 保留确定性 default + 真实作可选 provider（ADR-015）；auth 走轻量 Hosted-Demo Safety Mode（ADR-016）；secret 默认不存原文（ADR-017）。
+2. ~~**Phase 3-A 后端可观测性**（§2）~~ ✅ **已完成 (2026-06-10)**：Retrieval Replay + eval 表 + Quality/Safety profiler + 最小 JSON/MD/HTML 报告，Issues 1-8 全部完成并端到端验证。
+3. **展示资产 + 可复现基线**（§12 + §7 部分）：README + 架构图 + demo/benchmark/llm_bench 示例产物 + 博客；**前置/并行做 §7 的 Docker Compose 分层 `compose.core`（api+postgres，让 Quickstart 一条命令跑通）与 §7 集成/回归测试补全**，让项目「可被理解/复现」。**← 当前推荐下一步。**
+4. **Context Compaction**（§9 + §5/§10 协同子集）：packer 超预算摘要补偿先做（不依赖重型基建）；再做 rolling summary；**协同最小子集**：§5「completed subgoal → summary node」、§10 `SummarizerProvider` 雏形（规则/LLM 双路 config-gate）。
+5. **Phase 3.5 SDK / Adapter / CLI**（§6 前段）：Python SDK + LangGraph Adapter + custom-loop 示例，证明「可插拔 runtime」；**CLI 入口**（三入口之一）随后。
+6. **完整 6 策略对比 + benchmark 落库**（§7 主线）：no memory / long-context / vector / state-aware / +gate / +reflection 逐层量化（+reflection 依赖 §3.2）；配合 §2 eval 表把 benchmark report 落库。
+7. **Provider Registry + Key Ontology**（§10 + §11）：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移）。可与步骤 5/6 交织。
+8. **Phase 4 异步基建 + 生命周期 + 多租户治理**（§3 全段）：§3.1 Redis buffer/Celery（替换 §1 进程内 buffer）→ §3.2 Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志 → §3.3 memory_versions/conflicts 版本与冲突管理 → §3.4 API Key/JWT/quota/redaction 完整多租户治理。（托管 demo 所需的轻量 Hosted-Demo Safety Mode 可在此之前按需单独落地。）
+9. **Phase 3-B 前端可视化**（§2）：Timeline → State Tree Viewer → Gate Analysis → Sankey。
+10. **Phase 5 高级存储**（§4）：ES/Neo4j 混合检索 + 图谱 provenance + 多路融合 + Query Planner + 多跳检索，**仅在触发条件满足时启动**。
+11. **远期 / scale-only**：§5 状态树其余能力（subgoal 自动推断 / 完整 node_type / MAGE 四操作）、§6 TS SDK / OTel exporter / MCP Server / IDE 插件 / Go-Rust 组件、§7 小规模 LoCoMo/MemoryArena。**均设触发条件，不主动排期。**
+
+> **贯穿性约束（非排期项，但每一步都要遵守，来自 §1）**：① 任何新检索路径必须重新应用生命周期过滤（`_RETRIEVABLE_STATUSES`），否则泄漏退役记忆；② 切 pg16 镜像需 `docker-compose down -v`（破坏性，运维注意）；③ profiler 亚毫秒阶段读 0ms 属预期非 bug。

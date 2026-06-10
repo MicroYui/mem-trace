@@ -127,3 +127,32 @@ Sources:
   - Embeddings are backfilled at the single write chokepoint `Repository.add_memory` via `ensure_embedding`, so every stored memory (rule-written or test-seeded) is vector-searchable; benchmark fairness (identical seeded items per strategy) is preserved.
   - New protocol method `search_memories_by_vector`: InMemory uses Python cosine; SQL uses pgvector `<=>` cosine distance converted to a [0,1] similarity.
 - **Consequences:** Semantic + lexical retrieval both contribute to relevance while all existing differentiation results hold (variant_2 contamination 0.0 < baseline_1 0.25; tool-sensitive blocked; zero cross-workspace leakage). PG15 volumes are incompatible with the pg16 image, so switching requires recreating the data volume (`docker-compose down -v`). Hashed embeddings are a similarity proxy, not true semantics; swapping in a real embedding model later only requires changing `stable_embedding` (keep determinism for benchmarks or gate it behind config).
+
+## Post-P3-A Decisions (OPEN QUESTIONS resolved)
+
+### ADR-015: Keep deterministic embedding as default; real embedding is an optional config-gated provider
+
+- **Date:** 2026-06-10
+- **Status:** accepted (resolves OPEN_QUESTIONS #1; refines ADR-014)
+- **Context:** ADR-014 restored pgvector with deterministic hashed bag-of-words embeddings (blake2b, dim 256). These are a similarity proxy, not learned semantics. OPEN_QUESTIONS #1 asked whether to replace them with a real embedding model and how to keep benchmarks reproducible if so.
+- **Decision:** The deterministic hashed embedding stays the **default** and remains the benchmark/demo baseline so results stay reproducible. A real embedding model is introduced only as an **optional, config-gated `EmbeddingProvider`** under the unified Provider Registry (ROADMAP §10), mirroring the proven `LLMExtractionProvider` pattern: deterministic fallback + config-gate enablement + failure degradation. Benchmarks always select the deterministic path (provider capability metadata declares determinism), so enabling a real embedding model never breaks reproducibility.
+- **Consequences:** No change to current behavior until the provider is built. Implementation work moves to ROADMAP §10 (Provider Registry); §0 only records that the direction is now decided. Swapping in a real model touches `similarity.stable_embedding` / the new provider seam, not the retrieval pipeline.
+- **Sources:** OPEN_QUESTIONS #1, PROJECT_STATE risk #1, ADR-014, ROADMAP §0 / §10.
+
+### ADR-016: Lightweight Hosted-Demo Safety Mode first; full multi-tenant governance is planned but deferred to Phase 4
+
+- **Date:** 2026-06-10
+- **Status:** accepted (resolves OPEN_QUESTIONS #3)
+- **Context:** The MVP runs without API-key/workspace auth. OPEN_QUESTIONS #3 asked whether a stub is needed before any hosted demo. There are two distinct scopes: a minimal safety layer to expose a public demo safely, versus full multi-tenant governance (RBAC, quotas, admin review).
+- **Decision:** Before any hosted/public demo, implement a **lightweight Hosted-Demo Safety Mode** only: API-key stub + workspace-scoped demo token + no raw-secret persistence (see ADR-017) + demo reset + rate limit + read-only public reports. **Full multi-tenant governance** (API Key/JWT/workspace permission system with `api_keys` table, per-tenant quota/limiting, field-level redaction/encryption state machine, admin conflict-review workflow) **remains explicitly in the plan** but is deferred to Phase 4 (ROADMAP §3.4); it is a sequencing decision, not a descoping.
+- **Consequences:** Local/dev/benchmark continue to run with no auth. The lightweight mode is a small, self-contained slice unblocking a public demo without pulling forward heavy governance. §3.4 stays on the roadmap with a clear dependency note.
+- **Sources:** OPEN_QUESTIONS #3, MVP_SCOPE Out-of-Scope #5, ROADMAP §0 / §3.4.
+
+### ADR-017: Secrets are not persisted in raw form by default; any future raw_payload_ref must be encrypted and off by default
+
+- **Date:** 2026-06-10
+- **Status:** accepted (resolves OPEN_QUESTIONS #4)
+- **Context:** The current implementation redacts persisted content and does not preserve original secret payloads. OPEN_QUESTIONS #4 asked whether a future `raw_payload_ref` should ever store encrypted raw events.
+- **Decision:** Keep the **default of never storing raw secrets**. If a `raw_payload_ref` capability is ever added, it **must be encrypted at rest and default-off**, and it is gated behind the full redaction state machine (`none/redacted/digest_only/blocked`) in Phase 4 §3.4. The lightweight Hosted-Demo Safety Mode (ADR-016) explicitly does not persist raw secrets.
+- **Consequences:** No raw secret leakage risk in current or demo modes. Encrypted raw retention is a deliberate, opt-in, Phase 4 feature, not an implicit default.
+- **Sources:** OPEN_QUESTIONS #4, architecture.md §6.2, ROADMAP §0 / §3.4.
