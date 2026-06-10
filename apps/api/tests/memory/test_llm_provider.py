@@ -63,6 +63,38 @@ async def test_extract_parses_candidate_array():
     assert captured["url"] == "https://llm.test/v1/chat/completions"
     assert captured["auth"] == "Bearer sk-test"
     assert captured["body"]["model"] == "gpt-4o-mini"
+    # response_format is omitted by default (some endpoints reject it)
+    assert "response_format" not in captured["body"]
+
+
+async def test_response_format_sent_when_enabled():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return _chat_response([{"key": "project.runtime", "value": "bun"}])
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport, base_url="https://llm.test/v1")
+    provider = LLMExtractionProvider(
+        api_key="sk-test", base_url="https://llm.test/v1",
+        use_json_response_format=True, client=client,
+    )
+    await provider.extract(_user_event("用 Bun"))
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+
+
+async def test_extract_strips_markdown_code_fences():
+    def handler(request: httpx.Request) -> httpx.Response:
+        fenced = '```json\n{"candidates": [{"key": "project.runtime", "value": "bun"}]}\n```'
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": fenced}}]},
+        )
+
+    provider = _provider(handler)
+    candidates = await provider.extract(_user_event("用 Bun"))
+    assert [c.value for c in candidates] == ["bun"]
 
 
 async def test_extract_drops_invalid_items_but_keeps_valid():

@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_timeout_ms: int = 8000
     llm_max_tokens: int = 512
+    # Whether to send response_format=json_object. Off by default because some
+    # OpenAI-compatible endpoints reject it (e.g. certain Volcengine Ark models);
+    # the system prompt + fence-stripping parser already enforce JSON output.
+    llm_use_json_response_format: bool = False
     # Blend deterministic vector (pgvector KNN) similarity with lexical overlap.
     # When the backend lacks usable embeddings the controller falls back to
     # lexical-only scoring, so this stays safe to leave enabled.

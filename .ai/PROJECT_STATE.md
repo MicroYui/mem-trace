@@ -1,28 +1,28 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)**. The config-gated LLM extraction pipeline now ships a **real OpenAI-compatible `LLMExtractionProvider`** (httpx) in addition to the deterministic fake. `ExtractionProvider.extract` is now async; LLM failures degrade to the rule writer. All implemented and verified end-to-end. Uncommitted working-tree changes on top of commit `53c122d`.
-- **Last updated:** 2026-06-10 (real LLM extraction provider).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)**. The config-gated LLM extraction pipeline now ships a **real OpenAI-compatible `LLMExtractionProvider`** (httpx) in addition to the deterministic fake. `ExtractionProvider.extract` is now async; LLM failures degrade to the rule writer. Implemented, unit-tested, AND **live-verified against Volcengine Ark** (deepseek model). Uncommitted working-tree changes on top of commit `eced265`.
+- **Last updated:** 2026-06-10 (real LLM extraction provider + live verification).
 
 ## Current Goal
 
-Real LLM extraction is implemented and unit-verified (mocked transport; no real network in tests). Remaining: optional end-to-end live validation with a real API key (needs `MEMTRACE_LLM_API_KEY`), then review/commit.
+Real LLM extraction is implemented and both unit- and live-verified. Remaining: review/commit the response_format/fence-stripping follow-up changes.
 
 ## Implemented (real LLM extraction provider — 2026-06-10)
 
 - **Async provider Protocol (`app/memory/llm_extractor.py`):** `ExtractionProvider.extract` is now `async def`. `FakeExtractionProvider.extract` made async (logic unchanged); it is now the *fallback* when LLM extraction is enabled without an API key (no longer a "swap later" placeholder).
-- **`LLMExtractionProvider` (new, `llm_extractor.py`):** calls an OpenAI-compatible `{base_url}/chat/completions` via `httpx.AsyncClient` with a fixed system prompt (`_SYSTEM_PROMPT`) constraining output to the `ExtractionCandidate` schema (`response_format=json_object`, `temperature=0`). Accepts an injected `httpx.AsyncClient` for testing. `_extract_candidate_list` accepts either a bare array or `{"candidates": [...]}`. Individually-invalid items are dropped (`_validate`); empty content skips the call; any HTTP/JSON failure raises (caught upstream). `ExtractionCandidate.confidence` is now bound to `[0,1]` via `Field(ge=0, le=1)` so out-of-range values are dropped (architecture.md §11.4 hardening). `__all__` updated.
-- **Config (`app/config.py`):** new `llm_api_key=""`, `llm_base_url="https://api.openai.com/v1"`, `llm_model="gpt-4o-mini"`, `llm_timeout_ms=8000`, `llm_max_tokens=512` (all `MEMTRACE_` prefixed).
+- **`LLMExtractionProvider` (new, `llm_extractor.py`):** calls an OpenAI-compatible `{base_url}/chat/completions` via `httpx.AsyncClient` with a fixed system prompt (`_SYSTEM_PROMPT`) constraining output to the `ExtractionCandidate` schema (`temperature=0`). `response_format=json_object` is **opt-in** (`use_json_response_format`, default off) because some endpoints (e.g. Volcengine Ark deepseek) return 400 for it. Responses are passed through `_strip_code_fences` before `json.loads` to tolerate ```json fences. Accepts an injected `httpx.AsyncClient` for testing. `_extract_candidate_list` accepts either a bare array or `{"candidates": [...]}`. Individually-invalid items are dropped (`_validate`); empty content skips the call; any HTTP/JSON failure raises (caught upstream). `ExtractionCandidate.confidence` is bound to `[0,1]` via `Field(ge=0, le=1)` (architecture.md §11.4 hardening). `__all__` updated.
+- **Config (`app/config.py`):** new `llm_api_key=""`, `llm_base_url="https://api.openai.com/v1"`, `llm_model="gpt-4o-mini"`, `llm_timeout_ms=8000`, `llm_max_tokens=512`, `llm_use_json_response_format=False` (all `MEMTRACE_` prefixed).
 - **Runtime (`app/runtime/memory_runtime.py`):** `_extract_user_message` is now async and wraps the provider call in try/except — on any exception it logs a warning and falls back to `writer.write_from_user_message` (no memory lost, architecture.md §12). `_apply_write_rules` awaits it. Module logger added.
-- **DI (`app/api/deps.py`):** wires `LLMExtractionProvider` when `llm_extraction_enabled` AND `llm_api_key` set; enabled-but-no-key logs a warning and falls back to `FakeExtractionProvider`; default `None`.
+- **DI (`app/api/deps.py`):** wires `LLMExtractionProvider` when `llm_extraction_enabled` AND `llm_api_key` set (passing `use_json_response_format`); enabled-but-no-key logs a warning and falls back to `FakeExtractionProvider`; default `None`.
 - **Dependency (`pyproject.toml`):** `httpx>=0.27` promoted from dev to runtime dependency.
-- **Tests:** new `tests/memory/test_llm_provider.py` (httpx `MockTransport`: candidate-array parsing, request shape/auth, invalid-item dropping, extra-field ignoring, out-of-range confidence dropping, empty-content skip, HTTP 500 raises, invalid-JSON raises). Updated `tests/runtime/test_llm_extraction_flow.py` (`_RecordingProvider.extract` async; new `_FailingProvider` + `test_provider_failure_falls_back_to_rule_writer`) and `tests/memory/test_llm_extractor.py` (fake provider awaited).
+- **Tests:** new `tests/memory/test_llm_provider.py` (httpx `MockTransport`: candidate-array parsing, request shape/auth, response_format omitted-by-default + sent-when-enabled, markdown-fence stripping, invalid-item dropping, extra-field ignoring, out-of-range confidence dropping, empty-content skip, HTTP 500 raises, invalid-JSON raises). Updated `tests/runtime/test_llm_extraction_flow.py` (`_RecordingProvider.extract` async; new `_FailingProvider` + `test_provider_failure_falls_back_to_rule_writer`) and `tests/memory/test_llm_extractor.py` (fake provider awaited).
 
 ## Latest Verification (2026-06-10 real LLM extraction)
 
-- `uv run pytest -q` -> **106 passed** (was 98; +8 provider/fallback/hardening tests).
+- `uv run pytest -q` -> **108 passed** (was 98; +10 provider/fallback/hardening tests).
 - Benchmark: `acceptance.passed=true` with all 7 checks true (default-off path unchanged; LLM provider only wires when enabled + key present).
 - Code review (issue-validator): async consistency, fallback covers all LLM exceptions without memory loss, secret skipped before provider, schema hardening + forward-ref runtime-safe, httpx both paths correct, config/injection three-branch correct, no import/cycle/type issues. No functional bugs.
-- Live LLM end-to-end NOT yet run (requires `MEMTRACE_LLM_API_KEY`).
+- **Live verification (Volcengine Ark, deepseek model):** real extraction returns `project.runtime=bun` + `project.runtime.excluded=npm, node.js`; full `MemoryRuntime` path persists `project.package_manager=pnpm` as active; bad-key (401) correctly degrades to the rule writer and still writes `project.runtime=bun` (no memory lost). Found + fixed two real-endpoint issues during this run: response_format=json_object rejected (made opt-in) and JSON-in-fences tolerance.
 
 ## Implemented (MVP audit fixes — 2026-06-09)
 

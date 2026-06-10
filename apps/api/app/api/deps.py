@@ -46,6 +46,7 @@ class AppState:
                     model=settings.llm_model,
                     timeout_s=settings.llm_timeout_ms / 1000,
                     max_tokens=settings.llm_max_tokens,
+                    use_json_response_format=settings.llm_use_json_response_format,
                 )
             else:
                 logger.warning(

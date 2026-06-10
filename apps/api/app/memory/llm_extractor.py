@@ -123,6 +123,7 @@ class LLMExtractionProvider:
         model: str = "gpt-4o-mini",
         timeout_s: float = 8.0,
         max_tokens: int = 512,
+        use_json_response_format: bool = False,
         client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         self._api_key = api_key
@@ -130,13 +131,17 @@ class LLMExtractionProvider:
         self._model = model
         self._timeout_s = timeout_s
         self._max_tokens = max_tokens
+        # Not all OpenAI-compatible endpoints support response_format=json_object
+        # (e.g. some Volcengine Ark models return 400). Off by default; the system
+        # prompt already constrains the model to JSON and the parser strips fences.
+        self._use_json_response_format = use_json_response_format
         self._client = client
 
     async def extract(self, event: AgentEvent) -> list[ExtractionCandidate]:
         content = (event.content or "").strip()
         if not content:
             return []
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -144,8 +149,9 @@ class LLMExtractionProvider:
             ],
             "max_tokens": self._max_tokens,
             "temperature": 0,
-            "response_format": {"type": "json_object"},
         }
+        if self._use_json_response_format:
+            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -165,7 +171,7 @@ class LLMExtractionProvider:
         resp.raise_for_status()
         body = resp.json()
         message = body["choices"][0]["message"]["content"]
-        parsed = json.loads(message)
+        parsed = json.loads(_strip_code_fences(message))
         raw_candidates = _extract_candidate_list(parsed)
         # Drop individually-invalid items here (a noisy item must not fail the
         # whole batch). build_results re-validates as the schema gate of record.
@@ -175,6 +181,24 @@ class LLMExtractionProvider:
             if validated is not None:
                 candidates.append(validated)
         return candidates
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip a leading/trailing markdown code fence from a model response.
+
+    Models that don't honor a JSON response_format sometimes wrap JSON in
+    ```json ... ``` fences; tolerate that before json.loads.
+    """
+    s = text.strip()
+    if s.startswith("```"):
+        # drop the opening fence line (``` or ```json) and the closing fence
+        lines = s.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+    return s
 
 
 def _extract_candidate_list(parsed: Any) -> list[Any]:
