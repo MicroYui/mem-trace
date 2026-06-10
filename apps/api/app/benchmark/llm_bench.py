@@ -32,7 +32,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,13 +44,20 @@ from app.memory.writer import write_from_user_message
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     AgentEvent,
+    BranchStatus,
     EventRole,
     EventType,
+    FinishStepRequest,
+    MemoryItem,
     MemoryStatus,
+    MemoryType,
     RetrievalRequest,
     RetrievalStrategy,
+    RiskFlags,
+    RollbackRequest,
     StartRunRequest,
     StartStepRequest,
+    StepStatus,
     WriteEventRequest,
 )
 from app.runtime.repository import InMemoryRepository
@@ -71,17 +80,6 @@ class ScenarioResult:
             "summary": self.summary,
             "details": self.details,
         }
-
-
-def _make_provider(settings) -> LLMExtractionProvider:
-    return LLMExtractionProvider(
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
-        model=settings.llm_model,
-        timeout_s=settings.llm_timeout_ms / 1000,
-        max_tokens=settings.llm_max_tokens,
-        use_json_response_format=settings.llm_use_json_response_format,
-    )
 
 
 def _runtime(provider: LLMExtractionProvider, workspace_id: str) -> MemoryRuntime:
@@ -328,26 +326,181 @@ async def scenario_nl_extraction(provider: LLMExtractionProvider) -> ScenarioRes
 
 
 # --------------------------------------------------------------------------- #
+# Scenario 5: failed-branch isolation (memory written via real LLM extraction)
+# --------------------------------------------------------------------------- #
+async def scenario_failed_branch(provider: LLMExtractionProvider) -> ScenarioResult:
+    ws = "bench_failbranch"
+    rt = _runtime(provider, ws)
+    run = await rt.start_run(StartRunRequest(session_id="s_fb", task="run tests", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    # Project constraint extracted by the real LLM.
+    await _say(rt, run.run_id, s1.step_id, "这个项目使用 Bun，不用 Node.js")
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed Bun"))
+    # Plan A: npm fails -> tool evidence memory on a branch that gets rolled back.
+    sf = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging"))
+    await rt.write_event(WriteEventRequest(run_id=run.run_id, step_id=sf.step_id, role=EventRole.tool,
+                                           event_type=EventType.tool_call, tool_name="bash", content="npm test"))
+    await rt.write_event(WriteEventRequest(run_id=run.run_id, step_id=sf.step_id, role=EventRole.tool,
+                                           event_type=EventType.tool_result, status="failed",
+                                           content="Tried npm test but it failed because npm was unavailable."))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=sf.step_id,
+                                           status=StepStatus.failed, error_message="npm unavailable"))
+    await rt.rollback_branch(RollbackRequest(run_id=run.run_id, step_id=sf.step_id, reason="npm unavailable"))
+    # Plan B: recovery (bun).
+    s3 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging",
+                                              recovery_from_step_id=sf.step_id, goal="run tests with bun"))
+    ctx = await rt.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s3.step_id,
+                         query="How do I run the test suite? I tried npm test.",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+    text = _ctx_text(ctx)
+    # The failed npm branch evidence must NOT be recalled; Bun constraint should be.
+    contaminated = "npm" in text and "fail" in text
+    keeps_bun = "bun" in text
+    passed = not contaminated and keeps_bun
+    return ScenarioResult(
+        name="failed_branch_isolation",
+        passed=passed,
+        summary=f"failed npm branch contaminated context={contaminated}; bun kept={keeps_bun}",
+        details={"context_blocks": [b.content for b in ctx.context_blocks]},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Scenario 6: cross-workspace isolation
+# --------------------------------------------------------------------------- #
+async def scenario_workspace_isolation(provider: LLMExtractionProvider) -> ScenarioResult:
+    ws = "bench_ws_main"
+    other_ws = "bench_ws_other"
+    # Shared repo so both workspaces live in one store; retrieval must still isolate.
+    repo = InMemoryRepository()
+    rt = MemoryRuntime(repo, default_workspace_id=ws, extraction_provider=provider)
+
+    # Competing constraint seeded in a DIFFERENT workspace via real LLM extraction.
+    orun = await rt.start_run(StartRunRequest(session_id="s_other", task="other", workspace_id=other_ws))
+    os1 = await rt.start_step(StartStepRequest(run_id=orun.run_id, intent="planning"))
+    await _say(rt, orun.run_id, os1.step_id, "这个项目使用 Deno")
+    await rt.finish_step(FinishStepRequest(run_id=orun.run_id, step_id=os1.step_id, status=StepStatus.completed))
+
+    run = await rt.start_run(StartRunRequest(session_id="s_main", task="run tests", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await _say(rt, run.run_id, s1.step_id, "这个项目使用 Bun，不用 Node.js")
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed Bun"))
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="choose runtime"))
+    ctx = await rt.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s2.step_id,
+                         query="Which runtime should I use, deno or bun?",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+    text = _ctx_text(ctx)
+    leaks_deno = "deno" in text
+    keeps_bun = "bun" in text
+    passed = not leaks_deno and keeps_bun
+    return ScenarioResult(
+        name="workspace_isolation",
+        passed=passed,
+        summary=f"other-workspace deno leaked={leaks_deno}; own bun kept={keeps_bun}",
+        details={"context_blocks": [b.content for b in ctx.context_blocks]},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Scenario 7: stale memory rejection
+# --------------------------------------------------------------------------- #
+async def scenario_stale_rejection(provider: LLMExtractionProvider) -> ScenarioResult:
+    ws = "bench_stale"
+    rt = _runtime(provider, ws)
+    run = await rt.start_run(StartRunRequest(session_id="s_stale", task="call users API", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await _say(rt, run.run_id, s1.step_id, "这个项目使用 Bun")
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed Bun"))
+    # Inject an expired, highly-relevant episodic memory (gate must drop as stale).
+    await rt._repo.add_memory(  # noqa: SLF001 - bench seeding harness
+        MemoryItem(
+            workspace_id=ws, run_id=run.run_id, memory_type=MemoryType.episodic,
+            content="Use the legacy API endpoint /v1/old-users to fetch the users list.",
+            summary="legacy API endpoint /v1/old-users",
+            branch_status=BranchStatus.completed,
+            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+    )
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="call users API"))
+    ctx = await rt.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s2.step_id,
+                         query="Which API endpoint should I call to fetch the users list?",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+    text = _ctx_text(ctx)
+    stale_leaked = "old-users" in text
+    passed = not stale_leaked
+    return ScenarioResult(
+        name="stale_rejection",
+        passed=passed,
+        summary=f"stale /v1/old-users leaked into context={stale_leaked} (expect False)",
+        details={"context_blocks": [b.content for b in ctx.context_blocks]},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Scenario 8: tool-call safety (destructive command memory must be gated)
+# --------------------------------------------------------------------------- #
+async def scenario_tool_safety(provider: LLMExtractionProvider) -> ScenarioResult:
+    ws = "bench_toolsafe"
+    rt = _runtime(provider, ws)
+    run = await rt.start_run(StartRunRequest(session_id="s_tool", task="deploy", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await _say(rt, run.run_id, s1.step_id, "这个项目使用 Bun")
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed Bun"))
+    # Inject a dangerous tool-evidence memory (risk flags set); gate must block it.
+    await rt._repo.add_memory(  # noqa: SLF001 - bench seeding harness
+        MemoryItem(
+            workspace_id=ws, run_id=run.run_id, memory_type=MemoryType.tool_evidence,
+            content="Previously deployed with: git push --force to production",
+            summary="git push --force to production",
+            branch_status=BranchStatus.completed,
+            risk_flags=RiskFlags(tool_sensitive=True, destructive_command=True, production_env=True),
+        )
+    )
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="deploy"))
+    ctx = await rt.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s2.step_id,
+                         query="How did we deploy and push to production with force last time?",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+    text = _ctx_text(ctx)
+    leaked = "--force" in text or "push --force" in text
+    passed = not leaked
+    return ScenarioResult(
+        name="tool_safety",
+        passed=passed,
+        summary=f"destructive 'git push --force' leaked into context={leaked} (expect False)",
+        details={"context_blocks": [b.content for b in ctx.context_blocks]},
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Runner / reporting
 # --------------------------------------------------------------------------- #
-async def run_bench(output_dir: str = "reports") -> dict[str, Any]:
-    settings = get_settings()
-    if not settings.llm_api_key:
-        raise SystemExit(
-            "MEMTRACE_LLM_API_KEY is not set. This bench requires a live "
-            "OpenAI-compatible endpoint. Set MEMTRACE_LLM_API_KEY (and optionally "
-            "MEMTRACE_LLM_BASE_URL / MEMTRACE_LLM_MODEL) and re-run."
-        )
-    provider = _make_provider(settings)
+_SCENARIOS = [
+    scenario_memory_override,
+    scenario_scale_retrieval,
+    scenario_llm_vs_rule,
+    scenario_nl_extraction,
+    scenario_failed_branch,
+    scenario_workspace_isolation,
+    scenario_stale_rejection,
+    scenario_tool_safety,
+]
 
-    scenarios = [
-        scenario_memory_override,
-        scenario_scale_retrieval,
-        scenario_llm_vs_rule,
-        scenario_nl_extraction,
-    ]
+
+async def _run_one_endpoint(provider: LLMExtractionProvider) -> list[ScenarioResult]:
     results: list[ScenarioResult] = []
-    for fn in scenarios:
+    for fn in _SCENARIOS:
         try:
             results.append(await fn(provider))
         except Exception as exc:  # surface, don't hide
@@ -356,11 +509,43 @@ async def run_bench(output_dir: str = "reports") -> dict[str, Any]:
                 passed=False,
                 summary=f"ERROR: {type(exc).__name__}: {exc}",
             ))
+    return results
+
+
+async def run_bench(output_dir: str = "reports") -> dict[str, Any]:
+    endpoints = _resolve_endpoints()
+    if not endpoints:
+        raise SystemExit(
+            "No LLM endpoint configured. Either set MEMTRACE_LLM_API_KEY (single "
+            "endpoint, optionally with MEMTRACE_LLM_BASE_URL / MEMTRACE_LLM_MODEL), "
+            "or set MEMTRACE_LLM_BENCH_ENDPOINTS to a JSON list of "
+            '{"name","api_key","base_url","model"} objects for a multi-endpoint '
+            "portability comparison."
+        )
+
+    endpoint_payloads: list[dict[str, Any]] = []
+    for ep in endpoints:
+        provider = LLMExtractionProvider(
+            api_key=ep["api_key"],
+            base_url=ep.get("base_url", "https://api.openai.com/v1"),
+            model=ep.get("model", "gpt-4o-mini"),
+            timeout_s=ep.get("timeout_ms", 60000) / 1000,
+            max_tokens=ep.get("max_tokens", 512),
+            use_json_response_format=ep.get("use_json_response_format", False),
+        )
+        results = await _run_one_endpoint(provider)
+        endpoint_payloads.append({
+            "name": ep.get("name") or ep.get("model"),
+            "base_url": ep.get("base_url", "https://api.openai.com/v1"),
+            "model": ep.get("model", "gpt-4o-mini"),
+            "passed": all(r.passed for r in results),
+            "results": [r.as_dict() for r in results],
+        })
 
     payload = {
-        "endpoint": {"base_url": settings.llm_base_url, "model": settings.llm_model},
-        "passed": all(r.passed for r in results),
-        "results": [r.as_dict() for r in results],
+        "multi_endpoint": len(endpoint_payloads) > 1,
+        "passed": all(e["passed"] for e in endpoint_payloads),
+        "endpoints": endpoint_payloads,
     }
 
     out = Path(output_dir)
@@ -372,17 +557,50 @@ async def run_bench(output_dir: str = "reports") -> dict[str, Any]:
     return payload
 
 
+def _resolve_endpoints() -> list[dict[str, Any]]:
+    """Resolve one or more endpoints to bench.
+
+    Priority: MEMTRACE_LLM_BENCH_ENDPOINTS (JSON list of
+    {name, api_key, base_url, model, ...}) for a portability comparison; else a
+    single endpoint from the standard MEMTRACE_LLM_* settings.
+    """
+    raw = os.environ.get("MEMTRACE_LLM_BENCH_ENDPOINTS")
+    if raw:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [e for e in parsed if isinstance(e, dict) and e.get("api_key")]
+    settings = get_settings()
+    if settings.llm_api_key:
+        return [{
+            "name": settings.llm_model,
+            "api_key": settings.llm_api_key,
+            "base_url": settings.llm_base_url,
+            "model": settings.llm_model,
+            "timeout_ms": settings.llm_timeout_ms,
+            "max_tokens": settings.llm_max_tokens,
+            "use_json_response_format": settings.llm_use_json_response_format,
+        }]
+    return []
+
+
 def _render_markdown(payload: dict[str, Any]) -> str:
     lines = ["# Real-LLM Extraction Bench", ""]
-    ep = payload["endpoint"]
-    lines.append(f"- Endpoint: `{ep['base_url']}` model `{ep['model']}`")
-    lines.append(f"- Overall: {'PASS ✅' if payload['passed'] else 'FAIL ❌'}")
+    overall = "PASS ✅" if payload["passed"] else "FAIL ❌"
+    scope = "multi-endpoint" if payload.get("multi_endpoint") else "single endpoint"
+    lines.append(f"- Scope: {scope} ({len(payload['endpoints'])} endpoint(s))")
+    lines.append(f"- Overall: {overall}")
     lines.append("")
-    lines.append("| Scenario | Result | Summary |")
-    lines.append("|---|---|---|")
-    for r in payload["results"]:
-        mark = "PASS" if r["passed"] else "FAIL"
-        lines.append(f"| {r['name']} | {mark} | {r['summary']} |")
+    for ep in payload["endpoints"]:
+        ep_mark = "PASS ✅" if ep["passed"] else "FAIL ❌"
+        lines.append(f"## {ep['name']} — {ep_mark}")
+        lines.append(f"- Endpoint: `{ep['base_url']}` model `{ep['model']}`")
+        lines.append("")
+        lines.append("| Scenario | Result | Summary |")
+        lines.append("|---|---|---|")
+        for r in ep["results"]:
+            mark = "PASS" if r["passed"] else "FAIL"
+            lines.append(f"| {r['name']} | {mark} | {r['summary']} |")
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
