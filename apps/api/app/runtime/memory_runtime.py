@@ -21,6 +21,7 @@ from app.memory import secrets, summarizer, writer
 from app.memory import llm_extractor, resolver
 from app.memory.candidate_buffer import CandidateBuffer
 from app.memory.llm_extractor import ExtractionProvider
+from app.observability.metrics import build_observability_summary
 from app.observability.replay import RetrievalReplayService
 from app.retrieval.controller import RetrievalController
 from app.runtime import state_tree
@@ -40,6 +41,7 @@ from app.runtime.models import (
     MemoryContext,
     MemoryItem,
     MemoryStatus,
+    ObservabilitySummary,
     ReplayRetrievalResult,
     RetrievalRequest,
     RollbackRequest,
@@ -578,6 +580,12 @@ class MemoryRuntime:
     async def replay_run(self, run_id: str) -> RunReplayResult:
         """Replay every persisted retrieval access for a run without flushing buffers."""
         return await RetrievalReplayService(self._repo, self._retrieval).replay_run(run_id)
+
+    async def observability_summary(
+        self, *, workspace_id: Optional[str] = None, run_id: Optional[str] = None
+    ) -> ObservabilitySummary:
+        """Return deterministic quality/safety counters from persisted retrieval logs."""
+        return await build_observability_summary(self._repo, workspace_id=workspace_id, run_id=run_id)
 
     async def inspect_access(self, access_id: str):
         """Rebuild the full retrieval story for GET /v1/access/{access_id}.

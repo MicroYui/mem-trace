@@ -517,6 +517,28 @@ class RunReplayResult(_Base):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
+class ObservabilitySummary(_Base):
+    workspace_id: Optional[str] = None
+    run_id: Optional[str] = None
+    access_count: int = 0
+    candidate_count: int = 0
+    accepted_count: int = 0
+    rejected_count: int = 0
+    failed_branch_rejected: int = 0
+    failed_branch_injected: int = 0
+    stale_rejected: int = 0
+    stale_injected: int = 0
+    tool_sensitive_blocked: int = 0
+    destructive_command_blocked: int = 0
+    risk_blocked: int = 0
+    workspace_mismatch_rejected: int = 0
+    workspace_leakage: int = 0
+    superseded_injected: int = 0
+    avg_latency_ms: float = 0.0
+    avg_actual_tokens: float = 0.0
+    by_strategy: dict[str, dict[str, float]] = Field(default_factory=dict)
+
+
 class DashboardTables(_Base):
     """Minimal P1 table-style dashboard payload."""
 

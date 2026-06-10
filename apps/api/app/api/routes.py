@@ -24,10 +24,13 @@ from app.runtime.models import (
     FlushResult,
     MemoryContext,
     MemoryItem,
+    ObservabilitySummary,
     ProfileEvent,
+    ReplayRetrievalResult,
     RetrievalRequest,
     RollbackRequest,
     RollbackResult,
+    RunReplayResult,
     StartRunRequest,
     StartStepRequest,
     StateNode,
@@ -128,6 +131,35 @@ async def get_access(access_id: str, rt: MemoryRuntime = Depends(get_runtime)) -
     if result is None:
         raise HTTPException(status_code=404, detail="access not found")
     return result
+
+
+@router.get("/replay/access/{access_id}", response_model=ReplayRetrievalResult)
+async def replay_access(access_id: str, rt: MemoryRuntime = Depends(get_runtime)) -> ReplayRetrievalResult:
+    access = await rt._repo.get_access_log(access_id)  # noqa: SLF001 - read-through for API error mapping
+    if access is None:
+        raise HTTPException(status_code=404, detail="access not found")
+    if access.run_id is not None and await rt._repo.get_run(access.run_id) is None:  # noqa: SLF001
+        raise HTTPException(status_code=404, detail="run not found")
+    result = await rt.replay_access(access_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="access not found")
+    return result
+
+
+@router.get("/replay/runs/{run_id}", response_model=RunReplayResult)
+async def replay_run(run_id: str, rt: MemoryRuntime = Depends(get_runtime)) -> RunReplayResult:
+    if await rt._repo.get_run(run_id) is None:  # noqa: SLF001 - read-through for API error mapping
+        raise HTTPException(status_code=404, detail="run not found")
+    return await rt.replay_run(run_id)
+
+
+@router.get("/observability/summary", response_model=ObservabilitySummary)
+async def observability_summary(
+    workspace_id: Optional[str] = Query(default=None),
+    run_id: Optional[str] = Query(default=None),
+    rt: MemoryRuntime = Depends(get_runtime),
+) -> ObservabilitySummary:
+    return await rt.observability_summary(workspace_id=workspace_id, run_id=run_id)
 
 
 @router.get("/steps/{step_id}", response_model=AgentStep)

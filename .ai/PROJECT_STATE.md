@@ -1,7 +1,7 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issues 1, 2, and 3 are complete**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, and replay service + deterministic diff semantics are implemented. The next Phase 3-A slice is **Issue 4: replay/observability APIs**.
-- **Last updated:** 2026-06-10 (Phase 3-A Issue 3 implemented and verified).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issues 1, 2, 3, and 4 are complete**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, and replay/observability HTTP APIs are wired. The next Phase 3-A slice is **Issue 5: Quality/Safety metrics + profiler phase expansion**.
+- **Last updated:** 2026-06-10 (Phase 3-A Issue 4 implemented and verified).
 
 ## Current Goal
 
@@ -59,6 +59,20 @@ Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3
 - TDD RED for missing replay facade/service: `uv run --extra dev pytest apps/api/tests/observability/test_replay.py -q` initially failed on `AttributeError: 'MemoryRuntime' object has no attribute 'replay_access'` / `replay_run`.
 - Targeted regression: `uv run --extra dev pytest apps/api/tests/observability/test_replay.py apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> **23 passed**.
 - Full regression: `uv run --extra dev pytest -q` -> **125 passed**.
+
+## Implemented (Phase 3-A Issue 4 — replay/observability APIs — 2026-06-10)
+
+- **Replay APIs:** added `GET /v1/replay/access/{access_id}` returning `ReplayRetrievalResult` and `GET /v1/replay/runs/{run_id}` returning `RunReplayResult`, both backed by the existing side-effect-free replay service/runtime facade.
+- **HTTP error semantics:** missing access maps to `404 access not found`; missing original run maps to `404 run not found`; run-level replay validates the run exists before replaying its accesses.
+- **Observability summary API:** added `GET /v1/observability/summary?workspace_id=&run_id=` returning `ObservabilitySummary` with deterministic counters from persisted access/gate logs. Workspace leakage is counted from all candidate memories represented by gate logs (not only accepted memories), matching the Phase 3-A metric semantics. This is the minimal Issue 4 endpoint wiring; Issue 5 remains responsible for profiler phase expansion and broader Quality/Safety metric hardening.
+- **Tests:** added `apps/api/tests/api/test_observability.py` covering replay access/run endpoints, 404 mappings, and the summary endpoint.
+- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 4 checkboxes are ticked; `ROADMAP.md` Phase 3-A Retrieval Replay is marked complete because HTTP APIs are now wired.
+
+## Latest Verification (2026-06-10 Phase 3-A Issue 4)
+
+- TDD RED for missing API routes: `uv run pytest apps/api/tests/api/test_observability.py -q` -> **6 failed** with route-level `404 Not Found` before implementation.
+- Targeted regression: `uv run pytest apps/api/tests/api/test_observability.py apps/api/tests/observability/test_replay.py apps/api/tests/api/test_dashboard.py -q` -> **15 passed**.
+- Full regression: `uv run pytest -q` -> **132 passed**.
 
 ## Implemented (real-LLM validation bench + fixes — 2026-06-10)
 
@@ -240,4 +254,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2) is complete. Phase 3-A Issue 1 and Issue 2 are implemented and verified. **Next recommended action:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 **Issue 3: Implement replay service and diff semantics**. Reuse `RetrievalController.trace(...)` for replay, keep replay side-effect-free (no access/gate/profile writes and no memory access-count mutation), and add deterministic diff tests for unchanged repositories, decision drift, candidate added/removed, and no-side-effect guarantees. Broader recommended order remains: finish Phase 3-A backend observability, then showcase assets §12, Context Compaction §9, Phase 3.5 SDK/LangGraph adapter §6, and 6-strategy benchmark §7; heavy infra and advanced storage stay deferred.
+The MVP (P0+P1+P2) is complete. Phase 3-A Issues 1, 2, 3, and 4 are implemented and verified. **Next recommended action:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 **Issue 5: Quality/Safety metrics + profiler phase expansion**. Expand `ProfilePhase` with architecture-aligned phase names, harden reusable observability metric helpers/tests, and keep Quality/Safety metrics computed/read-only rather than writing fake `ProfileEvent` rows. Broader recommended order remains: finish Phase 3-A backend observability, then showcase assets §12, Context Compaction §9, Phase 3.5 SDK/LangGraph adapter §6, and 6-strategy benchmark §7; heavy infra and advanced storage stay deferred.

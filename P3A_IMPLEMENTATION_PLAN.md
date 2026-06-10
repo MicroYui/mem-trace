@@ -1026,6 +1026,8 @@ uv run pytest apps/api/tests/observability/test_replay.py -q
 
 ### Issue 4: Add replay and observability APIs
 
+Status: ✅ complete (2026-06-10). Targeted verification: `uv run pytest apps/api/tests/api/test_observability.py apps/api/tests/observability/test_replay.py apps/api/tests/api/test_dashboard.py -q` -> 15 passed. Full regression: `uv run pytest -q` -> 132 passed.
+
 **Files:**
 
 - Modify: `apps/api/app/api/routes.py`
@@ -1034,11 +1036,11 @@ uv run pytest apps/api/tests/observability/test_replay.py -q
 
 Steps:
 
-- [ ] Add `GET /v1/replay/access/{access_id}`.
-- [ ] Add `GET /v1/replay/runs/{run_id}`.
-- [ ] Add `GET /v1/observability/summary`.
-- [ ] Map missing access/run to HTTP 404.
-- [ ] Run:
+- [x] Add `GET /v1/replay/access/{access_id}`.
+- [x] Add `GET /v1/replay/runs/{run_id}`.
+- [x] Add `GET /v1/observability/summary`.
+- [x] Map missing access/run to HTTP 404.
+- [x] Run:
 
 ```bash
 uv run pytest apps/api/tests/api/test_observability.py -q

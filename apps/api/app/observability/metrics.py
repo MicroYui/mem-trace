@@ -1,0 +1,177 @@
+"""Deterministic observability metric helpers for Phase 3-A."""
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import datetime, timezone
+
+from app.runtime.models import (
+    BranchStatus,
+    GateDecisionType,
+    MemoryAccessLog,
+    MemoryGateLog,
+    MemoryItem,
+    MemoryStatus,
+    ObservabilitySummary,
+)
+from app.runtime.repository import Repository
+
+
+_ACCEPTED_DECISIONS = {GateDecisionType.accept, GateDecisionType.degrade, GateDecisionType.warn}
+
+
+async def build_observability_summary(
+    repo: Repository,
+    *,
+    workspace_id: str | None = None,
+    run_id: str | None = None,
+) -> ObservabilitySummary:
+    """Aggregate deterministic quality/safety counters from persisted access/gate logs."""
+    accesses = await repo.list_access_logs(workspace_id=workspace_id)
+    if run_id is not None:
+        accesses = [access for access in accesses if access.run_id == run_id]
+
+    totals = _empty_totals()
+    by_strategy_totals: dict[str, dict[str, float]] = defaultdict(_empty_totals)
+
+    for access in accesses:
+        gate_logs = await repo.list_gate_logs(access.access_id)
+        candidate_memories = await _candidate_memories(repo, gate_logs)
+        accepted_memories = await _accepted_memories(repo, gate_logs)
+        metrics = _access_quality_safety_metrics(access, gate_logs, candidate_memories, accepted_memories)
+        _add_totals(totals, metrics)
+        _add_totals(by_strategy_totals[access.retrieval_strategy.value], metrics)
+
+    return ObservabilitySummary(
+        workspace_id=workspace_id,
+        run_id=run_id,
+        access_count=int(totals["access_count"]),
+        candidate_count=int(totals["candidate_count"]),
+        accepted_count=int(totals["accepted_count"]),
+        rejected_count=int(totals["rejected_count"]),
+        failed_branch_rejected=int(totals["failed_branch_rejected"]),
+        failed_branch_injected=int(totals["failed_branch_injected"]),
+        stale_rejected=int(totals["stale_rejected"]),
+        stale_injected=int(totals["stale_injected"]),
+        tool_sensitive_blocked=int(totals["tool_sensitive_blocked"]),
+        destructive_command_blocked=int(totals["destructive_command_blocked"]),
+        risk_blocked=int(totals["risk_blocked"]),
+        workspace_mismatch_rejected=int(totals["workspace_mismatch_rejected"]),
+        workspace_leakage=int(totals["workspace_leakage"]),
+        superseded_injected=int(totals["superseded_injected"]),
+        avg_latency_ms=_avg(totals, "latency_ms"),
+        avg_actual_tokens=_avg(totals, "actual_tokens"),
+        by_strategy={strategy: _strategy_summary(values) for strategy, values in sorted(by_strategy_totals.items())},
+    )
+
+
+async def _candidate_memories(repo: Repository, gate_logs: list[MemoryGateLog]) -> list[MemoryItem]:
+    memories: list[MemoryItem] = []
+    for gate_log in gate_logs:
+        memory = await repo.get_memory(gate_log.memory_id)
+        if memory is not None:
+            memories.append(memory)
+    return memories
+
+
+async def _accepted_memories(repo: Repository, gate_logs: list[MemoryGateLog]) -> list[MemoryItem]:
+    memories: list[MemoryItem] = []
+    for gate_log in gate_logs:
+        if gate_log.decision not in _ACCEPTED_DECISIONS:
+            continue
+        memory = await repo.get_memory(gate_log.memory_id)
+        if memory is not None:
+            memories.append(memory)
+    return memories
+
+
+def _access_quality_safety_metrics(
+    access: MemoryAccessLog,
+    gate_logs: list[MemoryGateLog],
+    candidate_memories: list[MemoryItem],
+    accepted_memories: list[MemoryItem],
+) -> dict[str, float]:
+    now = datetime.now(timezone.utc)
+    return {
+        "access_count": 1.0,
+        "candidate_count": float(access.candidate_count),
+        "accepted_count": float(access.accepted_count),
+        "rejected_count": float(access.rejected_count),
+        "latency_ms": float(access.latency_ms),
+        "actual_tokens": float(access.actual_tokens),
+        "failed_branch_rejected": float(
+            sum(g.reject_reason in {"failed_branch", "rolled_back"} for g in gate_logs)
+        ),
+        "failed_branch_injected": float(
+            sum(m.branch_status in {BranchStatus.failed, BranchStatus.rolled_back} for m in accepted_memories)
+        ),
+        "stale_rejected": float(sum(g.reject_reason == "stale" for g in gate_logs)),
+        "stale_injected": float(sum(m.expires_at is not None and m.expires_at < now for m in accepted_memories)),
+        "tool_sensitive_blocked": float(sum(g.reject_reason == "tool_sensitive" for g in gate_logs)),
+        "destructive_command_blocked": float(sum(g.reject_reason == "destructive_command" for g in gate_logs)),
+        "risk_blocked": float(sum(g.reject_reason in {"tool_sensitive", "destructive_command"} for g in gate_logs)),
+        "workspace_mismatch_rejected": float(sum(g.reject_reason == "workspace_mismatch" for g in gate_logs)),
+        "workspace_leakage": float(sum(m.workspace_id != access.workspace_id for m in candidate_memories)),
+        "superseded_injected": float(sum(m.status == MemoryStatus.superseded for m in accepted_memories)),
+    }
+
+
+def _empty_totals() -> dict[str, float]:
+    return {
+        "access_count": 0.0,
+        "candidate_count": 0.0,
+        "accepted_count": 0.0,
+        "rejected_count": 0.0,
+        "latency_ms": 0.0,
+        "actual_tokens": 0.0,
+        "failed_branch_rejected": 0.0,
+        "failed_branch_injected": 0.0,
+        "stale_rejected": 0.0,
+        "stale_injected": 0.0,
+        "tool_sensitive_blocked": 0.0,
+        "destructive_command_blocked": 0.0,
+        "risk_blocked": 0.0,
+        "workspace_mismatch_rejected": 0.0,
+        "workspace_leakage": 0.0,
+        "superseded_injected": 0.0,
+    }
+
+
+def _add_totals(target: dict[str, float], metrics: dict[str, float]) -> None:
+    for key, value in metrics.items():
+        target[key] = target.get(key, 0.0) + value
+
+
+def _avg(totals: dict[str, float], key: str) -> float:
+    access_count = totals.get("access_count", 0.0)
+    if access_count == 0:
+        return 0.0
+    return round(totals.get(key, 0.0) / access_count, 6)
+
+
+def _rate(totals: dict[str, float], numerator: str) -> float:
+    access_count = totals.get("access_count", 0.0)
+    if access_count == 0:
+        return 0.0
+    return round(totals.get(numerator, 0.0) / access_count, 6)
+
+
+def _strategy_summary(totals: dict[str, float]) -> dict[str, float]:
+    access_count = totals.get("access_count", 0.0)
+    return {
+        "access_count": int(access_count),
+        "avg_candidate_count": _avg(totals, "candidate_count"),
+        "avg_accepted_count": _avg(totals, "accepted_count"),
+        "avg_rejected_count": _avg(totals, "rejected_count"),
+        "failed_branch_injection_rate": _rate(totals, "failed_branch_injected"),
+        "stale_injection_rate": _rate(totals, "stale_injected"),
+        "tool_sensitive_block_rate": _rate(totals, "tool_sensitive_blocked"),
+        "destructive_command_block_rate": _rate(totals, "destructive_command_blocked"),
+        "risk_block_rate": _rate(totals, "risk_blocked"),
+        "workspace_leakage_rate": _rate(totals, "workspace_leakage"),
+        "superseded_injection_rate": _rate(totals, "superseded_injected"),
+        "avg_latency_ms": _avg(totals, "latency_ms"),
+        "avg_actual_tokens": _avg(totals, "actual_tokens"),
+    }
+
+
+__all__ = ["build_observability_summary"]
