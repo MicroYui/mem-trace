@@ -452,6 +452,71 @@ class AccessInspection(_Base):
     profile: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReplayCandidateView(_Base):
+    memory_id: str
+    content: str = ""
+    memory_type: Optional[MemoryType] = None
+    key: Optional[str] = None
+    value: Optional[str] = None
+    status: Optional[MemoryStatus] = None
+    branch_status: Optional[BranchStatus] = None
+    sensitivity: Optional[Sensitivity] = None
+    risk_flags: RiskFlags = Field(default_factory=RiskFlags)
+    lexical_score: float = 0.0
+    vector_score: float = 0.0
+    relevance_score: float = 0.0
+    state_match_score: float = 0.0
+
+
+class ReplayGateDecisionView(_Base):
+    memory_id: str
+    layer: GateLayer
+    decision: GateDecisionType
+    reject_reason: Optional[str] = None
+    relevance_score: float = 0.0
+    state_match_score: float = 0.0
+    freshness_score: float = 0.0
+    trust_score: float = 0.0
+    risk_score: float = 0.0
+    final_score: float = 0.0
+
+
+class ReplayDiffItem(_Base):
+    kind: str
+    memory_id: Optional[str] = None
+    field: Optional[str] = None
+    original: Any = None
+    replayed: Any = None
+    severity: str = "info"
+
+
+class ReplayRetrievalResult(_Base):
+    access_id: str
+    run_id: Optional[str] = None
+    step_id: Optional[str] = None
+    workspace_id: str
+    query: Optional[str] = None
+    strategy: RetrievalStrategy
+    token_budget: int
+    top_k: int
+    original_candidates: list[ReplayCandidateView] = Field(default_factory=list)
+    original_gate_decisions: list[ReplayGateDecisionView] = Field(default_factory=list)
+    original_context_blocks_reconstructed: list[ContextBlock] = Field(default_factory=list)
+    replayed_candidates: list[ReplayCandidateView] = Field(default_factory=list)
+    replayed_gate_decisions: list[ReplayGateDecisionView] = Field(default_factory=list)
+    replayed_context_blocks: list[ContextBlock] = Field(default_factory=list)
+    diffs: list[ReplayDiffItem] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RunReplayResult(_Base):
+    run_id: str
+    access_count: int = 0
+    replayed: list[ReplayRetrievalResult] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
 class DashboardTables(_Base):
     """Minimal P1 table-style dashboard payload."""
 

@@ -1,7 +1,7 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issue 1 and Issue 2 are complete**: access-log fidelity/eval persistence schema are implemented, and retrieval now has a side-effect-free trace pipeline used by the hot path. The next Phase 3-A slice is **Issue 3: replay service + diff semantics**.
-- **Last updated:** 2026-06-10 (Phase 3-A Issue 2 implemented and verified).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issues 1, 2, and 3 are complete**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, and replay service + deterministic diff semantics are implemented. The next Phase 3-A slice is **Issue 4: replay/observability APIs**.
+- **Last updated:** 2026-06-10 (Phase 3-A Issue 3 implemented and verified).
 
 ## Current Goal
 
@@ -44,6 +44,21 @@ Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3
 - Targeted regression: `uv run pytest apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> **16 passed**.
 - Full regression: `uv run pytest -q` -> **118 passed**.
 - Deterministic benchmark: `uv run python -m app.benchmark.runner --output-dir reports`; generated `reports/benchmark_results.json` with `acceptance.passed=true`.
+
+## Implemented (Phase 3-A Issue 3 — replay service + diff semantics — 2026-06-10)
+
+- **Replay models:** added public replay response models (`ReplayCandidateView`, `ReplayGateDecisionView`, `ReplayDiffItem`, `ReplayRetrievalResult`, `RunReplayResult`) for access-level and run-level replay payloads.
+- **Replay service:** added `app.observability.replay.RetrievalReplayService`, which loads original `MemoryAccessLog` + `MemoryGateLog` evidence, reconstructs the original candidate/gate/context view, reruns `RetrievalController.trace(...)` with the original request parameters, and returns original/replayed views, warnings, access metrics, and stable-sorted diffs.
+- **Diff semantics:** implemented candidate added/removed/order drift, relevance/final/state score drift, decision/reject-reason drift, context block added/removed/order drift, token usage drift, and missing memory/run/step integrity diffs. Severity ordering is deterministic (`critical` before `warning` before `info`); dangerous rejected→accepted drifts are critical, accepted→rejected/order/score/token drifts are warnings.
+- **No-side-effect guarantee:** replay calls the side-effect-free trace pipeline directly and does not create access/gate/profile rows, does not flush buffered extraction, and does not mutate `MemoryItem.access_count`.
+- **Runtime facade:** `MemoryRuntime.replay_access(access_id)` and `MemoryRuntime.replay_run(run_id)` now expose the service for Issue 4 API wiring.
+- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 3 checkboxes and replay acceptance items are ticked/annotated; `ROADMAP.md` Phase 3-A Retrieval Replay item is annotated that service + diff semantics are complete while HTTP APIs remain pending.
+
+## Latest Verification (2026-06-10 Phase 3-A Issue 3)
+
+- TDD RED for missing replay facade/service: `uv run --extra dev pytest apps/api/tests/observability/test_replay.py -q` initially failed on `AttributeError: 'MemoryRuntime' object has no attribute 'replay_access'` / `replay_run`.
+- Targeted regression: `uv run --extra dev pytest apps/api/tests/observability/test_replay.py apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> **23 passed**.
+- Full regression: `uv run --extra dev pytest -q` -> **125 passed**.
 
 ## Implemented (real-LLM validation bench + fixes — 2026-06-10)
 

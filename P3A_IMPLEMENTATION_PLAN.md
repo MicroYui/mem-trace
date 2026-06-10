@@ -922,9 +922,9 @@ Expected:
 - [x] Alembic migration `0004_phase3a_observability.py` adds `top_k` and eval tables with downgrade. (Issue 1)
 - [x] Hot-path `retrieve_context` output remains backward compatible. (Issue 2)
 - [x] `RetrievalController.trace(...)` or equivalent side-effect-free pipeline exists and is used by both hot path and replay. (Issue 2; replay service will consume it in Issue 3)
-- [ ] Replay one access returns original view, replayed view, diffs, metrics, and warnings.
-- [ ] Replay one run aggregates all access replays for that run.
-- [ ] Replay does not create access/gate/profile rows and does not mutate memory access counts.
+- [x] Replay one access returns original view, replayed view, diffs, metrics, and warnings. (Issue 3)
+- [x] Replay one run aggregates all access replays for that run. (Issue 3)
+- [x] Replay does not create access/gate/profile rows and does not mutate memory access counts. (Issue 3)
 - [ ] Quality/safety metrics include failed branch, stale, tool-sensitive/destructive, workspace leakage, and superseded injection signals.
 - [ ] `ProfilePhase` supports architecture-aligned phase names while preserving existing phase values.
 - [ ] Dashboard tables include eval rows and observability summary without removing existing fields.
@@ -1000,6 +1000,8 @@ uv run pytest apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/re
 
 ### Issue 3: Implement replay service and diff semantics
 
+Status: ✅ complete (2026-06-10). Targeted verification: `uv run --extra dev pytest apps/api/tests/observability/test_replay.py apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> 23 passed. Full regression: `uv run --extra dev pytest -q` -> 125 passed.
+
 **Files:**
 
 - Create: `apps/api/app/observability/__init__.py`
@@ -1010,12 +1012,12 @@ uv run pytest apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/re
 
 Steps:
 
-- [ ] Add replay response models.
-- [ ] Implement `RetrievalReplayService.replay_access(access_id)`.
-- [ ] Implement `RetrievalReplayService.replay_run(run_id)`.
-- [ ] Implement deterministic diff helpers for candidates, scores, gate decisions, context blocks, token usage, and missing rows.
-- [ ] Add runtime facade methods `replay_access` and `replay_run`.
-- [ ] Prove replay has no side effects.
+- [x] Add replay response models.
+- [x] Implement `RetrievalReplayService.replay_access(access_id)`.
+- [x] Implement `RetrievalReplayService.replay_run(run_id)`.
+- [x] Implement deterministic diff helpers for candidates, scores, gate decisions, context blocks, token usage, and missing rows.
+- [x] Add runtime facade methods `replay_access` and `replay_run`.
+- [x] Prove replay has no side effects.
 - [ ] Run:
 
 ```bash
@@ -1136,4 +1138,3 @@ uv run python -m app.benchmark.runner --output-dir reports
 - [ ] Update `.ai/PROJECT_STATE.md` with completed P3-A scope, verification commands, and next recommended action.
 - [ ] Tick or annotate the completed Phase 3-A checkboxes in `ROADMAP.md`.
 - [ ] Keep generated report artifacts under ignored `reports/`; do not treat them as source unless explicitly requested.
-

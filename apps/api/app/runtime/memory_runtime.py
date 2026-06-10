@@ -21,6 +21,7 @@ from app.memory import secrets, summarizer, writer
 from app.memory import llm_extractor, resolver
 from app.memory.candidate_buffer import CandidateBuffer
 from app.memory.llm_extractor import ExtractionProvider
+from app.observability.replay import RetrievalReplayService
 from app.retrieval.controller import RetrievalController
 from app.runtime import state_tree
 from app.runtime.models import (
@@ -39,9 +40,11 @@ from app.runtime.models import (
     MemoryContext,
     MemoryItem,
     MemoryStatus,
+    ReplayRetrievalResult,
     RetrievalRequest,
     RollbackRequest,
     RollbackResult,
+    RunReplayResult,
     RunStatus,
     StartRunRequest,
     StartStepRequest,
@@ -567,6 +570,14 @@ class MemoryRuntime:
             eval_results=eval_results,
             benchmark_summary=_benchmark_summary_from_records(results),
         )
+
+    async def replay_access(self, access_id: str) -> ReplayRetrievalResult | None:
+        """Replay one persisted retrieval access without runtime side effects."""
+        return await RetrievalReplayService(self._repo, self._retrieval).replay_access(access_id)
+
+    async def replay_run(self, run_id: str) -> RunReplayResult:
+        """Replay every persisted retrieval access for a run without flushing buffers."""
+        return await RetrievalReplayService(self._repo, self._retrieval).replay_run(run_id)
 
     async def inspect_access(self, access_id: str):
         """Rebuild the full retrieval story for GET /v1/access/{access_id}.
