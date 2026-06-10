@@ -546,6 +546,20 @@ class ObservabilitySummary(_Base):
     by_strategy: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 
+class ObservabilityReportRequest(_Base):
+    workspace_id: Optional[str] = None
+    run_id: Optional[str] = None
+    output_dir: str = "reports"
+    include_replay: bool = True
+
+
+class ObservabilityReportResult(_Base):
+    json_path: str
+    markdown_path: str
+    html_path: str
+    summary: ObservabilitySummary
+
+
 class DashboardTables(_Base):
     """Minimal P1 table-style dashboard payload."""
 

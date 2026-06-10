@@ -928,10 +928,10 @@ Expected:
 - [x] Quality/safety metrics include failed branch, stale, tool-sensitive/destructive, workspace leakage, and superseded injection signals. (Issue 5)
 - [x] `ProfilePhase` supports architecture-aligned phase names while preserving existing phase values. (Issue 5)
 - [x] Dashboard tables include eval rows and observability summary without removing existing fields. (Issue 6)
-- [ ] JSON/Markdown/HTML observability reports are generated under `reports/`.
-- [ ] Unit/API/report tests cover replay, metrics, eval tables, and no-side-effect guarantees.
-- [ ] `uv run pytest -q` passes.
-- [ ] Deterministic benchmark still reports `acceptance.passed=true`.
+- [x] JSON/Markdown/HTML observability reports are generated under `reports/`. (Issue 7)
+- [x] Unit/API/report tests cover replay, metrics, eval tables, and no-side-effect guarantees. (Issues 1-7)
+- [x] `uv run pytest -q` passes. (Issue 8; 145 passed)
+- [x] Deterministic benchmark still reports `acceptance.passed=true`. (Issue 8)
 
 ## 11. Issue Breakdown
 
@@ -1095,6 +1095,8 @@ uv run pytest apps/api/tests/api/test_dashboard.py -q
 
 ### Issue 7: Generate JSON/Markdown/HTML observability reports
 
+Status: ✅ complete (2026-06-10). RED verification: `uv run pytest apps/api/tests/observability/test_reports.py -q` failed on missing `app.observability.reports`. Additional RED for module entrypoint: `uv run pytest apps/api/tests/observability/test_reports.py::test_reports_module_entrypoint_writes_empty_report -q` failed before the CLI wrote reports. Security review found and tests reproduced unsafe `reports` symlink and symlink-loop cases; both now raise `ValueError` / HTTP 400 without writing outside `reports/`. Targeted GREEN: `uv run pytest apps/api/tests/observability/test_reports.py apps/api/tests/api/test_observability.py -q` -> 15 passed. Observability regression: `uv run pytest apps/api/tests/observability/test_reports.py apps/api/tests/api/test_observability.py apps/api/tests/api/test_dashboard.py apps/api/tests/observability/test_metrics.py apps/api/tests/observability/test_replay.py -q` -> 25 passed before the CLI/symlink additions; full suite later covered all 145 tests.
+
 **Files:**
 
 - Create: `apps/api/app/observability/reports.py`
@@ -1105,19 +1107,21 @@ uv run pytest apps/api/tests/api/test_dashboard.py -q
 
 Steps:
 
-- [ ] Add report request/result models.
-- [ ] Implement JSON report writer.
-- [ ] Implement Markdown report renderer.
-- [ ] Implement static HTML report renderer with inline CSS only.
-- [ ] Add API endpoint `POST /v1/observability/reports`.
-- [ ] Ensure output paths stay under the requested output directory and default to `reports`.
-- [ ] Run:
+- [x] Add report request/result models.
+- [x] Implement JSON report writer.
+- [x] Implement Markdown report renderer.
+- [x] Implement static HTML report renderer with inline CSS only.
+- [x] Add API endpoint `POST /v1/observability/reports`.
+- [x] Ensure output paths stay under the requested output directory and default to `reports`.
+- [x] Run:
 
 ```bash
 uv run pytest apps/api/tests/observability/test_reports.py apps/api/tests/api/test_observability.py -q
 ```
 
 ### Issue 8: Full regression, benchmark, and project-memory sync
+
+Status: ✅ complete (2026-06-10). Full regression: `uv run pytest -q` -> 145 passed. Deterministic benchmark: `uv run python -m app.benchmark.runner --output-dir reports`; `reports/benchmark_results.json` has `acceptance.passed=true` and all 7 acceptance checks true. Generated report artifacts remain ignored under `reports/`.
 
 **Files:**
 
@@ -1128,19 +1132,19 @@ uv run pytest apps/api/tests/observability/test_reports.py apps/api/tests/api/te
 
 Steps:
 
-- [ ] Run full test suite:
+- [x] Run full test suite:
 
 ```bash
 uv run pytest -q
 ```
 
-- [ ] Run deterministic benchmark:
+- [x] Run deterministic benchmark:
 
 ```bash
 uv run python -m app.benchmark.runner --output-dir reports
 ```
 
-- [ ] Verify benchmark JSON has `acceptance.passed=true`.
-- [ ] Update `.ai/PROJECT_STATE.md` with completed P3-A scope, verification commands, and next recommended action.
-- [ ] Tick or annotate the completed Phase 3-A checkboxes in `ROADMAP.md`.
-- [ ] Keep generated report artifacts under ignored `reports/`; do not treat them as source unless explicitly requested.
+- [x] Verify benchmark JSON has `acceptance.passed=true`.
+- [x] Update `.ai/PROJECT_STATE.md` with completed P3-A scope, verification commands, and next recommended action.
+- [x] Tick or annotate the completed Phase 3-A checkboxes in `ROADMAP.md`.
+- [x] Keep generated report artifacts under ignored `reports/`; do not treat them as source unless explicitly requested.

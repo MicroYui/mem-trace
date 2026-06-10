@@ -24,6 +24,8 @@ from app.runtime.models import (
     FlushResult,
     MemoryContext,
     MemoryItem,
+    ObservabilityReportRequest,
+    ObservabilityReportResult,
     ObservabilitySummary,
     ProfileEvent,
     ReplayRetrievalResult,
@@ -160,6 +162,17 @@ async def observability_summary(
     rt: MemoryRuntime = Depends(get_runtime),
 ) -> ObservabilitySummary:
     return await rt.observability_summary(workspace_id=workspace_id, run_id=run_id)
+
+
+@router.post("/observability/reports", response_model=ObservabilityReportResult)
+async def write_observability_report(
+    req: ObservabilityReportRequest,
+    rt: MemoryRuntime = Depends(get_runtime),
+) -> ObservabilityReportResult:
+    try:
+        return await rt.write_observability_report(req)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/steps/{step_id}", response_model=AgentStep)

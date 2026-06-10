@@ -1,7 +1,7 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issues 1, 2, 3, 4, 5, and 6 are complete**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, quality/safety metrics + profiler phase expansion are implemented, and dashboard tables now include eval rows plus a workspace-scoped observability summary. The next Phase 3-A slice is **Issue 7: JSON/Markdown/HTML observability reports**.
-- **Last updated:** 2026-06-10 (Phase 3-A Issue 6 implemented and verified).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, quality/safety metrics + profiler phase expansion are implemented, dashboard tables include eval rows plus a workspace-scoped observability summary, static JSON/Markdown/HTML observability reports are generated through the runtime/API/CLI entrypoint, and full regression + deterministic benchmark pass. The next recommended work is outside Phase 3-A: showcase assets (§12), Context Compaction (§9), Phase 3.5 SDK/LangGraph adapter (§6), or 6-strategy benchmark expansion (§7) per `ROADMAP.md` priority.
+- **Last updated:** 2026-06-10 (Phase 3-A Issue 8 full regression/benchmark/project-memory sync complete).
 
 ## Current Goal
 
@@ -102,6 +102,38 @@ Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3
 - Targeted regression: `uv run --extra dev pytest apps/api/tests/api/test_dashboard.py apps/api/tests/api/test_observability.py apps/api/tests/observability/test_eval_records.py apps/api/tests/observability/test_metrics.py -q` -> **17 passed**.
 - Full regression: `uv run --extra dev pytest -q` -> **137 passed**.
 - Deterministic benchmark: `uv run --extra dev python -m app.benchmark.runner --output-dir reports`; generated `reports/benchmark_results.json` with `acceptance.passed=true`.
+
+## Implemented (Phase 3-A Issue 7 — JSON/Markdown/HTML observability reports — 2026-06-10)
+
+- **Report models:** `ObservabilityReportRequest` and `ObservabilityReportResult` added to the runtime API model vocabulary.
+- **Report writer:** `app.observability.reports.write_observability_report(...)` writes deterministic `observability_report.json`, `observability_report.md`, and `observability_report.html` artifacts under a safe `reports/`-scoped output directory. JSON includes summary, access rows, per-access metrics, critical drift counts, context block counts, and optional replay payloads. Markdown includes Summary, Strategy Breakdown, Quality Signals, Safety Signals, Slowest Accesses, Replay Drift, and Access Details with concrete replay access commands. HTML is a single static inline-CSS file with summary cards, strategy table, quality/safety table, replay drift table, and per-access `<details>` sections; no external JS/CDN is used.
+- **Runtime/API/CLI wiring:** `MemoryRuntime.write_observability_report(...)` exposes the writer, `POST /v1/observability/reports` returns generated paths plus summary, and `uv run python -m app.observability.reports --output-dir reports` writes an in-memory empty report fixture for local smoke checks. Unsafe output directories (absolute paths, `..`, or paths outside `reports/`) map to HTTP 400.
+- **Read-only diagnostics:** report generation reads persisted access/gate logs and uses `RetrievalReplayService` for optional side-effect-free replay; it does not create access/gate/profile rows and does not mutate memory access counters.
+- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 7 checkboxes are ticked; `ROADMAP.md` minimal dashboard/static report item is marked complete.
+
+## Latest Verification (2026-06-10 Phase 3-A Issue 7)
+
+- TDD RED: `uv run pytest apps/api/tests/observability/test_reports.py -q` failed as expected on missing `app.observability.reports`.
+- Additional RED for the module entrypoint: `uv run pytest apps/api/tests/observability/test_reports.py::test_reports_module_entrypoint_writes_empty_report -q` failed before the CLI wrote reports.
+- Security review found unsafe symlink edge cases; RED tests reproduced `reports -> outside` and `reports -> reports` symlink-loop behavior before the fix. `_safe_output_dir(...)` now rejects existing symlink path components and converts unsafe resolution failures into `ValueError`, so API maps them to HTTP 400.
+- Targeted GREEN: `uv run pytest apps/api/tests/observability/test_reports.py apps/api/tests/api/test_observability.py -q` -> **15 passed**.
+- Observability regression: `uv run pytest apps/api/tests/observability/test_reports.py apps/api/tests/api/test_observability.py apps/api/tests/api/test_dashboard.py apps/api/tests/observability/test_metrics.py apps/api/tests/observability/test_replay.py -q` -> **25 passed**.
+- Code review: issue-validator reviewed report generation, API wiring, safety checks, and tests; **0 defects** found.
+
+## Implemented (Phase 3-A Issue 8 — full regression, benchmark, and project-memory sync — 2026-06-10)
+
+- **Full regression:** `uv run pytest -q` -> **145 passed** after Issue 7 report/API/CLI/symlink-safety implementation.
+- **Deterministic benchmark:** `uv run python -m app.benchmark.runner --output-dir reports`; `reports/benchmark_results.json` has `acceptance.passed=true` and all 7 checks true (`variant_2_contamination_below_baseline_1`, zero cross-workspace leakage, tool-sensitive block, procedural reuse, superseded exclusion, stale exclusion, no-memory baseline failure recovery).
+- **Generated artifacts:** benchmark and observability report artifacts remain under ignored `reports/`; they are reproducible outputs and are not source-controlled.
+- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` acceptance checklist and Issue 8 checkboxes are ticked; `.ai/REQUIREMENTS.md`, `.ai/IMPLEMENTATION_PLAN.md`, and `ROADMAP.md` now show Phase 3-A complete and point to post-P3A priorities.
+
+## Latest Verification (2026-06-10 Phase 3-A complete)
+
+- `uv run pytest apps/api/tests/observability/test_reports.py::test_reports_module_entrypoint_writes_empty_report -q` -> **1 passed**.
+- `uv run pytest apps/api/tests/observability/test_reports.py::test_report_writer_rejects_symlink_loop_as_value_error apps/api/tests/observability/test_reports.py::test_report_writer_rejects_reports_symlink -q` -> **2 passed**.
+- `uv run pytest apps/api/tests/observability/test_reports.py apps/api/tests/api/test_observability.py -q` -> **15 passed**.
+- `uv run pytest -q` -> **145 passed**.
+- `uv run python -m app.benchmark.runner --output-dir reports`; `reports/benchmark_results.json` -> `acceptance.passed=true`.
 
 ## Implemented (real-LLM validation bench + fixes — 2026-06-10)
 
@@ -283,4 +315,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2) is complete. Phase 3-A Issues 1, 2, 3, 4, and 5 are implemented and verified. **Next recommended action:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 **Issue 6: dashboard table extension**. Include `observability_summary` in `DashboardTables` while preserving existing runs/accesses/profile/benchmark/eval rows and counts. Broader recommended order remains: finish Phase 3-A backend observability, then showcase assets §12, Context Compaction §9, Phase 3.5 SDK/LangGraph adapter §6, and 6-strategy benchmark §7; heavy infra and advanced storage stay deferred.
+The MVP (P0+P1+P2) and Phase 3-A backend observability are complete. Recommended next work per `ROADMAP.md`: showcase assets (§12: README architecture/quickstart/demo artifacts/blog), then Context Compaction (§9), Phase 3.5 Python SDK/LangGraph adapter (§6), and 6-strategy benchmark expansion (§7). Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), and React dashboard remain deferred until those priorities are stable.

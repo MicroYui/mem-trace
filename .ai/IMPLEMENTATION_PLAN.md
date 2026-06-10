@@ -35,23 +35,18 @@ Status: complete (6/6), verified on 2026-06-10.
 
 ## Next Coding Task
 
-MVP (P0+P1+P2) is complete and committed. The selected next slice is
-**Phase 3-A backend observability**, with the detailed implementation plan in
-**`P3A_IMPLEMENTATION_PLAN.md`** at the repo root.
+MVP (P0+P1+P2) is complete and committed. **Phase 3-A backend observability is complete (Issues 1-8, verified on 2026-06-10)**:
 
-Implement `P3A_IMPLEMENTATION_PLAN.md` §11 issue-by-issue:
+1. access fidelity + eval persistence schema; ✅ complete
+2. side-effect-free retrieval trace pipeline; ✅ complete
+3. replay service + diff semantics; ✅ complete
+4. replay/observability APIs; ✅ complete
+5. Quality/Safety metrics + profiler phase expansion; ✅ complete
+6. dashboard table extension; ✅ complete
+7. JSON/Markdown/HTML observability reports; ✅ complete
+8. full regression, benchmark, and project-memory sync; ✅ complete (`uv run pytest -q` -> 145 passed; benchmark `acceptance.passed=true`)
 
-1. access fidelity + eval persistence schema; ✅ complete (2026-06-10)
-2. side-effect-free retrieval trace pipeline; ✅ complete (2026-06-10)
-3. replay service + diff semantics; ✅ complete (2026-06-10)
-4. replay/observability APIs; ✅ complete (2026-06-10)
-5. Quality/Safety metrics + profiler phase expansion; ✅ complete (2026-06-10)
-6. dashboard table extension; ✅ complete (2026-06-10)
-7. JSON/Markdown/HTML observability reports; ⬅ next
-8. full regression, benchmark, and project-memory sync.
-
-**Maintenance rule:** after completing each Issue, update `.ai/PROJECT_STATE.md`
-and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox.
+Select the next implementation slice from `ROADMAP.md` post-P3A priorities: showcase assets (§12), Context Compaction (§9), Phase 3.5 SDK/LangGraph adapter (§6), or 6-strategy benchmark expansion (§7). Heavy infra and advanced storage remain deferred.
 
 ## Suggested Test Strategy
 

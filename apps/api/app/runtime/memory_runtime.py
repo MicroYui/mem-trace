@@ -23,6 +23,7 @@ from app.memory.candidate_buffer import CandidateBuffer
 from app.memory.llm_extractor import ExtractionProvider
 from app.observability.metrics import build_observability_summary
 from app.observability.replay import RetrievalReplayService
+from app.observability.reports import write_observability_report
 from app.retrieval.controller import RetrievalController
 from app.runtime import state_tree
 from app.runtime.models import (
@@ -42,6 +43,8 @@ from app.runtime.models import (
     MemoryItem,
     MemoryStatus,
     ObservabilitySummary,
+    ObservabilityReportRequest,
+    ObservabilityReportResult,
     ReplayRetrievalResult,
     RetrievalRequest,
     RollbackRequest,
@@ -588,6 +591,12 @@ class MemoryRuntime:
     ) -> ObservabilitySummary:
         """Return deterministic quality/safety counters from persisted retrieval logs."""
         return await build_observability_summary(self._repo, workspace_id=workspace_id, run_id=run_id)
+
+    async def write_observability_report(
+        self, request: ObservabilityReportRequest
+    ) -> ObservabilityReportResult:
+        """Generate static JSON/Markdown/HTML observability reports without side effects."""
+        return await write_observability_report(self._repo, self._retrieval, request)
 
     async def inspect_access(self, access_id: str):
         """Rebuild the full retrieval story for GET /v1/access/{access_id}.
