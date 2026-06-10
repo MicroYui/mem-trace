@@ -925,8 +925,8 @@ Expected:
 - [x] Replay one access returns original view, replayed view, diffs, metrics, and warnings. (Issue 3)
 - [x] Replay one run aggregates all access replays for that run. (Issue 3)
 - [x] Replay does not create access/gate/profile rows and does not mutate memory access counts. (Issue 3)
-- [ ] Quality/safety metrics include failed branch, stale, tool-sensitive/destructive, workspace leakage, and superseded injection signals.
-- [ ] `ProfilePhase` supports architecture-aligned phase names while preserving existing phase values.
+- [x] Quality/safety metrics include failed branch, stale, tool-sensitive/destructive, workspace leakage, and superseded injection signals. (Issue 5)
+- [x] `ProfilePhase` supports architecture-aligned phase names while preserving existing phase values. (Issue 5)
 - [ ] Dashboard tables include eval rows and observability summary without removing existing fields.
 - [ ] JSON/Markdown/HTML observability reports are generated under `reports/`.
 - [ ] Unit/API/report tests cover replay, metrics, eval tables, and no-side-effect guarantees.
@@ -1048,6 +1048,8 @@ uv run pytest apps/api/tests/api/test_observability.py -q
 
 ### Issue 5: Add quality/safety metrics and profiler phase expansion
 
+Status: ✅ complete (2026-06-10). RED verification: `uv run pytest apps/api/tests/observability/test_metrics.py -q` failed on missing expanded `ProfilePhase` values and missing `build_access_observability_metrics(...)`. Targeted GREEN: `uv run pytest apps/api/tests/observability/test_metrics.py apps/api/tests/api/test_observability.py -q` -> 11 passed. Full regression: `uv run pytest -q` -> 136 passed. Deterministic benchmark: `uv run python -m app.benchmark.runner --output-dir reports` -> `acceptance.passed=true`.
+
 **Files:**
 
 - Create: `apps/api/app/observability/metrics.py`
@@ -1058,12 +1060,12 @@ uv run pytest apps/api/tests/api/test_observability.py -q
 
 Steps:
 
-- [ ] Expand `ProfilePhase` enum with architecture-aligned values.
-- [ ] Implement access-level quality/safety metric helpers.
-- [ ] Implement `build_observability_summary(...)` with workspace/run filters.
-- [ ] Add runtime facade method `observability_summary(...)`.
-- [ ] Do not persist `quality` / `safety` `ProfileEvent` rows by default; return metrics as computed values from APIs/reports.
-- [ ] Run:
+- [x] Expand `ProfilePhase` enum with architecture-aligned values.
+- [x] Implement access-level quality/safety metric helpers.
+- [x] Implement `build_observability_summary(...)` with workspace/run filters.
+- [x] Add runtime facade method `observability_summary(...)`.
+- [x] Do not persist `quality` / `safety` `ProfileEvent` rows by default; return metrics as computed values from APIs/reports.
+- [x] Run:
 
 ```bash
 uv run pytest apps/api/tests/observability/test_metrics.py -q

@@ -1,7 +1,7 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issues 1, 2, 3, and 4 are complete**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, and replay/observability HTTP APIs are wired. The next Phase 3-A slice is **Issue 5: Quality/Safety metrics + profiler phase expansion**.
-- **Last updated:** 2026-06-10 (Phase 3-A Issue 4 implemented and verified).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issues 1, 2, 3, 4, and 5 are complete**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, and quality/safety metrics + profiler phase expansion are implemented. The next Phase 3-A slice is **Issue 6: dashboard tables include eval rows and observability summary**.
+- **Last updated:** 2026-06-10 (Phase 3-A Issue 5 implemented and verified).
 
 ## Current Goal
 
@@ -73,6 +73,21 @@ Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3
 - TDD RED for missing API routes: `uv run pytest apps/api/tests/api/test_observability.py -q` -> **6 failed** with route-level `404 Not Found` before implementation.
 - Targeted regression: `uv run pytest apps/api/tests/api/test_observability.py apps/api/tests/observability/test_replay.py apps/api/tests/api/test_dashboard.py -q` -> **15 passed**.
 - Full regression: `uv run pytest -q` -> **132 passed**.
+
+## Implemented (Phase 3-A Issue 5 — Quality/Safety metrics + profiler phase expansion — 2026-06-10)
+
+- **Profiler phase expansion:** `ProfilePhase` now preserves existing `retrieval`, `gate`, and `context_packing` values and adds architecture-aligned `ingestion`, `construction`, `rerank`, `generation`, `maintenance`, `quality`, and `safety` values.
+- **Access-level metrics helper:** `app.observability.metrics.build_access_observability_metrics(...)` is public via `__all__` and computes candidate/accepted/rejected counts, tokens/latency, failed-branch rejection/injection, stale rejection/injection, tool-sensitive/destructive blocking, risk blocking, workspace mismatch/leakage, and superseded injection from persisted access/gate records plus candidate/accepted memory views.
+- **Summary hardening:** `build_observability_summary(repo, workspace_id=None, run_id=None)` uses the access-level helper, supports workspace/run filters, aggregates totals, and exposes P3-A §7.3 `by_strategy` averages/rates.
+- **Read-only guarantee:** `MemoryRuntime.observability_summary(...)` remains a read facade over persisted logs and does not create fake `quality` / `safety` `ProfileEvent` rows.
+- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 5 checkboxes are ticked; `ROADMAP.md` Phase 3-A Quality/Safety and phase-aware profiler items are marked complete with P3-A semantics.
+
+## Latest Verification (2026-06-10 Phase 3-A Issue 5)
+
+- TDD RED: `uv run pytest apps/api/tests/observability/test_metrics.py -q` failed as expected on missing expanded `ProfilePhase` values and missing `build_access_observability_metrics(...)`.
+- Targeted regression: `uv run pytest apps/api/tests/observability/test_metrics.py apps/api/tests/api/test_observability.py -q` -> **11 passed**.
+- Full regression: `uv run pytest -q` -> **136 passed**.
+- Deterministic benchmark: `uv run python -m app.benchmark.runner --output-dir reports`; generated `reports/benchmark_results.json` with `acceptance.passed=true`.
 
 ## Implemented (real-LLM validation bench + fixes — 2026-06-10)
 
@@ -254,4 +269,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2) is complete. Phase 3-A Issues 1, 2, 3, and 4 are implemented and verified. **Next recommended action:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 **Issue 5: Quality/Safety metrics + profiler phase expansion**. Expand `ProfilePhase` with architecture-aligned phase names, harden reusable observability metric helpers/tests, and keep Quality/Safety metrics computed/read-only rather than writing fake `ProfileEvent` rows. Broader recommended order remains: finish Phase 3-A backend observability, then showcase assets §12, Context Compaction §9, Phase 3.5 SDK/LangGraph adapter §6, and 6-strategy benchmark §7; heavy infra and advanced storage stay deferred.
+The MVP (P0+P1+P2) is complete. Phase 3-A Issues 1, 2, 3, 4, and 5 are implemented and verified. **Next recommended action:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 **Issue 6: dashboard table extension**. Include `observability_summary` in `DashboardTables` while preserving existing runs/accesses/profile/benchmark/eval rows and counts. Broader recommended order remains: finish Phase 3-A backend observability, then showcase assets §12, Context Compaction §9, Phase 3.5 SDK/LangGraph adapter §6, and 6-strategy benchmark §7; heavy infra and advanced storage stay deferred.

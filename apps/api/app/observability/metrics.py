@@ -37,7 +37,7 @@ async def build_observability_summary(
         gate_logs = await repo.list_gate_logs(access.access_id)
         candidate_memories = await _candidate_memories(repo, gate_logs)
         accepted_memories = await _accepted_memories(repo, gate_logs)
-        metrics = _access_quality_safety_metrics(access, gate_logs, candidate_memories, accepted_memories)
+        metrics = build_access_observability_metrics(access, gate_logs, candidate_memories, accepted_memories)
         _add_totals(totals, metrics)
         _add_totals(by_strategy_totals[access.retrieval_strategy.value], metrics)
 
@@ -84,12 +84,18 @@ async def _accepted_memories(repo: Repository, gate_logs: list[MemoryGateLog]) -
     return memories
 
 
-def _access_quality_safety_metrics(
+def build_access_observability_metrics(
     access: MemoryAccessLog,
     gate_logs: list[MemoryGateLog],
     candidate_memories: list[MemoryItem],
     accepted_memories: list[MemoryItem],
 ) -> dict[str, float]:
+    """Compute deterministic quality/safety metrics for one retrieval access.
+
+    The helper is intentionally pure: callers supply the persisted access log,
+    its gate decisions, the candidate memories represented by those gates, and
+    the subset of accepted memories. It never reads or writes repository state.
+    """
     now = datetime.now(timezone.utc)
     return {
         "access_count": 1.0,
@@ -174,4 +180,4 @@ def _strategy_summary(totals: dict[str, float]) -> dict[str, float]:
     }
 
 
-__all__ = ["build_observability_summary"]
+__all__ = ["build_access_observability_metrics", "build_observability_summary"]

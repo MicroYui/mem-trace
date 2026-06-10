@@ -11,6 +11,6 @@
 ## Remaining Implementation Questions
 
 1. **pgvector restoration:** RESOLVED (2026-06-09, ADR-014). pgvector is restored on `pgvector/pgvector:pg16` with a `vector(256)` column + HNSW cosine index; retrieval is hybrid lexical + deterministic-vector cosine. Open follow-up: whether to replace the deterministic hashed embedding with a real embedding model (and how to keep benchmarks reproducible if so).
-2. **P2 scope order:** RESOLVED (2026-06-10). P2 is complete (completed-run reuse/procedural memory, conflict resolver, candidate buffer, config-gated real LLM extraction, extended benchmark scenarios). Current remaining implementation order is tracked in `P3A_IMPLEMENTATION_PLAN.md` / `ROADMAP.md`; next slice is Phase 3-A Issue 3 (replay service + diff semantics).
+2. **P2 scope order:** RESOLVED (2026-06-10). P2 is complete (completed-run reuse/procedural memory, conflict resolver, candidate buffer, config-gated real LLM extraction, extended benchmark scenarios). Current remaining implementation order is tracked in `P3A_IMPLEMENTATION_PLAN.md` / `ROADMAP.md`; next slice is Phase 3-A Issue 6 (dashboard table extension).
 3. **Auth model:** MVP still runs without full API-key/workspace auth. Decide whether P2 needs an API-key stub before any hosted demo.
 4. **Raw secret payloads:** current implementation redacts persisted content and does not preserve original secret payloads. Decide whether future `raw_payload_ref` should ever store encrypted raw events.

@@ -150,6 +150,13 @@ class ProfilePhase(str, Enum):
     retrieval = "retrieval"
     gate = "gate"
     context_packing = "context_packing"
+    ingestion = "ingestion"
+    construction = "construction"
+    rerank = "rerank"
+    generation = "generation"
+    maintenance = "maintenance"
+    quality = "quality"
+    safety = "safety"
 
 
 class ExtractionMode(str, Enum):

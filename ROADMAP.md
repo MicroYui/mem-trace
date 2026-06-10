@@ -39,8 +39,8 @@
 - **实施计划**：见 repo 根目录 `P3A_IMPLEMENTATION_PLAN.md`。执行约定：每完成计划 §11 的一个 Issue，都必须同步更新 `.ai/PROJECT_STATE.md`，并 tick 或注释本节对应 checkbox/sub-checkbox。
 - [x] **Retrieval Replay**：`replay_retrieval(access_id)` / `replay_run(run_id)` 复现检索→重排→gate→packing。**这是把系统从「跑过一次 demo」升级为「每次检索决策可复现/可解释/可调试」的关键，优先级最高。** 出处：architecture §6.1/§6.9。Phase 3-A Issue 2 已完成其前置基础：`RetrievalController.trace(...)` side-effect-free pipeline + hot-path trace 持久化重构；Phase 3-A Issue 3 已完成 replay service + deterministic diff semantics + runtime facade；Phase 3-A Issue 4 已完成 Replay HTTP API（`GET /v1/replay/access/{access_id}` / `GET /v1/replay/runs/{run_id}`）与最小 observability summary endpoint。
 - [x] **eval 表落地**：`eval_cases / eval_runs / eval_results` 已完成 Phase 3-A Issue 1：新增 eval records、Repository/InMemory/SQL 持久化、dashboard table 字段、Alembic `0004_phase3a_observability.py`，并补 `MemoryAccessLog.top_k` 以支持后续 replay 精确重放。出处：architecture §7.1。
-- [ ] **Quality & Safety 指标统一进 profiler**：failed_branch_contamination / stale_injection / tool_safety / workspace_leakage（部分 benchmark 已覆盖，需统一到 profiler）。
-- [ ] **完整 phase-aware Profiler**：扩到 architecture §6.9 的 10 阶段归因（Ingestion/Construction/Retrieval/Rerank/Gate/Context Packing/Generation/Maintenance/Quality/Safety）。
+- [x] **Quality & Safety 指标统一进 profiler**：failed_branch_contamination / stale_injection / tool_safety / workspace_leakage（部分 benchmark 已覆盖，需统一到 profiler）。Phase 3-A Issue 5 已完成为只读 computed observability metrics：access-level helper + summary by_strategy，不默认写入 `quality` / `safety` `ProfileEvent`。
+- [x] **完整 phase-aware Profiler**：扩到 architecture §6.9 的 10 阶段归因（Ingestion/Construction/Retrieval/Rerank/Gate/Context Packing/Generation/Maintenance/Quality/Safety）。Phase 3-A Issue 5 已扩展 `ProfilePhase` enum 并保留既有值稳定；不为尚无真实操作的阶段伪造 profile rows。
 - [ ] **最小 Dashboard（静态 HTML 报告优先，不急于上 React）**。
 
 ### 3-B：前端可视化（在 3-A 稳定后）
