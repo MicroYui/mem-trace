@@ -927,7 +927,7 @@ Expected:
 - [x] Replay does not create access/gate/profile rows and does not mutate memory access counts. (Issue 3)
 - [x] Quality/safety metrics include failed branch, stale, tool-sensitive/destructive, workspace leakage, and superseded injection signals. (Issue 5)
 - [x] `ProfilePhase` supports architecture-aligned phase names while preserving existing phase values. (Issue 5)
-- [ ] Dashboard tables include eval rows and observability summary without removing existing fields.
+- [x] Dashboard tables include eval rows and observability summary without removing existing fields. (Issue 6)
 - [ ] JSON/Markdown/HTML observability reports are generated under `reports/`.
 - [ ] Unit/API/report tests cover replay, metrics, eval tables, and no-side-effect guarantees.
 - [ ] `uv run pytest -q` passes.
@@ -1073,6 +1073,8 @@ uv run pytest apps/api/tests/observability/test_metrics.py -q
 
 ### Issue 6: Extend dashboard tables with eval and observability summary
 
+Status: ✅ complete (2026-06-10). RED verification: `uv run --extra dev pytest apps/api/tests/api/test_dashboard.py -q` failed on missing `observability_summary` in the dashboard payload. Targeted GREEN: `uv run --extra dev pytest apps/api/tests/api/test_dashboard.py apps/api/tests/api/test_observability.py apps/api/tests/observability/test_eval_records.py apps/api/tests/observability/test_metrics.py -q` -> 17 passed. Full regression: `uv run --extra dev pytest -q` -> 137 passed. Deterministic benchmark: `uv run --extra dev python -m app.benchmark.runner --output-dir reports` -> `acceptance.passed=true`.
+
 **Files:**
 
 - Modify: `apps/api/app/runtime/memory_runtime.py`
@@ -1081,11 +1083,11 @@ uv run pytest apps/api/tests/observability/test_metrics.py -q
 
 Steps:
 
-- [ ] Include eval cases/runs/results in `DashboardTables`.
-- [ ] Include `observability_summary` in `DashboardTables`.
-- [ ] Preserve existing `runs`, `accesses`, `profile_events`, `benchmark_cases`, `benchmark_results`, and `benchmark_summary` behavior.
-- [ ] Update dashboard tests to assert new fields exist without changing existing benchmark counts.
-- [ ] Run:
+- [x] Include eval cases/runs/results in `DashboardTables`.
+- [x] Include `observability_summary` in `DashboardTables`.
+- [x] Preserve existing `runs`, `accesses`, `profile_events`, `benchmark_cases`, `benchmark_results`, and `benchmark_summary` behavior.
+- [x] Update dashboard tests to assert new fields exist without changing existing benchmark counts.
+- [x] Run:
 
 ```bash
 uv run pytest apps/api/tests/api/test_dashboard.py -q

@@ -68,7 +68,7 @@ async def test_in_memory_repo_adds_lists_and_updates_eval_records():
     assert await repo.list_eval_results(eval_run_id="evalrun_1") == [result]
 
 
-async def test_dashboard_tables_exposes_eval_records_without_observability_summary():
+async def test_dashboard_tables_exposes_eval_records_with_observability_summary():
     repo = InMemoryRepository()
     runtime = MemoryRuntime(repo, default_workspace_id="ws_eval")
     await repo.add_eval_case(EvalCaseRecord(eval_case_id="case_1", name="case"))
@@ -81,7 +81,9 @@ async def test_dashboard_tables_exposes_eval_records_without_observability_summa
     assert [case.eval_case_id for case in tables.eval_cases] == ["case_1"]
     assert [run.eval_run_id for run in tables.eval_runs] == ["evalrun_1"]
     assert [result.eval_result_id for result in tables.eval_results] == ["evalres_1"]
-    assert "observability_summary" not in DashboardTables.model_fields
+    assert tables.observability_summary is not None
+    assert tables.observability_summary.workspace_id == "ws_eval"
+    assert tables.observability_summary.access_count == 0
 
 
 async def test_dashboard_tables_filters_eval_results_by_workspace():

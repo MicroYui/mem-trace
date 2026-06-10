@@ -1,7 +1,7 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issues 1, 2, 3, 4, and 5 are complete**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, and quality/safety metrics + profiler phase expansion are implemented. The next Phase 3-A slice is **Issue 6: dashboard tables include eval rows and observability summary**.
-- **Last updated:** 2026-06-10 (Phase 3-A Issue 5 implemented and verified).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issues 1, 2, 3, 4, 5, and 6 are complete**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, quality/safety metrics + profiler phase expansion are implemented, and dashboard tables now include eval rows plus a workspace-scoped observability summary. The next Phase 3-A slice is **Issue 7: JSON/Markdown/HTML observability reports**.
+- **Last updated:** 2026-06-10 (Phase 3-A Issue 6 implemented and verified).
 
 ## Current Goal
 
@@ -88,6 +88,20 @@ Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3
 - Targeted regression: `uv run pytest apps/api/tests/observability/test_metrics.py apps/api/tests/api/test_observability.py -q` -> **11 passed**.
 - Full regression: `uv run pytest -q` -> **136 passed**.
 - Deterministic benchmark: `uv run python -m app.benchmark.runner --output-dir reports`; generated `reports/benchmark_results.json` with `acceptance.passed=true`.
+
+## Implemented (Phase 3-A Issue 6 — dashboard table extension — 2026-06-10)
+
+- **Dashboard model:** `DashboardTables` now includes `observability_summary: ObservabilitySummary | None` while preserving `runs`, `accesses`, `profile_events`, `benchmark_cases`, `benchmark_results`, `eval_cases`, `eval_runs`, `eval_results`, and `benchmark_summary`.
+- **Runtime wiring:** `MemoryRuntime.dashboard_tables(workspace_id=...)` now computes `build_observability_summary(...)` with the same workspace filter as the dashboard request; eval result workspace filtering through scoped eval runs remains intact.
+- **Tests:** dashboard API coverage asserts eval rows and workspace-scoped observability summary are present without changing existing benchmark row counts; eval-record tests were updated now that Issue 6 owns the summary field.
+- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 6 checkboxes and acceptance item are ticked; `ROADMAP.md` minimal dashboard item is annotated that table API extension is complete and static reports remain Issue 7.
+
+## Latest Verification (2026-06-10 Phase 3-A Issue 6)
+
+- TDD RED: `uv run --extra dev pytest apps/api/tests/api/test_dashboard.py -q` failed as expected on missing `observability_summary` in the dashboard payload.
+- Targeted regression: `uv run --extra dev pytest apps/api/tests/api/test_dashboard.py apps/api/tests/api/test_observability.py apps/api/tests/observability/test_eval_records.py apps/api/tests/observability/test_metrics.py -q` -> **17 passed**.
+- Full regression: `uv run --extra dev pytest -q` -> **137 passed**.
+- Deterministic benchmark: `uv run --extra dev python -m app.benchmark.runner --output-dir reports`; generated `reports/benchmark_results.json` with `acceptance.passed=true`.
 
 ## Implemented (real-LLM validation bench + fixes — 2026-06-10)
 

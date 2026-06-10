@@ -41,7 +41,7 @@
 - [x] **eval 表落地**：`eval_cases / eval_runs / eval_results` 已完成 Phase 3-A Issue 1：新增 eval records、Repository/InMemory/SQL 持久化、dashboard table 字段、Alembic `0004_phase3a_observability.py`，并补 `MemoryAccessLog.top_k` 以支持后续 replay 精确重放。出处：architecture §7.1。
 - [x] **Quality & Safety 指标统一进 profiler**：failed_branch_contamination / stale_injection / tool_safety / workspace_leakage（部分 benchmark 已覆盖，需统一到 profiler）。Phase 3-A Issue 5 已完成为只读 computed observability metrics：access-level helper + summary by_strategy，不默认写入 `quality` / `safety` `ProfileEvent`。
 - [x] **完整 phase-aware Profiler**：扩到 architecture §6.9 的 10 阶段归因（Ingestion/Construction/Retrieval/Rerank/Gate/Context Packing/Generation/Maintenance/Quality/Safety）。Phase 3-A Issue 5 已扩展 `ProfilePhase` enum 并保留既有值稳定；不为尚无真实操作的阶段伪造 profile rows。
-- [ ] **最小 Dashboard（静态 HTML 报告优先，不急于上 React）**。
+- [ ] **最小 Dashboard（静态 HTML 报告优先，不急于上 React）**。Phase 3-A Issue 6 已完成 dashboard table API 扩展：`GET /v1/dashboard/tables` 保留既有 rows，并返回 eval rows + workspace-scoped `observability_summary`；静态 JSON/Markdown/HTML 报告仍属 Issue 7。
 
 ### 3-B：前端可视化（在 3-A 稳定后）
 - [ ] **React + TS 前端 Dashboard (`apps/web`)**：架构目录已规划，代码库无实现。

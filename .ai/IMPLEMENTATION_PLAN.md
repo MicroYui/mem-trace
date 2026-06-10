@@ -46,8 +46,8 @@ Implement `P3A_IMPLEMENTATION_PLAN.md` §11 issue-by-issue:
 3. replay service + diff semantics; ✅ complete (2026-06-10)
 4. replay/observability APIs; ✅ complete (2026-06-10)
 5. Quality/Safety metrics + profiler phase expansion; ✅ complete (2026-06-10)
-6. dashboard table extension; ⬅ next
-7. JSON/Markdown/HTML observability reports;
+6. dashboard table extension; ✅ complete (2026-06-10)
+7. JSON/Markdown/HTML observability reports; ⬅ next
 8. full regression, benchmark, and project-memory sync.
 
 **Maintenance rule:** after completing each Issue, update `.ai/PROJECT_STATE.md`

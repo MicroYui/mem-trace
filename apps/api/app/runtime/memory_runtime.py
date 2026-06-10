@@ -561,6 +561,7 @@ class MemoryRuntime:
         if workspace_id is not None:
             eval_run_ids = {run.eval_run_id for run in eval_runs}
             eval_results = [result for result in eval_results if result.eval_run_id in eval_run_ids]
+        observability_summary = await build_observability_summary(self._repo, workspace_id=workspace_id)
         return DashboardTables(
             runs=runs,
             accesses=accesses,
@@ -570,6 +571,7 @@ class MemoryRuntime:
             eval_cases=eval_cases,
             eval_runs=eval_runs,
             eval_results=eval_results,
+            observability_summary=observability_summary,
             benchmark_summary=_benchmark_summary_from_records(results),
         )
 

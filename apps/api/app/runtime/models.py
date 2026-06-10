@@ -557,6 +557,7 @@ class DashboardTables(_Base):
     eval_cases: list[EvalCaseRecord] = Field(default_factory=list)
     eval_runs: list[EvalRunRecord] = Field(default_factory=list)
     eval_results: list[EvalResultRecord] = Field(default_factory=list)
+    observability_summary: Optional[ObservabilitySummary] = None
     benchmark_summary: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 
