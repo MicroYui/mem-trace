@@ -187,4 +187,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-Review and commit the dedup/merge + conflict-resolver working-tree changes (incl. migration `0003`). After that, choose the next P2 slice: LLM extraction with schema validation, or candidate buffer / idle flush; optionally extend P2 benchmark cases 7-8 (stale rejection, no-memory baseline).
+The MVP (P0+P1+P2) is complete and the working tree is committed. **All future work is now tracked in `ROADMAP.md` at the repo root** (deferred features, tech debt, open decisions — each mapped back to `architecture.md` / `draft.md` / `.ai/` sources). Start there. Recommended order: (1) resolve OPEN_QUESTIONS in ROADMAP §0 (real embedding model, auth model, raw secret payload); (2) Phase 3 observability/frontend (ROADMAP §2 — high value, independent of heavy infra); (3) Phase 4 async infra + reflection/forgetting (ROADMAP §3). When you finish a ROADMAP item, tick it there and update this file.

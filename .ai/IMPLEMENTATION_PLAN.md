@@ -24,16 +24,21 @@ Status: implemented locally and verified on 2026-06-09.
 
 ## P2 Advanced Features
 
-1. LLM extraction with schema validation and confidence/source-trust metadata.
-2. Candidate buffer, idle flush, and optional async worker.
-3. Dedup/merge, simple conflict resolver, superseded memory handling. ✅ (write-path `resolver.resolve`; dedup-merge same value, trust→recency conflict resolution on single-valued keys, `superseded_by` lineage + migration `0003`; benchmark case 5)
-4. Completed run summaries and procedural memory extraction. ✅ (cold-path `complete_run` -> episodic summary + procedural memory; benchmark case 6)
-5. Elasticsearch hybrid retrieval if pgvector limits become visible.
-6. Neo4j provenance graph, richer dashboard, replay UI, OpenTelemetry integration.
+Status: complete (6/6), verified on 2026-06-10.
 
-## Suggested Next Coding Task
+1. LLM extraction with schema validation and confidence/source-trust metadata. ✅ (config-gated pipeline + real OpenAI-compatible `LLMExtractionProvider`, live-verified against Volcengine Ark; degrades to rule writer on failure)
+2. Candidate buffer, idle flush, and optional async worker. ✅ (in-process `candidate_buffer.py`; Redis-backed version deferred to ROADMAP §3.1)
+3. Dedup/merge, simple conflict resolver, superseded memory handling. ✅ (write-path `resolver.resolve`; `superseded_by` lineage + migration `0003`; benchmark case 5)
+4. Completed run summaries and procedural memory extraction. ✅ (cold-path `complete_run`; benchmark case 6)
+5. Elasticsearch hybrid retrieval if pgvector limits become visible. ⏭ deferred — ROADMAP §4.
+6. Neo4j provenance graph, richer dashboard, replay UI, OpenTelemetry integration. ⏭ deferred — ROADMAP §2/§4/§6.
 
-Dedup/merge + conflict resolver (P2 item 3) is implemented and verified (70 tests; benchmark acceptance passes with `variant_2_excludes_superseded_memory`). Review/commit these working-tree changes, then select the next P2 slice: LLM extraction with schema validation, or candidate buffer / idle flush.
+## Next Coding Task
+
+MVP (P0+P1+P2) is complete and committed. All remaining work — including the
+deferred P2 items 5-6 above — now lives in **`ROADMAP.md`** at the repo root
+(the authoritative backlog, mapped to `architecture.md` / `draft.md` / `.ai/`).
+Pick the next task from there; recommended order is in ROADMAP's closing section.
 
 ## Suggested Test Strategy
 
