@@ -1,13 +1,13 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, quality/safety metrics + profiler phase expansion are implemented, dashboard tables include eval rows plus a workspace-scoped observability summary, static JSON/Markdown/HTML observability reports are generated through the runtime/API/CLI entrypoint, and full regression + deterministic benchmark pass. The next recommended work is outside Phase 3-A: showcase assets (§12), Context Compaction (§9), Phase 3.5 SDK/LangGraph adapter (§6), or 6-strategy benchmark expansion (§7) per `ROADMAP.md` priority.
-- **Last updated:** 2026-06-10 (Phase 3-A Issue 8 full regression/benchmark/project-memory sync complete).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, quality/safety metrics + profiler phase expansion are implemented, dashboard tables include eval rows plus a workspace-scoped observability summary, static JSON/Markdown/HTML observability reports are generated through the runtime/API/CLI entrypoint, and full regression + deterministic benchmark pass. **Showcase assets + reproducibility baseline are complete**: README architecture/Quickstart, deterministic reproduction/smoke scripts, temporary-directory integration coverage, generated demo/benchmark/observability artifacts, and the technical blog asset are in place. The next recommended work is Context Compaction (§9), then Phase 3.5 SDK/LangGraph adapter (§6), or 6-strategy benchmark expansion (§7) per `ROADMAP.md` priority.
+- **Last updated:** 2026-06-10 (showcase assets + reproducibility baseline complete).
 
 ## Current Goal
 
-Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3-A. Phase 3-A upgrades the completed MVP from "demo/benchmark succeeded" to replayable, explainable, and measurable retrieval observability: side-effect-free retrieval replay, eval tables, deterministic quality/safety metrics, expanded profiler phases, and JSON/Markdown/HTML observability reports.
+Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are complete; the next concrete implementation slice should be Context Compaction (§9 in `ROADMAP.md`), especially the packer over-budget compression fallback that replaces silent dropped-block truncation.
 
-**Maintenance rule for Phase 3-A:** after completing each Issue in `P3A_IMPLEMENTATION_PLAN.md` §11, update this file with current progress/verification and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox. Do not leave progress only in chat history.
+**Maintenance rule:** after completing meaningful work, update this file with current progress/verification and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox. Do not leave progress only in chat history.
 
 ## Planned (Phase 3-A — Retrieval Replay & Observability — 2026-06-10)
 
@@ -134,6 +134,21 @@ Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3
 - `uv run pytest apps/api/tests/observability/test_reports.py apps/api/tests/api/test_observability.py -q` -> **15 passed**.
 - `uv run pytest -q` -> **145 passed**.
 - `uv run python -m app.benchmark.runner --output-dir reports`; `reports/benchmark_results.json` -> `acceptance.passed=true`.
+
+## Implemented (showcase assets + reproducibility baseline — 2026-06-10)
+
+- **README showcase:** added a top-level README with product positioning, Mermaid architecture diagram, deterministic quickstart, report guide, API/observability endpoints, PostgreSQL mode, optional real-LLM bench, and roadmap pointer.
+- **Reproducibility scripts:** added `scripts/reproduce.sh` for database-free deterministic demo/benchmark/observability report generation and benchmark acceptance checking; added `scripts/smoke.sh` for full local smoke verification.
+- **Regression coverage:** added integration tests that generate demo/benchmark reports into a temporary directory, assert benchmark `acceptance.passed=true`, verify observability report entrypoint output, and guard README command drift.
+- **Showcase narrative:** added `docs/blog/why-agent-memory-is-not-just-rag.md`, covering failed-branch isolation, workspace isolation, stale rejection, tool safety, state-aware retrieval, gate policy, replay, and profiler evidence.
+- **Local hygiene:** `.superpowers/` is ignored; generated `reports/` remain ignored and reproducible.
+
+## Latest Verification (2026-06-10 showcase/reproducibility)
+
+- `uv run pytest apps/api/tests/integration/test_reproducibility.py -q` -> **4 passed**.
+- `./scripts/reproduce.sh` -> **passed**, generated demo/benchmark/observability reports and printed `acceptance.passed=true (7/7 checks true)`.
+- `uv run pytest -q` -> **149 passed**.
+- `uv run python -m app.benchmark.runner --output-dir reports`; `reports/benchmark_results.json` -> `acceptance.passed=true` with all 7 checks true.
 
 ## Implemented (real-LLM validation bench + fixes — 2026-06-10)
 
@@ -315,4 +330,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2) and Phase 3-A backend observability are complete. The §0 immediate decisions are now resolved (2026-06-10, ADR-015/016/017): deterministic embedding stays the default with a real embedding as an optional config-gated provider; hosted demo gets a lightweight Hosted-Demo Safety Mode first; raw secrets are never stored by default. Full multi-tenant governance remains explicitly planned but deferred to Phase 4 (`ROADMAP.md` §3.4). Recommended next work per `ROADMAP.md` recommended order: showcase assets (§12: README architecture/quickstart/demo artifacts/blog) — no separate implementation plan needed, can start directly — then Context Compaction (§9), Phase 3.5 SDK/LangGraph adapter (§6), and 6-strategy benchmark expansion (§7). Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.
+The MVP (P0+P1+P2), Phase 3-A backend observability, and showcase/reproducibility baseline are complete. The §0 immediate decisions are resolved (2026-06-10, ADR-015/016/017): deterministic embedding stays the default with a real embedding as an optional config-gated provider; hosted demo gets a lightweight Hosted-Demo Safety Mode first; raw secrets are never stored by default. Recommended next work per `ROADMAP.md` is **Context Compaction** (§9): start with `packer.pack_context` over-budget compression/placeholder compensation so low-priority dropped blocks are summarized instead of silently omitted. After that, proceed to Phase 3.5 SDK/LangGraph adapter (§6) or 6-strategy benchmark expansion (§7). Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.

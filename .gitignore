@@ -22,6 +22,9 @@ htmlcov/
 # Generated demo / benchmark reports
 reports/
 
+# Local brainstorming / visual companion state
+.superpowers/
+
 # OS / editor
 .DS_Store
 *.swp

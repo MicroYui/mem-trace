@@ -369,13 +369,13 @@ def _relative_posix(path: Path) -> str:
         return path.as_posix()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Generate a MemTrace observability report.")
     parser.add_argument("--output-dir", default="reports")
     parser.add_argument("--workspace-id", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--no-replay", action="store_true", help="Skip replay payloads in the generated JSON report.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     from app.retrieval.controller import RetrievalController
     from app.runtime.repository import InMemoryRepository
 

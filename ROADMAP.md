@@ -188,9 +188,9 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 
 系统内核已强，但缺「可被他人理解/复现/接入」的展示层——这是当前观感性价比最高的补强之一：
 
-- [ ] **README 架构图 + Quickstart**（一条命令起 `compose.core` 跑通 demo）。
-- [ ] **Demo GIF / 截图** + `demo_report` / `benchmark_report` / `llm_bench_report` 示例产物。
-- [ ] **技术博客**：Why Agent Memory is not just RAG（讲 failed-branch isolation / workspace isolation / stale rejection / tool safety / state-aware retrieval）。
+- [x] **README 架构图 + Quickstart**：已添加顶层 `README.md`，包含 Mermaid 架构图、deterministic Quickstart、PostgreSQL/API 可选路径、报告说明和关键 API。可复现入口为 `./scripts/reproduce.sh`；core compose 仍由现有 `docker-compose.yml` 提供 pgvector PostgreSQL 基线。
+- [x] **Demo GIF / 截图** + `demo_report` / `benchmark_report` / `llm_bench_report` 示例产物：本轮不提交二进制 GIF/截图，改为可再生成展示产物；`./scripts/reproduce.sh` 生成 `demo_report`、`benchmark_report`、`observability_report`，README 记录可选 real-LLM bench 生成 `llm_bench_report`。
+- [x] **技术博客**：`docs/blog/why-agent-memory-is-not-just-rag.md` 已添加，讲 failed-branch isolation / workspace isolation / stale rejection / tool safety / state-aware retrieval / replay observability。
 
 ---
 
@@ -200,8 +200,8 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 
 1. ~~**清立即决策**（§0）~~ ✅ **已完成 (2026-06-10)**：embedding 保留确定性 default + 真实作可选 provider（ADR-015）；auth 走轻量 Hosted-Demo Safety Mode（ADR-016）；secret 默认不存原文（ADR-017）。
 2. ~~**Phase 3-A 后端可观测性**（§2）~~ ✅ **已完成 (2026-06-10)**：Retrieval Replay + eval 表 + Quality/Safety profiler + 最小 JSON/MD/HTML 报告，Issues 1-8 全部完成并端到端验证。
-3. **展示资产 + 可复现基线**（§12 + §7 部分）：README + 架构图 + demo/benchmark/llm_bench 示例产物 + 博客；**前置/并行做 §7 的 Docker Compose 分层 `compose.core`（api+postgres，让 Quickstart 一条命令跑通）与 §7 集成/回归测试补全**，让项目「可被理解/复现」。**← 当前推荐下一步。**
-4. **Context Compaction**（§9 + §5/§10 协同子集）：packer 超预算摘要补偿先做（不依赖重型基建）；再做 rolling summary；**协同最小子集**：§5「completed subgoal → summary node」、§10 `SummarizerProvider` 雏形（规则/LLM 双路 config-gate）。
+3. ~~**展示资产 + 可复现基线**（§12 + §7 部分）~~ ✅ **已完成 (2026-06-10)**：README + Mermaid 架构图 + deterministic Quickstart + `scripts/reproduce.sh` / `scripts/smoke.sh` + demo/benchmark/observability 可再生成报告 + optional LLM bench 指引 + 技术博客 + integration reproducibility tests。
+4. **Context Compaction**（§9 + §5/§10 协同子集）：packer 超预算摘要补偿先做（不依赖重型基建）；再做 rolling summary；**协同最小子集**：§5「completed subgoal → summary node」、§10 `SummarizerProvider` 雏形（规则/LLM 双路 config-gate）。**← 当前推荐下一步。**
 5. **Phase 3.5 SDK / Adapter / CLI**（§6 前段）：Python SDK + LangGraph Adapter + custom-loop 示例，证明「可插拔 runtime」；**CLI 入口**（三入口之一）随后。
 6. **完整 6 策略对比 + benchmark 落库**（§7 主线）：no memory / long-context / vector / state-aware / +gate / +reflection 逐层量化（+reflection 依赖 §3.2）；配合 §2 eval 表把 benchmark report 落库。
 7. **Provider Registry + Key Ontology**（§10 + §11）：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移）。可与步骤 5/6 交织。
