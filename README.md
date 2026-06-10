@@ -166,4 +166,4 @@ uv run python -m app.benchmark.runner --output-dir reports
 
 ## Roadmap
 
-The completed MVP, Phase 3-A observability work, and future priorities are tracked in `ROADMAP.md`. For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are context compaction, SDK/LangGraph integration, and expanded strategy benchmarks.
+The completed MVP, Phase 3-A observability work, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are context compaction, SDK/LangGraph integration, and expanded strategy benchmarks.

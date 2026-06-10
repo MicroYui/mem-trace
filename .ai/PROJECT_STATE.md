@@ -1,27 +1,34 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, quality/safety metrics + profiler phase expansion are implemented, dashboard tables include eval rows plus a workspace-scoped observability summary, static JSON/Markdown/HTML observability reports are generated through the runtime/API/CLI entrypoint, and full regression + deterministic benchmark pass. **Showcase assets + reproducibility baseline are complete**: README architecture/Quickstart, deterministic reproduction/smoke scripts, temporary-directory integration coverage, generated demo/benchmark/observability artifacts, and the technical blog asset are in place. The next recommended work is Context Compaction (§9), then Phase 3.5 SDK/LangGraph adapter (§6), or 6-strategy benchmark expansion (§7) per `ROADMAP.md` priority.
-- **Last updated:** 2026-06-10 (showcase assets + reproducibility baseline complete).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, quality/safety metrics + profiler phase expansion are implemented, dashboard tables include eval rows plus a workspace-scoped observability summary, static JSON/Markdown/HTML observability reports are generated through the runtime/API/CLI entrypoint, and full regression + deterministic benchmark pass. **Showcase assets + reproducibility baseline are complete**: README architecture/Quickstart, deterministic reproduction/smoke scripts, temporary-directory integration coverage, generated demo/benchmark/observability artifacts, and the technical blog asset are in place. The next recommended work is Context Compaction (§9), then Phase 3.5 SDK/LangGraph adapter (§6), or 6-strategy benchmark expansion (§7) per `docs/design/ROADMAP.md` priority.
+- **Last updated:** 2026-06-10 (design/plan docs moved to `docs/design/`; showcase assets + reproducibility baseline complete).
+
+## Doc Reorg (2026-06-10)
+
+- The five top-level design/plan docs were moved into `docs/design/`: `docs/design/architecture.md`, `docs/design/draft.md`, `docs/design/mvp.md`, `docs/design/P3A_IMPLEMENTATION_PLAN.md`, `docs/design/ROADMAP.md` (via `git mv`, history preserved).
+- `README.md`, `AGENTS.md`, and `CLAUDE.md` stay at the repo root.
+- All path-style index references were updated: `AGENTS.md`, `README.md`, the moved docs' internal links, `.ai/` memory files, and both skill mirrors (`.agents/skills/` + `.claude/skills/`: `sync-design-docs`, `review-agent-architecture`, `resume-project`).
+- Source `.py` "section citation" comments (e.g. `mvp.md §5.2`) were intentionally left unchanged — they cite a doc name + section, not a file path.
 
 ## Current Goal
 
-Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are complete; the next concrete implementation slice should be Context Compaction (§9 in `ROADMAP.md`), especially the packer over-budget compression fallback that replaces silent dropped-block truncation.
+Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are complete; the next concrete implementation slice should be Context Compaction (§9 in `docs/design/ROADMAP.md`), especially the packer over-budget compression fallback that replaces silent dropped-block truncation.
 
-**Maintenance rule:** after completing meaningful work, update this file with current progress/verification and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox. Do not leave progress only in chat history.
+**Maintenance rule:** after completing meaningful work, update this file with current progress/verification and tick or annotate the corresponding `docs/design/ROADMAP.md` checkbox/sub-checkbox. Do not leave progress only in chat history.
 
 ## Planned (Phase 3-A — Retrieval Replay & Observability — 2026-06-10)
 
-- **Plan file:** `P3A_IMPLEMENTATION_PLAN.md` at repo root.
+- **Plan file:** `docs/design/P3A_IMPLEMENTATION_PLAN.md`.
 - **Scope:** `GET /v1/replay/access/{access_id}`, `GET /v1/replay/runs/{run_id}`, observability summary API, side-effect-free retrieval trace/replay service, `MemoryAccessLog.top_k`, eval tables (`eval_cases`, `eval_runs`, `eval_results`), Quality/Safety metrics, expanded `ProfilePhase`, dashboard table extension, and generated `reports/observability_report.{json,md,html}`.
 - **Non-goals:** no React dashboard, no Celery/Redis, no ES/Neo4j replay, no LLM judge, no hosted auth, and no immutable historical candidate snapshots in the first slice.
-- **Execution:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 issue-by-issue; run targeted tests per issue; final verification requires `uv run pytest -q` and deterministic benchmark acceptance.
+- **Execution:** implement `docs/design/P3A_IMPLEMENTATION_PLAN.md` §11 issue-by-issue; run targeted tests per issue; final verification requires `uv run pytest -q` and deterministic benchmark acceptance.
 
 ## Implemented (Phase 3-A Issue 1 — access fidelity + eval persistence — 2026-06-10)
 
 - **Access fidelity:** `MemoryAccessLog.top_k: int = 10` added and persisted through hot-path retrieval, in-memory repository, SQL ORM/repository mappings, and migration default/backfill (`migrations/versions/0004_phase3a_observability.py`).
 - **Eval persistence schema:** added `EvalCaseRecord`, `EvalRunRecord`, `EvalResultRecord`; repository protocol methods; `InMemoryRepository` and `SqlRepository` add/list/update support; SQL ORM tables `eval_cases`, `eval_runs`, `eval_results` with planned indexes.
 - **Dashboard table extension (Issue 1 scope):** `DashboardTables` now exposes `eval_cases`, `eval_runs`, and `eval_results`; workspace-filtered dashboard calls filter eval results through the matching eval runs to avoid cross-workspace result leakage. `observability_summary` remains for later Phase 3-A Issues.
-- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 1 checkboxes are ticked; `ROADMAP.md` Phase 3-A eval-table item is ticked.
+- **Plan/backlog sync:** `docs/design/P3A_IMPLEMENTATION_PLAN.md` Issue 1 checkboxes are ticked; `docs/design/ROADMAP.md` Phase 3-A eval-table item is ticked.
 
 ## Latest Verification (2026-06-10 Phase 3-A Issue 1)
 
@@ -36,7 +43,7 @@ Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are 
 - **Side-effect-free pipeline:** `RetrievalController.trace(...)` now runs candidate selection -> gate -> context packing without creating access/gate/profile rows and without mutating `MemoryItem.access_count`. It preserves request fidelity, including `access_record.top_k = request.top_k`.
 - **Hot-path refactor:** `_retrieve_impl` now calls `trace(...)`, then `_persist_trace(...)`, then `_bump_access_counts(...)`, and returns the same `MemoryContext` shape as before. Timeout behavior still wraps only `retrieve(...)`, so future replay can call `trace(...)` directly without the hot-path timeout/persistence side effects.
 - **Candidate scoring fidelity:** `_select_candidates` now retains lexical and vector component scores while preserving the existing blended relevance formula and project-constraint fallback behavior.
-- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 2 checkboxes and related acceptance items are ticked; `ROADMAP.md` Phase 3-A Retrieval Replay item is annotated that the trace-pipeline prerequisite is complete while replay service/API remain pending.
+- **Plan/backlog sync:** `docs/design/P3A_IMPLEMENTATION_PLAN.md` Issue 2 checkboxes and related acceptance items are ticked; `docs/design/ROADMAP.md` Phase 3-A Retrieval Replay item is annotated that the trace-pipeline prerequisite is complete while replay service/API remain pending.
 
 ## Latest Verification (2026-06-10 Phase 3-A Issue 2)
 
@@ -52,7 +59,7 @@ Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are 
 - **Diff semantics:** implemented candidate added/removed/order drift, relevance/final/state score drift, decision/reject-reason drift, context block added/removed/order drift, token usage drift, and missing memory/run/step integrity diffs. Severity ordering is deterministic (`critical` before `warning` before `info`); dangerous rejected→accepted drifts are critical, accepted→rejected/order/score/token drifts are warnings.
 - **No-side-effect guarantee:** replay calls the side-effect-free trace pipeline directly and does not create access/gate/profile rows, does not flush buffered extraction, and does not mutate `MemoryItem.access_count`.
 - **Runtime facade:** `MemoryRuntime.replay_access(access_id)` and `MemoryRuntime.replay_run(run_id)` now expose the service for Issue 4 API wiring.
-- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 3 checkboxes and replay acceptance items are ticked/annotated; `ROADMAP.md` Phase 3-A Retrieval Replay item is annotated that service + diff semantics are complete while HTTP APIs remain pending.
+- **Plan/backlog sync:** `docs/design/P3A_IMPLEMENTATION_PLAN.md` Issue 3 checkboxes and replay acceptance items are ticked/annotated; `docs/design/ROADMAP.md` Phase 3-A Retrieval Replay item is annotated that service + diff semantics are complete while HTTP APIs remain pending.
 
 ## Latest Verification (2026-06-10 Phase 3-A Issue 3)
 
@@ -66,7 +73,7 @@ Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are 
 - **HTTP error semantics:** missing access maps to `404 access not found`; missing original run maps to `404 run not found`; run-level replay validates the run exists before replaying its accesses.
 - **Observability summary API:** added `GET /v1/observability/summary?workspace_id=&run_id=` returning `ObservabilitySummary` with deterministic counters from persisted access/gate logs. Workspace leakage is counted from all candidate memories represented by gate logs (not only accepted memories), matching the Phase 3-A metric semantics. This is the minimal Issue 4 endpoint wiring; Issue 5 remains responsible for profiler phase expansion and broader Quality/Safety metric hardening.
 - **Tests:** added `apps/api/tests/api/test_observability.py` covering replay access/run endpoints, 404 mappings, and the summary endpoint.
-- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 4 checkboxes are ticked; `ROADMAP.md` Phase 3-A Retrieval Replay is marked complete because HTTP APIs are now wired.
+- **Plan/backlog sync:** `docs/design/P3A_IMPLEMENTATION_PLAN.md` Issue 4 checkboxes are ticked; `docs/design/ROADMAP.md` Phase 3-A Retrieval Replay is marked complete because HTTP APIs are now wired.
 
 ## Latest Verification (2026-06-10 Phase 3-A Issue 4)
 
@@ -80,7 +87,7 @@ Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are 
 - **Access-level metrics helper:** `app.observability.metrics.build_access_observability_metrics(...)` is public via `__all__` and computes candidate/accepted/rejected counts, tokens/latency, failed-branch rejection/injection, stale rejection/injection, tool-sensitive/destructive blocking, risk blocking, workspace mismatch/leakage, and superseded injection from persisted access/gate records plus candidate/accepted memory views.
 - **Summary hardening:** `build_observability_summary(repo, workspace_id=None, run_id=None)` uses the access-level helper, supports workspace/run filters, aggregates totals, and exposes P3-A §7.3 `by_strategy` averages/rates.
 - **Read-only guarantee:** `MemoryRuntime.observability_summary(...)` remains a read facade over persisted logs and does not create fake `quality` / `safety` `ProfileEvent` rows.
-- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 5 checkboxes are ticked; `ROADMAP.md` Phase 3-A Quality/Safety and phase-aware profiler items are marked complete with P3-A semantics.
+- **Plan/backlog sync:** `docs/design/P3A_IMPLEMENTATION_PLAN.md` Issue 5 checkboxes are ticked; `docs/design/ROADMAP.md` Phase 3-A Quality/Safety and phase-aware profiler items are marked complete with P3-A semantics.
 
 ## Latest Verification (2026-06-10 Phase 3-A Issue 5)
 
@@ -94,7 +101,7 @@ Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are 
 - **Dashboard model:** `DashboardTables` now includes `observability_summary: ObservabilitySummary | None` while preserving `runs`, `accesses`, `profile_events`, `benchmark_cases`, `benchmark_results`, `eval_cases`, `eval_runs`, `eval_results`, and `benchmark_summary`.
 - **Runtime wiring:** `MemoryRuntime.dashboard_tables(workspace_id=...)` now computes `build_observability_summary(...)` with the same workspace filter as the dashboard request; eval result workspace filtering through scoped eval runs remains intact.
 - **Tests:** dashboard API coverage asserts eval rows and workspace-scoped observability summary are present without changing existing benchmark row counts; eval-record tests were updated now that Issue 6 owns the summary field.
-- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 6 checkboxes and acceptance item are ticked; `ROADMAP.md` minimal dashboard item is annotated that table API extension is complete and static reports remain Issue 7.
+- **Plan/backlog sync:** `docs/design/P3A_IMPLEMENTATION_PLAN.md` Issue 6 checkboxes and acceptance item are ticked; `docs/design/ROADMAP.md` minimal dashboard item is annotated that table API extension is complete and static reports remain Issue 7.
 
 ## Latest Verification (2026-06-10 Phase 3-A Issue 6)
 
@@ -109,7 +116,7 @@ Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are 
 - **Report writer:** `app.observability.reports.write_observability_report(...)` writes deterministic `observability_report.json`, `observability_report.md`, and `observability_report.html` artifacts under a safe `reports/`-scoped output directory. JSON includes summary, access rows, per-access metrics, critical drift counts, context block counts, and optional replay payloads. Markdown includes Summary, Strategy Breakdown, Quality Signals, Safety Signals, Slowest Accesses, Replay Drift, and Access Details with concrete replay access commands. HTML is a single static inline-CSS file with summary cards, strategy table, quality/safety table, replay drift table, and per-access `<details>` sections; no external JS/CDN is used.
 - **Runtime/API/CLI wiring:** `MemoryRuntime.write_observability_report(...)` exposes the writer, `POST /v1/observability/reports` returns generated paths plus summary, and `uv run python -m app.observability.reports --output-dir reports` writes an in-memory empty report fixture for local smoke checks. Unsafe output directories (absolute paths, `..`, or paths outside `reports/`) map to HTTP 400.
 - **Read-only diagnostics:** report generation reads persisted access/gate logs and uses `RetrievalReplayService` for optional side-effect-free replay; it does not create access/gate/profile rows and does not mutate memory access counters.
-- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 7 checkboxes are ticked; `ROADMAP.md` minimal dashboard/static report item is marked complete.
+- **Plan/backlog sync:** `docs/design/P3A_IMPLEMENTATION_PLAN.md` Issue 7 checkboxes are ticked; `docs/design/ROADMAP.md` minimal dashboard/static report item is marked complete.
 
 ## Latest Verification (2026-06-10 Phase 3-A Issue 7)
 
@@ -125,7 +132,7 @@ Post-P3A work is now in the showcase/reproducibility phase. Showcase assets are 
 - **Full regression:** `uv run pytest -q` -> **145 passed** after Issue 7 report/API/CLI/symlink-safety implementation.
 - **Deterministic benchmark:** `uv run python -m app.benchmark.runner --output-dir reports`; `reports/benchmark_results.json` has `acceptance.passed=true` and all 7 checks true (`variant_2_contamination_below_baseline_1`, zero cross-workspace leakage, tool-sensitive block, procedural reuse, superseded exclusion, stale exclusion, no-memory baseline failure recovery).
 - **Generated artifacts:** benchmark and observability report artifacts remain under ignored `reports/`; they are reproducible outputs and are not source-controlled.
-- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` acceptance checklist and Issue 8 checkboxes are ticked; `.ai/REQUIREMENTS.md`, `.ai/IMPLEMENTATION_PLAN.md`, and `ROADMAP.md` now show Phase 3-A complete and point to post-P3A priorities.
+- **Plan/backlog sync:** `docs/design/P3A_IMPLEMENTATION_PLAN.md` acceptance checklist and Issue 8 checkboxes are ticked; `.ai/REQUIREMENTS.md`, `.ai/IMPLEMENTATION_PLAN.md`, and `docs/design/ROADMAP.md` now show Phase 3-A complete and point to post-P3A priorities.
 
 ## Latest Verification (2026-06-10 Phase 3-A complete)
 
@@ -330,4 +337,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2), Phase 3-A backend observability, and showcase/reproducibility baseline are complete. The §0 immediate decisions are resolved (2026-06-10, ADR-015/016/017): deterministic embedding stays the default with a real embedding as an optional config-gated provider; hosted demo gets a lightweight Hosted-Demo Safety Mode first; raw secrets are never stored by default. Recommended next work per `ROADMAP.md` is **Context Compaction** (§9): start with `packer.pack_context` over-budget compression/placeholder compensation so low-priority dropped blocks are summarized instead of silently omitted. After that, proceed to Phase 3.5 SDK/LangGraph adapter (§6) or 6-strategy benchmark expansion (§7). Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.
+The MVP (P0+P1+P2), Phase 3-A backend observability, and showcase/reproducibility baseline are complete. The §0 immediate decisions are resolved (2026-06-10, ADR-015/016/017): deterministic embedding stays the default with a real embedding as an optional config-gated provider; hosted demo gets a lightweight Hosted-Demo Safety Mode first; raw secrets are never stored by default. Recommended next work per `docs/design/ROADMAP.md` is **Context Compaction** (§9): start with `packer.pack_context` over-budget compression/placeholder compensation so low-priority dropped blocks are summarized instead of silently omitted. After that, proceed to Phase 3.5 SDK/LangGraph adapter (§6) or 6-strategy benchmark expansion (§7). Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.

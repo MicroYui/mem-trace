@@ -1,6 +1,6 @@
 ---
 name: sync-design-docs
-description: Use when architecture.md, mvp.md, draft.md, or other design documents changed and the project memory under .ai/ must be refreshed.
+description: Use when docs/design/architecture.md, docs/design/mvp.md, docs/design/draft.md, or other design documents changed and the project memory under .ai/ must be refreshed.
 ---
 
 ## Goal
@@ -10,9 +10,9 @@ Synchronize design documents into the structured project memory files under `.ai
 ## Inputs
 
 Read all relevant design documents:
-- `architecture.md`
-- `mvp.md`
-- `draft.md`
+- `docs/design/architecture.md`
+- `docs/design/mvp.md`
+- `docs/design/draft.md`
 - any Markdown file related to architecture, roadmap, MVP, requirements, or implementation planning
 
 Also read existing `.ai/` files before editing them.

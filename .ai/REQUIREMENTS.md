@@ -2,11 +2,11 @@
 
 ## Current Task
 
-P2 is feature-complete (6/6 mvp.md §2.3 slices, incl. the config-gated LLM extraction pipeline) and committed. Current task is **Phase 3-A backend observability**, planned in `P3A_IMPLEMENTATION_PLAN.md` at the repo root.
+P2 is feature-complete (6/6 mvp.md §2.3 slices, incl. the config-gated LLM extraction pipeline) and committed. Current task is **Phase 3-A backend observability**, planned in `docs/design/P3A_IMPLEMENTATION_PLAN.md`.
 
-Phase 3-A scope: Retrieval Replay, eval tables, Quality/Safety profiler metrics, expanded profiler phases, dashboard-table extension, and static JSON/Markdown/HTML observability reports. Use `P3A_IMPLEMENTATION_PLAN.md` as the concrete implementation plan before touching code. **Issues 1-8 are complete**: access fidelity + eval persistence schema, side-effect-free retrieval trace pipeline, replay service + deterministic diff semantics, replay/observability APIs, Quality/Safety metrics + profiler phase expansion, dashboard table extension, JSON/Markdown/HTML observability reports, and full regression/benchmark/project-memory sync. The next concrete work should come from `ROADMAP.md` post-P3A priorities: showcase assets, Context Compaction, Phase 3.5 SDK/LangGraph adapter, or 6-strategy benchmark expansion.
+Phase 3-A scope: Retrieval Replay, eval tables, Quality/Safety profiler metrics, expanded profiler phases, dashboard-table extension, and static JSON/Markdown/HTML observability reports. Use `docs/design/P3A_IMPLEMENTATION_PLAN.md` as the concrete implementation plan before touching code. **Issues 1-8 are complete**: access fidelity + eval persistence schema, side-effect-free retrieval trace pipeline, replay service + deterministic diff semantics, replay/observability APIs, Quality/Safety metrics + profiler phase expansion, dashboard table extension, JSON/Markdown/HTML observability reports, and full regression/benchmark/project-memory sync. The next concrete work should come from `docs/design/ROADMAP.md` post-P3A priorities: showcase assets, Context Compaction, Phase 3.5 SDK/LangGraph adapter, or 6-strategy benchmark expansion.
 
-**Phase 3-A maintenance rule:** after completing each Issue in `P3A_IMPLEMENTATION_PLAN.md` §11, update `.ai/PROJECT_STATE.md` and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox.
+**Phase 3-A maintenance rule:** after completing each Issue in `docs/design/P3A_IMPLEMENTATION_PLAN.md` §11, update `.ai/PROJECT_STATE.md` and tick or annotate the corresponding `docs/design/ROADMAP.md` checkbox/sub-checkbox.
 
 ## Coding Readiness
 

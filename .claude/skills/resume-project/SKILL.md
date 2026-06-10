@@ -17,7 +17,7 @@ done, what is next) by reading a fixed, minimal set of files instead of guessing
 5. `.ai/OPEN_QUESTIONS.md` — unresolved decisions that may block the next slice.
 6. `.ai/DECISIONS.md` and `.ai/PITFALLS.md` — only the latest ADRs / findings, for context. Skim, don't read in full unless needed.
 
-Do NOT load `architecture.md`, `draft.md`, or the full `mvp.md` unless the task
+Do NOT load `docs/design/architecture.md`, `docs/design/draft.md`, or the full `docs/design/mvp.md` unless the task
 specifically requires the original design docs. They are large; the `.ai/`
 files already summarize them.
 

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use `subagent-driven-development` (recommended) or `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **Progress tracking rule:** after completing each Issue in §11, update `.ai/PROJECT_STATE.md` and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox. Do not leave implementation progress only in chat history.
+> **Progress tracking rule:** after completing each Issue in §11, update `.ai/PROJECT_STATE.md` and tick or annotate the corresponding `docs/design/ROADMAP.md` checkbox/sub-checkbox. Do not leave implementation progress only in chat history.
 
 **Goal:** make every retrieval decision reproducible and inspectable: replay a past access/run, explain candidate selection -> gate -> packing, persist eval results, surface quality/safety metrics, and emit a minimal static observability report.
 
@@ -27,7 +27,7 @@ The implemented system should answer these questions for any recorded retrieval 
 7. **What quality/safety signals were observed?** Failed-branch contamination, stale injection, tool-sensitive blocking, destructive-command blocking, workspace leakage, superseded injection, and packing over-budget drops.
 8. **Can we inspect this without a frontend?** JSON API plus generated Markdown/HTML report.
 
-Primary source in `ROADMAP.md`:
+Primary source in `docs/design/ROADMAP.md`:
 
 - Phase 3-A: Retrieval Replay, eval tables, Quality/Safety profiler, phase-aware profiler, minimal static dashboard/report.
 
@@ -916,8 +916,8 @@ Expected:
 
 ## 10. Acceptance Checklist
 
-- [x] `P3A_IMPLEMENTATION_PLAN.md` is indexed from `.ai/PROJECT_STATE.md`, `.ai/REQUIREMENTS.md`, and `.ai/IMPLEMENTATION_PLAN.md`.
-- [x] `.ai/PROJECT_STATE.md` and `ROADMAP.md` are updated after each completed Issue in §11. (Issue 1)
+- [x] `docs/design/P3A_IMPLEMENTATION_PLAN.md` is indexed from `.ai/PROJECT_STATE.md`, `.ai/REQUIREMENTS.md`, and `.ai/IMPLEMENTATION_PLAN.md`.
+- [x] `.ai/PROJECT_STATE.md` and `docs/design/ROADMAP.md` are updated after each completed Issue in §11. (Issue 1)
 - [x] `MemoryAccessLog.top_k` is persisted in in-memory and SQL repositories. (Issue 1)
 - [x] Alembic migration `0004_phase3a_observability.py` adds `top_k` and eval tables with downgrade. (Issue 1)
 - [x] Hot-path `retrieve_context` output remains backward compatible. (Issue 2)
@@ -939,7 +939,7 @@ Each Issue should be completed independently. After each Issue:
 
 1. Run the targeted tests listed for that Issue.
 2. Update `.ai/PROJECT_STATE.md` with current progress and next action.
-3. Tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox.
+3. Tick or annotate the corresponding `docs/design/ROADMAP.md` checkbox/sub-checkbox.
 4. Commit only if explicitly instructed by the user.
 
 ### Issue 1: Add access fidelity and eval persistence schema
@@ -1128,7 +1128,7 @@ Status: ✅ complete (2026-06-10). Full regression: `uv run pytest -q` -> 145 pa
 - Modify: `.ai/PROJECT_STATE.md`
 - Modify: `.ai/REQUIREMENTS.md` if active task changed during implementation
 - Modify: `.ai/IMPLEMENTATION_PLAN.md` if next task changes
-- Modify: `ROADMAP.md`
+- Modify: `docs/design/ROADMAP.md`
 
 Steps:
 
@@ -1146,5 +1146,5 @@ uv run python -m app.benchmark.runner --output-dir reports
 
 - [x] Verify benchmark JSON has `acceptance.passed=true`.
 - [x] Update `.ai/PROJECT_STATE.md` with completed P3-A scope, verification commands, and next recommended action.
-- [x] Tick or annotate the completed Phase 3-A checkboxes in `ROADMAP.md`.
+- [x] Tick or annotate the completed Phase 3-A checkboxes in `docs/design/ROADMAP.md`.
 - [x] Keep generated report artifacts under ignored `reports/`; do not treat them as source unless explicitly requested.

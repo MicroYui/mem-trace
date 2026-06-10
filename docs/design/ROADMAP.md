@@ -3,7 +3,7 @@
 > 本文件是「未来要做的事情」的权威清单。新会话启动后，连同 `.ai/PROJECT_STATE.md` 一起阅读即可知道当前进度与后续待办。
 >
 > - **进度基线**：P0 + P1 完成；**P2 完成 (6/6)**，含真实 OpenAI 兼容 LLM extraction provider（已对火山方舟 deepseek 实测）+ 真实 LLM 验证 bench（`app/benchmark/llm_bench.py`）。
-> - **来源**：`architecture.md`（完整架构，自带 Phase 标注）、`draft.md`（原始愿景，范围远大于 MVP）、`.ai/MVP_SCOPE.md`（Out of Scope）、`.ai/OPEN_QUESTIONS.md`、`.ai/DECISIONS.md`、`.ai/PROJECT_STATE.md`。
+> - **来源**：`docs/design/architecture.md`（完整架构，自带 Phase 标注）、`docs/design/draft.md`（原始愿景，范围远大于 MVP）、`.ai/MVP_SCOPE.md`（Out of Scope）、`.ai/OPEN_QUESTIONS.md`、`.ai/DECISIONS.md`、`.ai/PROJECT_STATE.md`。
 > - **维护约定**：完成一项后在此勾掉并同步更新 `.ai/PROJECT_STATE.md` 与 `.ai/IMPLEMENTATION_PLAN.md`。区分两类来源——「愿景级」(draft) vs 「已决策推迟」(ADR/MVP_SCOPE)。
 
 ---
@@ -36,7 +36,7 @@
 对齐 architecture §6.9 / §14 Phase 3、draft §9。当前仅有表格 API（`GET /v1/dashboard/tables`，ADR-013）。**先做不依赖前端的 P3-A，再做可视化 P3-B（先 HTML/表，后 React 大前端）。**
 
 ### 3-A：后端可观测性（无需大前端，优先级最高）
-- **实施计划**：见 repo 根目录 `P3A_IMPLEMENTATION_PLAN.md`。执行约定：每完成计划 §11 的一个 Issue，都必须同步更新 `.ai/PROJECT_STATE.md`，并 tick 或注释本节对应 checkbox/sub-checkbox。
+- **实施计划**：见 `docs/design/P3A_IMPLEMENTATION_PLAN.md`。执行约定：每完成计划 §11 的一个 Issue，都必须同步更新 `.ai/PROJECT_STATE.md`，并 tick 或注释本节对应 checkbox/sub-checkbox。
 - [x] **Retrieval Replay**：`replay_retrieval(access_id)` / `replay_run(run_id)` 复现检索→重排→gate→packing。**这是把系统从「跑过一次 demo」升级为「每次检索决策可复现/可解释/可调试」的关键，优先级最高。** 出处：architecture §6.1/§6.9。Phase 3-A Issue 2 已完成其前置基础：`RetrievalController.trace(...)` side-effect-free pipeline + hot-path trace 持久化重构；Phase 3-A Issue 3 已完成 replay service + deterministic diff semantics + runtime facade；Phase 3-A Issue 4 已完成 Replay HTTP API（`GET /v1/replay/access/{access_id}` / `GET /v1/replay/runs/{run_id}`）与最小 observability summary endpoint。
 - [x] **eval 表落地**：`eval_cases / eval_runs / eval_results` 已完成 Phase 3-A Issue 1：新增 eval records、Repository/InMemory/SQL 持久化、dashboard table 字段、Alembic `0004_phase3a_observability.py`，并补 `MemoryAccessLog.top_k` 以支持后续 replay 精确重放。出处：architecture §7.1。
 - [x] **Quality & Safety 指标统一进 profiler**：failed_branch_contamination / stale_injection / tool_safety / workspace_leakage（部分 benchmark 已覆盖，需统一到 profiler）。Phase 3-A Issue 5 已完成为只读 computed observability metrics：access-level helper + summary by_strategy，不默认写入 `quality` / `safety` `ProfileEvent`。

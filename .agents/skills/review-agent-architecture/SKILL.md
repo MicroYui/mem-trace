@@ -29,9 +29,9 @@ Evaluate:
 ## Required Reading
 
 Read:
-- `architecture.md`
-- `mvp.md`
-- `draft.md`
+- `docs/design/architecture.md`
+- `docs/design/mvp.md`
+- `docs/design/draft.md`
 - `.ai/PROJECT_BRIEF.md`
 - `.ai/MVP_SCOPE.md`
 - `.ai/ARCHITECTURE_SUMMARY.md`
