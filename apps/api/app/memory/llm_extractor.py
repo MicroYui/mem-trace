@@ -93,15 +93,30 @@ _SYSTEM_PROMPT = """You extract durable memory facts from a single user message 
 
 Return ONLY a JSON object with a single key "candidates" whose value is a JSON array.
 Each array item is an object with exactly these fields:
-- "key": a stable dotted identifier, e.g. "project.runtime", "project.runtime.excluded".
-- "value": the extracted value, e.g. "bun", "npm".
+- "key": a stable dotted identifier (see the controlled key rules below).
+- "value": the extracted value, lowercased and normalized, e.g. "bun", "npm", "postgres".
 - "memory_type": one of "project", "episodic", "procedural", "working_state". Default "project".
 - "scope": one of "workspace", "session", "run", "global". Default "workspace".
 - "supersede": true if this fact explicitly corrects/replaces a previous preference, else false.
 - "confidence": a float in [0,1].
 
+Controlled keys (ALWAYS reuse the SAME key for the SAME concept so later
+preferences can override earlier ones; do NOT invent a synonym key):
+- The JavaScript/package runtime or package manager (npm, pnpm, yarn, bun, node,
+  deno) -> ALWAYS key "project.runtime". Things to NOT use for the runtime ->
+  key "project.runtime.excluded".
+- Programming language -> "project.language" (excluded -> "project.language.excluded").
+- Database -> "project.database" (excluded -> "project.database.excluded").
+- Test framework -> "project.test_framework".
+- Formatting/lint tool -> "project.formatting".
+- For any other durable concept, use a stable "project.<concept>" key and reuse
+  it verbatim for that concept across turns.
+
 Rules:
 - Extract only durable preferences, project constraints, and explicit corrections.
+- When the user switches to a different choice for the same concept (e.g. "use
+  pnpm" then later "use bun"), emit the controlled key with the new value and set
+  "supersede": true so the old value is retired.
 - Do NOT invent facts. If the message contains nothing durable, return {"candidates": []}.
 - Output JSON only, no prose, no markdown fences."""
 

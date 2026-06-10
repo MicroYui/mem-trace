@@ -244,3 +244,25 @@ async def test_retrieve_times_out_to_empty_context():
     )
     assert ctx.context_blocks == []
     assert any("timed out" in w for w in ctx.warnings)
+
+
+def test_pack_context_emits_dynamic_key_project_memory():
+    """Project memories with non-runtime keys (e.g. from LLM extraction) must
+    still be packed, not silently dropped by the runtime-only merge block."""
+    from app.retrieval.packer import pack_context
+
+    db = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                    key="project.database", value="PostgreSQL",
+                    content="数据库选 PostgreSQL，不要用 MySQL",
+                    summary="project.database=PostgreSQL")
+    runtime = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                         key="project.runtime", value="bun",
+                         content="This project uses Bun", summary="project.runtime=bun")
+    blocks, used = pack_context(active_node=None, accepted=[db, runtime], token_budget=256)
+    joined = " ".join(b.content for b in blocks)
+    # dynamic-key project memory is packed (as its own project_memory block)...
+    assert "PostgreSQL" in joined
+    # ...and the runtime constraint is still merged into the canonical sentence.
+    assert "Bun" in joined
+    assert used > 0
+

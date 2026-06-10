@@ -5,7 +5,19 @@
 
 ## Current Goal
 
-Real LLM extraction is implemented and both unit- and live-verified. Remaining: review/commit the response_format/fence-stripping follow-up changes.
+Real LLM extraction is implemented, unit- and live-verified, and a real-LLM validation bench (`app/benchmark/llm_bench.py`) now exercises memory override, large-scale retrieval, LLM-vs-rule, and natural-language extraction. The bench surfaced + drove two real product fixes (packer dropping dynamic-key project memories; LLM key instability). Remaining: review/commit.
+
+## Implemented (real-LLM validation bench + fixes — 2026-06-10)
+
+- **`app/benchmark/llm_bench.py` (new, manual/opt-in, NOT in CI):** drives the real `LLMExtractionProvider` against a configured OpenAI-compatible endpoint. 4 scenarios: `memory_override` (repeated conflicting prefs must supersede), `scale_retrieval` (12 turns → many memories, targeted probes must hit within token budget), `llm_vs_rule` (compare normalized extracted pairs), `nl_extraction` (colloquial/English/indirect phrasings). Requires `MEMTRACE_LLM_API_KEY`; surfaces errors instead of silently degrading. Writes `reports/llm_bench_report.{json,md}`. Run: `MEMTRACE_LLM_API_KEY=... uv run python -m app.benchmark.llm_bench`.
+- **Fix 1 — packer dropped dynamic-key project memories (`app/retrieval/packer.py`):** `pack_context` previously skipped ALL `MemoryType.project` items (via `proj_ids`) while only merging `project.runtime`/`project.runtime.excluded` into the constraint block, so LLM-extracted keys like `project.database`/`project.cache_layer` were retrieved (accepted by the gate) but silently never packed into any context block. Now only the runtime/excluded keys are merged; every other project memory is emitted as its own `project_memory` block (using `summary` or `content`). Added `test_pack_context_emits_dynamic_key_project_memory`.
+- **Fix 2 — LLM key instability broke conflict resolution (`app/memory/llm_extractor.py` `_SYSTEM_PROMPT`):** the model assigned different keys to the same concept (npm/pnpm → `project.package_manager`, but bun → `project.runtime`), so the resolver (key-based) never reconciled them and both stayed active. The system prompt now defines a controlled key vocabulary (runtime/package-manager → always `project.runtime`; language/database/test_framework/formatting), requires reusing the same key per concept across turns, and to set `supersede=true` when a choice changes.
+
+## Latest Verification (2026-06-10 real-LLM bench + fixes)
+
+- `uv run pytest -q` -> **109 passed** (was 98; +11 incl. packer dynamic-key test).
+- Deterministic benchmark: `acceptance.passed=true` (unchanged; packer fix keeps runtime merge + adds non-runtime project blocks).
+- **Live bench (Volcengine Ark deepseek):** all 4 scenarios PASS — memory_override (active `project.runtime=['bun']`, npm fully retired, pnpm only as exclusion), scale_retrieval (13 memories, 4/4 probes hit, budget respected), llm_vs_rule (LLM extracts where rule writer can't, e.g. ruff/TypeScript), nl_extraction (3/3 colloquial inputs incl. English + indirect Chinese).
 
 ## Implemented (real LLM extraction provider — 2026-06-10)
 

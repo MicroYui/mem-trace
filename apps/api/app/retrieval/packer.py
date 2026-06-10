@@ -156,9 +156,14 @@ def pack_context(
         if path_block is not None:
             blocks.append(path_block)
 
-    # Merged project constraints.
+    # Merged project constraints (runtime + excluded keys only).
     proj_block = build_project_constraint_block(accepted)
-    proj_ids = {m.memory_id for m in accepted if m.memory_type == MemoryType.project}
+    _RUNTIME_KEYS = {"project.runtime", "project.runtime.excluded"}
+    merged_ids = {
+        m.memory_id
+        for m in accepted
+        if m.memory_type == MemoryType.project and m.key in _RUNTIME_KEYS
+    }
 
     type_map = {
         MemoryType.tool_evidence: "tool_evidence",
@@ -168,18 +173,22 @@ def pack_context(
         MemoryType.episodic: "episodic",
     }
     for mem in accepted:
-        if mem.memory_id in proj_ids:
+        if mem.memory_id in merged_ids:
             continue
-        btype = type_map.get(mem.memory_type, "episodic")
+        # Project memories with dynamic keys (e.g. project.database,
+        # project.cache_layer from LLM extraction) are not merged into the
+        # runtime constraint block, but must still be packed individually.
+        btype = "project_memory" if mem.memory_type == MemoryType.project else type_map.get(mem.memory_type, "episodic")
+        content = mem.summary or mem.content if mem.memory_type == MemoryType.project else mem.content
         blocks.append(
             ContextBlock(
                 type=btype,
-                content=mem.content,
+                content=content,
                 source=mem.memory_type.value,
                 memory_id=mem.memory_id,
                 reason=f"accepted {mem.memory_type.value}",
                 provenance=_provenance(mem),
-                tokens=estimate_tokens(mem.content),
+                tokens=estimate_tokens(content),
             )
         )
     if proj_block is not None:
