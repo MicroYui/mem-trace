@@ -10,7 +10,7 @@
 
 **Tech Stack:** Python 3.11+, FastAPI, Pydantic v2, SQLAlchemy 2.0 async, Alembic, PostgreSQL/pgvector, pytest + httpx ASGI tests.
 
----
+***
 
 ## 1. Goal
 
@@ -45,41 +45,33 @@ Existing code to preserve:
 1. **Retrieval Replay APIs**
    - `GET /v1/replay/access/{access_id}`: replay one retrieval access.
    - `GET /v1/replay/runs/{run_id}`: replay all retrieval accesses for a run.
-
 2. **Side-effect-free replay service**
    - Reuses the same scoring/gate/packing logic as hot-path retrieval.
    - Does not create new `memory_access_logs`, `memory_gate_logs`, or `profile_events`.
    - Does not increment `MemoryItem.access_count`.
    - Does not flush buffered extraction; replay reflects the persisted state at replay time.
-
 3. **Pipeline trace model**
    - Captures candidates, gate outcomes, accepted order, packed blocks, warnings, token usage, and profile-like phase summaries.
    - Hot path converts trace -> persisted logs -> `MemoryContext`.
    - Replay converts trace -> replay result/diff.
-
 4. **Access log fidelity improvements**
    - Persist request `top_k` in `MemoryAccessLog` / SQL table so replay can reconstruct the original request exactly.
    - Preserve backwards compatibility by defaulting missing historical `top_k` to current `RetrievalRequest.top_k` default (`10`). The value **must be 10 everywhere**: Pydantic default, API request default, DB default, Alembic server default/backfill, and replay fallback.
-
 5. **Eval tables**
    - Add source-of-truth tables and repository methods for `eval_cases`, `eval_runs`, `eval_results`.
    - Keep existing benchmark tables; eval tables are a more general P3-A schema for future regression suites.
-
 6. **Quality/Safety metrics**
    - Compute metrics from access/gate/profile records and replay traces.
    - Expose metrics through API and static report.
-
 7. **Profiler phase expansion**
    - Expand `ProfilePhase` enum to architecture-aligned phases while keeping existing values stable.
    - Keep Quality/Safety metrics as computed API/report values in P3-A; do not persist `quality` / `safety` `ProfileEvent` rows by default.
-
 8. **Report output**
    - Add a deterministic report generator that writes:
      - `reports/observability_report.json`
      - `reports/observability_report.md`
      - `reports/observability_report.html`
    - Generated reports are artifacts and should remain ignored like existing reports.
-
 9. **Tests**
    - Unit, runtime integration, API, SQL mapping, migration-chain, and report-generation tests.
 
@@ -101,14 +93,12 @@ Existing code to preserve:
 - `MemoryAccessLog`
   - Add `top_k: int = 10`.
   - Rationale: current access logs persist `query`, `strategy`, `token_budget`, but not `top_k`; replay cannot reconstruct original candidate breadth without it.
-
 - `DashboardTables`
   - Add:
     - `eval_cases: list[EvalCaseRecord] = Field(default_factory=list)`
     - `eval_runs: list[EvalRunRecord] = Field(default_factory=list)`
     - `eval_results: list[EvalResultRecord] = Field(default_factory=list)`
     - `observability_summary: ObservabilitySummary | None = None`
-
 - `ProfilePhase`
   - Preserve existing values:
     - `retrieval`
@@ -449,12 +439,10 @@ Responsibilities:
   - reconstructs `RetrievalRequest`
   - invokes side-effect-free retrieval trace
   - computes replay diffs
-
 - `metrics.py`
   - `build_observability_summary(repo, workspace_id=None, run_id=None)`
   - deterministic quality/safety metric functions
   - reusable helpers for report and dashboard
-
 - `reports.py`
   - `write_observability_report(...)`
   - JSON/Markdown/HTML rendering
@@ -573,7 +561,6 @@ Replay result contains two views:
    - If a memory no longer exists, include a warning and a `memory_missing` diff.
    - Assumes every original retrieval candidate has one `MemoryGateLog` row. The original candidate set is reconstructed from those gate logs plus current memory rows.
    - `original_context_blocks_reconstructed` is rebuilt from original accepted gate decisions and current memory rows. It is **not** a historical snapshot and may differ from the exact context originally packed if memory content, status, or state tree changed after the access.
-
 2. **Replayed current view**
    - Recomputed using the original request parameters and current repository state.
    - Uses side-effect-free `RetrievalController.trace`.
@@ -640,7 +627,7 @@ Integrity diffs:
 
 Severity rules:
 
-- `critical`: rejected -> accepted for failed/rolled_back/stale/tool-sensitive/destructive/secret/workspace mismatch memory.
+- `critical`: rejected -> accepted for failed/rolled\_back/stale/tool-sensitive/destructive/secret/workspace mismatch memory.
 - `warning`: accepted -> rejected or score/order/token drift.
 - `info`: content-only display drift or profile latency drift.
 
@@ -736,7 +723,7 @@ Existing hot path continues to record:
 - `gate`
 - `context_packing`
 
-P3-A expands the enum so `quality` and `safety` are available as first-class phases, but **does not persist quality/safety `ProfileEvent` rows by default**. Quality/Safety metrics are returned in APIs and reports as deterministic computed values. A later explicit observability-run feature may persist `quality` / `safety` profile events, but replay and summary/report reads stay side-effect-free in this phase.
+P3-A expands the enum so `quality` and `safety` are available as first-class phases, but **does not persist quality/safety** **`ProfileEvent`** **rows by default**. Quality/Safety metrics are returned in APIs and reports as deterministic computed values. A later explicit observability-run feature may persist `quality` / `safety` profile events, but replay and summary/report reads stay side-effect-free in this phase.
 
 Do not force generation/maintenance events until those phases have real operations. They can exist in the enum for schema readiness but should not be emitted as fake zero rows.
 
@@ -829,12 +816,10 @@ Cases:
   - Call `rt._retrieval.trace(...)`.
   - Assert candidate/gate/context are populated.
   - Assert repo access/gate/profile counts are unchanged.
-
 - `test_hot_path_persists_trace_and_keeps_existing_context_output`
   - Call `retrieve_context`.
   - Assert same `MemoryContext` shape as before.
   - Assert access log has `top_k`.
-
 - `test_trace_exposes_lexical_and_vector_components`
   - Seed memory with deterministic embedding.
   - Assert component scores are present and blended relevance equals existing formula.
@@ -849,19 +834,16 @@ Cases:
   - Run a retrieval.
   - Replay its `access_id`.
   - Assert `diffs == []` or only non-critical latency metadata diffs if latency is intentionally excluded from comparison.
-
 - `test_replay_detects_decision_drift_after_memory_status_change`
   - Run retrieval with an accepted memory.
   - Mutate that memory to `status=quarantined` or `branch_status=rolled_back`.
   - Replay.
   - Assert `decision_changed` and severity `critical` or `warning` according to risk.
-
 - `test_replay_detects_candidate_added_and_removed`
   - Run retrieval.
   - Add a new highly relevant memory and supersede/remove an old one.
   - Replay.
   - Assert candidate diffs.
-
 - `test_replay_does_not_increment_access_count_or_write_logs`
   - Capture counts and memory `access_count` before replay.
   - Replay.
@@ -938,8 +920,8 @@ Expected:
 - [x] `.ai/PROJECT_STATE.md` and `ROADMAP.md` are updated after each completed Issue in §11. (Issue 1)
 - [x] `MemoryAccessLog.top_k` is persisted in in-memory and SQL repositories. (Issue 1)
 - [x] Alembic migration `0004_phase3a_observability.py` adds `top_k` and eval tables with downgrade. (Issue 1)
-- [ ] Hot-path `retrieve_context` output remains backward compatible.
-- [ ] `RetrievalController.trace(...)` or equivalent side-effect-free pipeline exists and is used by both hot path and replay.
+- [x] Hot-path `retrieve_context` output remains backward compatible. (Issue 2)
+- [x] `RetrievalController.trace(...)` or equivalent side-effect-free pipeline exists and is used by both hot path and replay. (Issue 2; replay service will consume it in Issue 3)
 - [ ] Replay one access returns original view, replayed view, diffs, metrics, and warnings.
 - [ ] Replay one run aggregates all access replays for that run.
 - [ ] Replay does not create access/gate/profile rows and does not mutate memory access counts.
@@ -993,6 +975,8 @@ uv run pytest apps/api/tests/observability/test_eval_records.py -q
 
 ### Issue 2: Refactor retrieval into traceable side-effect-free pipeline
 
+Status: ✅ complete (2026-06-10). Targeted verification: `uv run pytest apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> 16 passed.
+
 **Files:**
 
 - Modify: `apps/api/app/retrieval/controller.py`
@@ -1002,13 +986,13 @@ uv run pytest apps/api/tests/observability/test_eval_records.py -q
 
 Steps:
 
-- [ ] Introduce internal trace structures for candidate components, gate outcomes, accepted memories, packed blocks, warnings, and phase profile.
-- [ ] Change candidate selection to retain lexical and vector component scores.
-- [ ] Add `RetrievalController.trace(...)` that performs selection -> gate -> pack without persistence/mutations.
-- [ ] Rewrite hot-path `_retrieve_impl` to call trace, then persist logs/profile and bump accepted memory access counts.
-- [ ] Ensure timeout behavior still wraps only hot-path `retrieve(...)`; replay uses trace directly.
-- [ ] Persist `access_record.top_k = request.top_k` on the hot path.
-- [ ] Run:
+- [x] Introduce internal trace structures for candidate components, gate outcomes, accepted memories, packed blocks, warnings, and phase profile.
+- [x] Change candidate selection to retain lexical and vector component scores.
+- [x] Add `RetrievalController.trace(...)` that performs selection -> gate -> pack without persistence/mutations.
+- [x] Rewrite hot-path `_retrieve_impl` to call trace, then persist logs/profile and bump accepted memory access counts.
+- [x] Ensure timeout behavior still wraps only hot-path `retrieve(...)`; replay uses trace directly.
+- [x] Persist `access_record.top_k = request.top_k` on the hot path.
+- [x] Run:
 
 ```bash
 uv run pytest apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/retrieval/test_retrieval_flow.py -q
@@ -1152,3 +1136,4 @@ uv run python -m app.benchmark.runner --output-dir reports
 - [ ] Update `.ai/PROJECT_STATE.md` with completed P3-A scope, verification commands, and next recommended action.
 - [ ] Tick or annotate the completed Phase 3-A checkboxes in `ROADMAP.md`.
 - [ ] Keep generated report artifacts under ignored `reports/`; do not treat them as source unless explicitly requested.
+

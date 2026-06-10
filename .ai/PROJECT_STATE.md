@@ -1,7 +1,7 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issue 1 is complete**: access-log fidelity (`MemoryAccessLog.top_k`) and eval persistence schema (`eval_cases`, `eval_runs`, `eval_results`) are implemented and tested. The next Phase 3-A slice is **Issue 2: side-effect-free retrieval trace pipeline**.
-- **Last updated:** 2026-06-10 (Phase 3-A Issue 1 implemented and verified).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issue 1 and Issue 2 are complete**: access-log fidelity/eval persistence schema are implemented, and retrieval now has a side-effect-free trace pipeline used by the hot path. The next Phase 3-A slice is **Issue 3: replay service + diff semantics**.
+- **Last updated:** 2026-06-10 (Phase 3-A Issue 2 implemented and verified).
 
 ## Current Goal
 
@@ -29,6 +29,21 @@ Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3
 - Additional RED for workspace filtering: `uv run pytest apps/api/tests/observability/test_eval_records.py::test_dashboard_tables_filters_eval_results_by_workspace -q` failed because `eval_results` included another workspace's result; fixed by filtering results through workspace-scoped eval runs.
 - Targeted regression: `uv run pytest apps/api/tests/observability/test_eval_records.py apps/api/tests/storage/test_migrations.py apps/api/tests/api/test_dashboard.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> **20 passed**.
 - Review: spec compliance PASS; code quality APPROVED after the workspace-filtering fix.
+
+## Implemented (Phase 3-A Issue 2 — side-effect-free retrieval trace pipeline — 2026-06-10)
+
+- **Trace structures:** `RetrievalCandidateTrace` captures each candidate memory plus lexical/vector/relevance/state-match score components; `RetrievalPipelineTrace` captures the in-memory access record, active state/path, candidates, gate outcomes, accepted memories, packed context blocks, warnings, token usage, and per-phase profile summaries.
+- **Side-effect-free pipeline:** `RetrievalController.trace(...)` now runs candidate selection -> gate -> context packing without creating access/gate/profile rows and without mutating `MemoryItem.access_count`. It preserves request fidelity, including `access_record.top_k = request.top_k`.
+- **Hot-path refactor:** `_retrieve_impl` now calls `trace(...)`, then `_persist_trace(...)`, then `_bump_access_counts(...)`, and returns the same `MemoryContext` shape as before. Timeout behavior still wraps only `retrieve(...)`, so future replay can call `trace(...)` directly without the hot-path timeout/persistence side effects.
+- **Candidate scoring fidelity:** `_select_candidates` now retains lexical and vector component scores while preserving the existing blended relevance formula and project-constraint fallback behavior.
+- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 2 checkboxes and related acceptance items are ticked; `ROADMAP.md` Phase 3-A Retrieval Replay item is annotated that the trace-pipeline prerequisite is complete while replay service/API remain pending.
+
+## Latest Verification (2026-06-10 Phase 3-A Issue 2)
+
+- TDD RED for missing trace pipeline: `uv run pytest apps/api/tests/retrieval/test_retrieval_trace.py -q` failed on `AttributeError: 'RetrievalController' object has no attribute 'trace'`.
+- Targeted regression: `uv run pytest apps/api/tests/retrieval/test_retrieval_trace.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> **16 passed**.
+- Full regression: `uv run pytest -q` -> **118 passed**.
+- Deterministic benchmark: `uv run python -m app.benchmark.runner --output-dir reports`; generated `reports/benchmark_results.json` with `acceptance.passed=true`.
 
 ## Implemented (real-LLM validation bench + fixes — 2026-06-10)
 
@@ -210,4 +225,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2) is complete. Phase 3-A Issue 1 is implemented but not committed in this snapshot. **Next recommended action:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 **Issue 2: Refactor retrieval into traceable side-effect-free pipeline**. Preserve the new `MemoryAccessLog.top_k` field, keep hot-path `retrieve_context` backward compatible, and add tests proving `RetrievalController.trace(...)` does not persist access/gate/profile rows or mutate memory access counts. Broader recommended order remains: finish Phase 3-A backend observability, then showcase assets §12, Context Compaction §9, Phase 3.5 SDK/LangGraph adapter §6, and 6-strategy benchmark §7; heavy infra and advanced storage stay deferred.
+The MVP (P0+P1+P2) is complete. Phase 3-A Issue 1 and Issue 2 are implemented and verified. **Next recommended action:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 **Issue 3: Implement replay service and diff semantics**. Reuse `RetrievalController.trace(...)` for replay, keep replay side-effect-free (no access/gate/profile writes and no memory access-count mutation), and add deterministic diff tests for unchanged repositories, decision drift, candidate added/removed, and no-side-effect guarantees. Broader recommended order remains: finish Phase 3-A backend observability, then showcase assets §12, Context Compaction §9, Phase 3.5 SDK/LangGraph adapter §6, and 6-strategy benchmark §7; heavy infra and advanced storage stay deferred.

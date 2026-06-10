@@ -7,20 +7,22 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 from app.retrieval import gate as gatemod
 from app.retrieval.packer import pack_context
-from app.retrieval.profiler import Profiler
 from app.retrieval.similarity import cosine_similarity, lexical_similarity, stable_embedding
 from app.config import get_settings
 from app.runtime.models import (
     BranchStatus,
+    ContextBlock,
     MemoryAccessLog,
     MemoryContext,
     MemoryGateLog,
     MemoryItem,
     MemoryStatus,
+    ProfileEvent,
     ProfilePhase,
     RetrievalRequest,
     RetrievalStrategy,
@@ -44,6 +46,37 @@ _RETRIEVABLE_STATUSES = frozenset(
         MemoryStatus.quarantined,
     }
 )
+
+
+@dataclass(slots=True)
+class RetrievalCandidateTrace:
+    """Candidate plus retrieval score components for trace/replay."""
+
+    memory: MemoryItem
+    lexical_score: float = 0.0
+    vector_score: float = 0.0
+    relevance_score: float = 0.0
+    state_match_score: float = 0.0
+
+
+@dataclass(slots=True)
+class RetrievalPipelineTrace:
+    """Side-effect-free retrieval pipeline output.
+
+    ``access_record`` is an in-memory record. The hot path persists it via
+    ``_persist_trace``; replay can consume the same trace without any writes.
+    """
+
+    access_record: MemoryAccessLog
+    active_node: Optional[StateNode] = None
+    active_path: list[StateNode] = field(default_factory=list)
+    candidates: list[RetrievalCandidateTrace] = field(default_factory=list)
+    gate_outcomes: list[gatemod.GateOutcome] = field(default_factory=list)
+    accepted_memories: list[MemoryItem] = field(default_factory=list)
+    context_blocks: list[ContextBlock] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    phase_profile: dict[str, dict[str, Any]] = field(default_factory=dict)
+    actual_tokens: int = 0
 
 
 class RetrievalController:
@@ -76,8 +109,23 @@ class RetrievalController:
         return await self._retrieve_impl(request, workspace_id=workspace_id)
 
     async def _retrieve_impl(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
+        trace = await self.trace(request, workspace_id=workspace_id)
+        await self._persist_trace(trace)
+        await self._bump_access_counts(trace.accepted_memories)
+        return self._context_from_trace(trace)
+
+    async def trace(
+        self,
+        request: RetrievalRequest,
+        *,
+        workspace_id: str,
+        access_id: str | None = None,
+    ) -> RetrievalPipelineTrace:
+        """Run selection -> gate -> pack without persistence or mutations."""
         budget = request.token_budget or self._default_budget
+        access_kwargs: dict[str, Any] = {"access_id": access_id} if access_id is not None else {}
         access = MemoryAccessLog(
+            **access_kwargs,
             workspace_id=workspace_id,
             run_id=request.run_id,
             step_id=request.step_id,
@@ -87,13 +135,18 @@ class RetrievalController:
             token_budget=budget,
             top_k=request.top_k,
         )
-        profiler = Profiler(self._repo, run_id=request.run_id, step_id=request.step_id, access_id=access.access_id)
+        phase_profile: dict[str, dict[str, Any]] = {}
 
         # ---- baseline_0: no memory ------------------------------------- #
         if request.strategy == RetrievalStrategy.baseline_0:
-            await self._repo.add_access_log(access)
-            await profiler.record(ProfilePhase.retrieval, latency_ms=0, operation="no_memory")
-            return MemoryContext(access_id=access.access_id, query=request.query, profile=self._profile_summary(access))
+            phase_profile[ProfilePhase.retrieval.value] = {
+                "latency_ms": 0,
+                "operation": "no_memory",
+                "candidate_count": 0,
+                "accepted_count": 0,
+                "rejected_count": 0,
+            }
+            return RetrievalPipelineTrace(access_record=access, phase_profile=phase_profile)
 
         config = gatemod.GateConfig.for_strategy(request.strategy)
 
@@ -107,19 +160,25 @@ class RetrievalController:
             top_k=request.top_k,
         )
         retrieval_ms = int((time.perf_counter() - t0) * 1000)
-        await profiler.record(
-            ProfilePhase.retrieval,
-            latency_ms=retrieval_ms,
-            operation="lexical",
-            candidate_count=len(candidates),
-        )
+        phase_profile[ProfilePhase.retrieval.value] = {
+            "latency_ms": retrieval_ms,
+            # Preserve the existing profiler operation label for hot-path
+            # backward compatibility; component scores in the trace expose the
+            # lexical/vector split for replay and observability.
+            "operation": "lexical",
+            "candidate_count": len(candidates),
+            "accepted_count": 0,
+            "rejected_count": 0,
+        }
 
         # ---- phase: gate ----------------------------------------------- #
         t1 = time.perf_counter()
         outcomes = []
-        gate_logs: list[MemoryGateLog] = []
-        for mem, relevance in candidates:
+        for candidate in candidates:
+            mem = candidate.memory
+            relevance = candidate.relevance_score
             state_match = self._state_match(mem, active_ids)
+            candidate.state_match_score = state_match
             outcome = gatemod.evaluate(
                 mem,
                 workspace_id=workspace_id,
@@ -128,32 +187,16 @@ class RetrievalController:
                 config=config,
             )
             outcomes.append(outcome)
-            gate_logs.append(
-                MemoryGateLog(
-                    access_id=access.access_id,
-                    memory_id=mem.memory_id,
-                    layer=outcome.layer,
-                    decision=outcome.decision,
-                    reject_reason=outcome.reject_reason,
-                    relevance_score=outcome.relevance_score,
-                    state_match_score=outcome.state_match_score,
-                    freshness_score=outcome.freshness_score,
-                    trust_score=outcome.trust_score,
-                    risk_score=outcome.risk_score,
-                    final_score=outcome.final_score,
-                )
-            )
         gate_ms = int((time.perf_counter() - t1) * 1000)
         accepted_outcomes = [o for o in outcomes if o.accepted]
         rejected_outcomes = [o for o in outcomes if not o.accepted]
-        await profiler.record(
-            ProfilePhase.gate,
-            latency_ms=gate_ms,
-            operation=request.strategy.value,
-            candidate_count=len(outcomes),
-            accepted_count=len(accepted_outcomes),
-            rejected_count=len(rejected_outcomes),
-        )
+        phase_profile[ProfilePhase.gate.value] = {
+            "latency_ms": gate_ms,
+            "operation": request.strategy.value,
+            "candidate_count": len(outcomes),
+            "accepted_count": len(accepted_outcomes),
+            "rejected_count": len(rejected_outcomes),
+        }
 
         # rank accepted by final score desc
         accepted_outcomes.sort(key=lambda o: o.final_score, reverse=True)
@@ -168,12 +211,13 @@ class RetrievalController:
             active_path=active_path,
         )
         packing_ms = int((time.perf_counter() - t2) * 1000)
-        await profiler.record(
-            ProfilePhase.context_packing,
-            latency_ms=packing_ms,
-            operation="pack",
-            accepted_count=len(blocks),
-        )
+        phase_profile[ProfilePhase.context_packing.value] = {
+            "latency_ms": packing_ms,
+            "operation": "pack",
+            "candidate_count": 0,
+            "accepted_count": len(blocks),
+            "rejected_count": 0,
+        }
 
         # warnings: excluded failed/rolled_back + risk warns
         warnings = self._build_warnings(rejected_outcomes, accepted_outcomes)
@@ -184,20 +228,72 @@ class RetrievalController:
         access.rejected_count = len(rejected_outcomes)
         access.actual_tokens = actual_tokens
         access.latency_ms = retrieval_ms + gate_ms + packing_ms
-        await self._repo.add_access_log(access)
-        for gl in gate_logs:
-            await self._repo.add_gate_log(gl)
 
-        # bump access bookkeeping on accepted memories (best-effort)
+        return RetrievalPipelineTrace(
+            access_record=access,
+            active_node=active_node,
+            active_path=active_path,
+            candidates=candidates,
+            gate_outcomes=outcomes,
+            accepted_memories=accepted_memories,
+            context_blocks=blocks,
+            warnings=warnings,
+            phase_profile=phase_profile,
+            actual_tokens=actual_tokens,
+        )
+
+    async def _persist_trace(self, trace: RetrievalPipelineTrace) -> None:
+        access = trace.access_record
+        await self._repo.add_access_log(access)
+
+        for outcome in trace.gate_outcomes:
+            await self._repo.add_gate_log(
+                MemoryGateLog(
+                    access_id=access.access_id,
+                    memory_id=outcome.memory.memory_id,
+                    layer=outcome.layer,
+                    decision=outcome.decision,
+                    reject_reason=outcome.reject_reason,
+                    relevance_score=outcome.relevance_score,
+                    state_match_score=outcome.state_match_score,
+                    freshness_score=outcome.freshness_score,
+                    trust_score=outcome.trust_score,
+                    risk_score=outcome.risk_score,
+                    final_score=outcome.final_score,
+                )
+            )
+
+        for phase_name, fields in trace.phase_profile.items():
+            try:
+                await self._repo.add_profile_event(
+                    ProfileEvent(
+                        run_id=access.run_id,
+                        step_id=access.step_id,
+                        access_id=access.access_id,
+                        phase=ProfilePhase(phase_name),
+                        operation=fields.get("operation"),
+                        latency_ms=int(fields.get("latency_ms", 0)),
+                        candidate_count=int(fields.get("candidate_count", 0)),
+                        accepted_count=int(fields.get("accepted_count", 0)),
+                        rejected_count=int(fields.get("rejected_count", 0)),
+                        metadata=dict(fields.get("metadata", {})),
+                    )
+                )
+            except Exception:  # noqa: BLE001 - profiler must not break hot path
+                pass
+
+    async def _bump_access_counts(self, accepted_memories: list[MemoryItem]) -> None:
         for mem in accepted_memories:
             mem.access_count += 1
             await self._repo.update_memory(mem)
 
+    def _context_from_trace(self, trace: RetrievalPipelineTrace) -> MemoryContext:
+        access = trace.access_record
         return MemoryContext(
             access_id=access.access_id,
-            query=request.query,
-            context_blocks=blocks,
-            warnings=warnings,
+            query=access.query,
+            context_blocks=trace.context_blocks,
+            warnings=trace.warnings,
             profile=self._profile_summary(access),
         )
 
@@ -226,7 +322,7 @@ class RetrievalController:
         run_id: str,
         query: str,
         top_k: int,
-    ) -> list[tuple[MemoryItem, float]]:
+    ) -> list[RetrievalCandidateTrace]:
         # Workspace-scoped retrieval is the permission filter: cross-workspace
         # memories never become candidates, so leakage is impossible by
         # construction. The gate's workspace_mismatch rule is defense-in-depth.
@@ -247,7 +343,7 @@ class RetrievalController:
         w_vec = self._vector_weight if (self._use_vector and vector_scores) else 0.0
         w_lex = 1.0 - w_vec
 
-        scored: list[tuple[MemoryItem, float]] = []
+        scored: list[RetrievalCandidateTrace] = []
         for m in memories:
             if m.status not in _RETRIEVABLE_STATUSES:
                 continue  # skip superseded/archived/dormant/deleted lifecycle states
@@ -258,8 +354,15 @@ class RetrievalController:
             if m.memory_type.value == "project" and rel == 0.0:
                 rel = 0.2
             if rel > 0.0:
-                scored.append((m, rel))
-        scored.sort(key=lambda x: x[1], reverse=True)
+                scored.append(
+                    RetrievalCandidateTrace(
+                        memory=m,
+                        lexical_score=lex,
+                        vector_score=vec,
+                        relevance_score=rel,
+                    )
+                )
+        scored.sort(key=lambda c: c.relevance_score, reverse=True)
         return scored[:top_k]
 
     @staticmethod
@@ -310,4 +413,4 @@ class RetrievalController:
         }
 
 
-__all__ = ["RetrievalController"]
+__all__ = ["RetrievalController", "RetrievalCandidateTrace", "RetrievalPipelineTrace"]

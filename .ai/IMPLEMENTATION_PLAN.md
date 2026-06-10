@@ -42,8 +42,8 @@ MVP (P0+P1+P2) is complete and committed. The selected next slice is
 Implement `P3A_IMPLEMENTATION_PLAN.md` §11 issue-by-issue:
 
 1. access fidelity + eval persistence schema; ✅ complete (2026-06-10)
-2. side-effect-free retrieval trace pipeline; ⬅ next
-3. replay service + diff semantics;
+2. side-effect-free retrieval trace pipeline; ✅ complete (2026-06-10)
+3. replay service + diff semantics; ⬅ next
 4. replay/observability APIs;
 5. Quality/Safety metrics + profiler phase expansion;
 6. dashboard table extension;

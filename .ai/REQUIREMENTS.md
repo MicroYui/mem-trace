@@ -4,7 +4,7 @@
 
 P2 is feature-complete (6/6 mvp.md §2.3 slices, incl. the config-gated LLM extraction pipeline) and committed. Current task is **Phase 3-A backend observability**, planned in `P3A_IMPLEMENTATION_PLAN.md` at the repo root.
 
-Phase 3-A scope: Retrieval Replay, eval tables, Quality/Safety profiler metrics, expanded profiler phases, dashboard-table extension, and static JSON/Markdown/HTML observability reports. Use `P3A_IMPLEMENTATION_PLAN.md` as the concrete implementation plan before touching code. **Issue 1 is complete** (access fidelity + eval persistence schema); the next concrete slice is **Issue 2: side-effect-free retrieval trace pipeline**.
+Phase 3-A scope: Retrieval Replay, eval tables, Quality/Safety profiler metrics, expanded profiler phases, dashboard-table extension, and static JSON/Markdown/HTML observability reports. Use `P3A_IMPLEMENTATION_PLAN.md` as the concrete implementation plan before touching code. **Issue 1 is complete** (access fidelity + eval persistence schema) and **Issue 2 is complete** (side-effect-free retrieval trace pipeline); the next concrete slice is **Issue 3: replay service + diff semantics**.
 
 **Phase 3-A maintenance rule:** after completing each Issue in `P3A_IMPLEMENTATION_PLAN.md` §11, update `.ai/PROJECT_STATE.md` and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox.
 
@@ -58,7 +58,7 @@ apps/api/app/
   api/       deps.py, routes.py
   demo/      run_demo.py
   config.py, main.py
-apps/api/tests/   runtime/, memory/, retrieval/, benchmark/, api/ (98 tests)
+apps/api/tests/   runtime/, memory/, retrieval/, benchmark/, api/, observability/, storage/ (118 tests)
 migrations/       env.py, versions/0001_initial.py, versions/0002_pgvector.py, versions/0003_memory_superseded_by.py
 ```
 
