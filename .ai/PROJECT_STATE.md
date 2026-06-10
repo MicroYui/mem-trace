@@ -1,11 +1,34 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)**. The config-gated LLM extraction pipeline now ships a **real OpenAI-compatible `LLMExtractionProvider`** (httpx) in addition to the deterministic fake. `ExtractionProvider.extract` is now async; LLM failures degrade to the rule writer. Implemented, unit-tested, AND **live-verified against Volcengine Ark** (deepseek model). Uncommitted working-tree changes on top of commit `eced265`.
-- **Last updated:** 2026-06-10 (real LLM extraction provider + live verification).
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A Issue 1 is complete**: access-log fidelity (`MemoryAccessLog.top_k`) and eval persistence schema (`eval_cases`, `eval_runs`, `eval_results`) are implemented and tested. The next Phase 3-A slice is **Issue 2: side-effect-free retrieval trace pipeline**.
+- **Last updated:** 2026-06-10 (Phase 3-A Issue 1 implemented and verified).
 
 ## Current Goal
 
-Real LLM extraction is implemented, unit- and live-verified, and a real-LLM validation bench (`app/benchmark/llm_bench.py`) now exercises memory override, large-scale retrieval, LLM-vs-rule, and natural-language extraction. The bench surfaced + drove two real product fixes (packer dropping dynamic-key project memories; LLM key instability). Remaining: review/commit.
+Use `P3A_IMPLEMENTATION_PLAN.md` as the authoritative execution plan for Phase 3-A. Phase 3-A upgrades the completed MVP from "demo/benchmark succeeded" to replayable, explainable, and measurable retrieval observability: side-effect-free retrieval replay, eval tables, deterministic quality/safety metrics, expanded profiler phases, and JSON/Markdown/HTML observability reports.
+
+**Maintenance rule for Phase 3-A:** after completing each Issue in `P3A_IMPLEMENTATION_PLAN.md` §11, update this file with current progress/verification and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox. Do not leave progress only in chat history.
+
+## Planned (Phase 3-A — Retrieval Replay & Observability — 2026-06-10)
+
+- **Plan file:** `P3A_IMPLEMENTATION_PLAN.md` at repo root.
+- **Scope:** `GET /v1/replay/access/{access_id}`, `GET /v1/replay/runs/{run_id}`, observability summary API, side-effect-free retrieval trace/replay service, `MemoryAccessLog.top_k`, eval tables (`eval_cases`, `eval_runs`, `eval_results`), Quality/Safety metrics, expanded `ProfilePhase`, dashboard table extension, and generated `reports/observability_report.{json,md,html}`.
+- **Non-goals:** no React dashboard, no Celery/Redis, no ES/Neo4j replay, no LLM judge, no hosted auth, and no immutable historical candidate snapshots in the first slice.
+- **Execution:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 issue-by-issue; run targeted tests per issue; final verification requires `uv run pytest -q` and deterministic benchmark acceptance.
+
+## Implemented (Phase 3-A Issue 1 — access fidelity + eval persistence — 2026-06-10)
+
+- **Access fidelity:** `MemoryAccessLog.top_k: int = 10` added and persisted through hot-path retrieval, in-memory repository, SQL ORM/repository mappings, and migration default/backfill (`migrations/versions/0004_phase3a_observability.py`).
+- **Eval persistence schema:** added `EvalCaseRecord`, `EvalRunRecord`, `EvalResultRecord`; repository protocol methods; `InMemoryRepository` and `SqlRepository` add/list/update support; SQL ORM tables `eval_cases`, `eval_runs`, `eval_results` with planned indexes.
+- **Dashboard table extension (Issue 1 scope):** `DashboardTables` now exposes `eval_cases`, `eval_runs`, and `eval_results`; workspace-filtered dashboard calls filter eval results through the matching eval runs to avoid cross-workspace result leakage. `observability_summary` remains for later Phase 3-A Issues.
+- **Plan/backlog sync:** `P3A_IMPLEMENTATION_PLAN.md` Issue 1 checkboxes are ticked; `ROADMAP.md` Phase 3-A eval-table item is ticked.
+
+## Latest Verification (2026-06-10 Phase 3-A Issue 1)
+
+- TDD RED for missing eval/top_k schema: `uv run pytest apps/api/tests/observability/test_eval_records.py apps/api/tests/storage/test_migrations.py -q` initially failed on missing `EvalCaseRecord` / `EvalCaseORM`.
+- Additional RED for workspace filtering: `uv run pytest apps/api/tests/observability/test_eval_records.py::test_dashboard_tables_filters_eval_results_by_workspace -q` failed because `eval_results` included another workspace's result; fixed by filtering results through workspace-scoped eval runs.
+- Targeted regression: `uv run pytest apps/api/tests/observability/test_eval_records.py apps/api/tests/storage/test_migrations.py apps/api/tests/api/test_dashboard.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> **20 passed**.
+- Review: spec compliance PASS; code quality APPROVED after the workspace-filtering fix.
 
 ## Implemented (real-LLM validation bench + fixes — 2026-06-10)
 
@@ -187,4 +210,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2) is complete and the working tree is committed. **All future work is now tracked in `ROADMAP.md` at the repo root** (deferred features, tech debt, open decisions — each mapped back to `architecture.md` / `draft.md` / `.ai/` sources). Start there. Recommended order (see ROADMAP closing section, revised after an external review to guard against scope creep): (1) resolve OPEN_QUESTIONS §0; (2) Phase 3-A backend observability — **Retrieval Replay first**, then eval tables + Quality/Safety profiler; (3) showcase assets §12 (README/diagram/demo+benchmark samples); (4) Context Compaction §9 (packer over-budget summarization first); (5) Phase 3.5 SDK/LangGraph adapter §6; (6) 6-strategy benchmark §7. Heavy infra (Phase 4 §3), advanced storage (Phase 5 §4, gated by trigger conditions), Go/Rust, MCP/IDE plugins are deliberately deferred. When you finish a ROADMAP item, tick it there and update this file.
+The MVP (P0+P1+P2) is complete. Phase 3-A Issue 1 is implemented but not committed in this snapshot. **Next recommended action:** implement `P3A_IMPLEMENTATION_PLAN.md` §11 **Issue 2: Refactor retrieval into traceable side-effect-free pipeline**. Preserve the new `MemoryAccessLog.top_k` field, keep hot-path `retrieve_context` backward compatible, and add tests proving `RetrievalController.trace(...)` does not persist access/gate/profile rows or mutate memory access counts. Broader recommended order remains: finish Phase 3-A backend observability, then showcase assets §12, Context Compaction §9, Phase 3.5 SDK/LangGraph adapter §6, and 6-strategy benchmark §7; heavy infra and advanced storage stay deferred.

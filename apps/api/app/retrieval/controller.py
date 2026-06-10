@@ -85,6 +85,7 @@ class RetrievalController:
             task_intent=request.task_intent,
             retrieval_strategy=request.strategy,
             token_budget=budget,
+            top_k=request.top_k,
         )
         profiler = Profiler(self._repo, run_id=request.run_id, step_id=request.step_id, access_id=access.access_id)
 

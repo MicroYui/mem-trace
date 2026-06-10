@@ -19,6 +19,9 @@ from app.runtime.models import (
     MemoryAccessLog,
     BenchmarkCaseRecord,
     BenchmarkResultRecord,
+    EvalCaseRecord,
+    EvalResultRecord,
+    EvalRunRecord,
     MemoryGateLog,
     MemoryItem,
     ProfileEvent,
@@ -107,6 +110,16 @@ class Repository(Protocol):
     async def list_benchmark_cases(self) -> list[BenchmarkCaseRecord]: ...
     async def list_benchmark_results(self) -> list[BenchmarkResultRecord]: ...
 
+    # eval / dashboard tables
+    async def add_eval_case(self, case: EvalCaseRecord) -> EvalCaseRecord: ...
+    async def list_eval_cases(self) -> list[EvalCaseRecord]: ...
+    async def add_eval_run(self, run: EvalRunRecord) -> EvalRunRecord: ...
+    async def update_eval_run(self, run: EvalRunRecord) -> EvalRunRecord: ...
+    async def list_eval_runs(self, *, workspace_id: Optional[str] = None) -> list[EvalRunRecord]: ...
+    async def add_eval_result(self, result: EvalResultRecord) -> EvalResultRecord: ...
+    async def update_eval_result(self, result: EvalResultRecord) -> EvalResultRecord: ...
+    async def list_eval_results(self, *, eval_run_id: Optional[str] = None) -> list[EvalResultRecord]: ...
+
 
 class InMemoryRepository:
     """Deterministic in-process repository. Stores deep copies to avoid
@@ -123,6 +136,9 @@ class InMemoryRepository:
         self._profile_events: list[ProfileEvent] = []
         self._benchmark_cases: dict[str, BenchmarkCaseRecord] = {}
         self._benchmark_results: dict[str, BenchmarkResultRecord] = {}
+        self._eval_cases: dict[str, EvalCaseRecord] = {}
+        self._eval_runs: dict[str, EvalRunRecord] = {}
+        self._eval_results: dict[str, EvalResultRecord] = {}
         self._seq_counters: dict[str, int] = {}
 
     # runs
@@ -306,6 +322,47 @@ class InMemoryRepository:
 
     async def list_benchmark_results(self) -> list[BenchmarkResultRecord]:
         rows = sorted(self._benchmark_results.values(), key=lambda r: (r.case_id, r.strategy, r.created_at))
+        return [r.model_copy(deep=True) for r in rows]
+
+    # eval / dashboard tables
+    async def add_eval_case(self, case: EvalCaseRecord) -> EvalCaseRecord:
+        self._eval_cases[case.eval_case_id] = case.model_copy(deep=True)
+        return case
+
+    async def list_eval_cases(self) -> list[EvalCaseRecord]:
+        rows = sorted(self._eval_cases.values(), key=lambda c: c.eval_case_id)
+        return [r.model_copy(deep=True) for r in rows]
+
+    async def add_eval_run(self, run: EvalRunRecord) -> EvalRunRecord:
+        self._eval_runs[run.eval_run_id] = run.model_copy(deep=True)
+        return run
+
+    async def update_eval_run(self, run: EvalRunRecord) -> EvalRunRecord:
+        return await self.add_eval_run(run)
+
+    async def list_eval_runs(self, *, workspace_id: Optional[str] = None) -> list[EvalRunRecord]:
+        rows = []
+        for r in self._eval_runs.values():
+            if workspace_id is not None and r.workspace_id != workspace_id:
+                continue
+            rows.append(r)
+        rows.sort(key=lambda r: r.created_at)
+        return [r.model_copy(deep=True) for r in rows]
+
+    async def add_eval_result(self, result: EvalResultRecord) -> EvalResultRecord:
+        self._eval_results[result.eval_result_id] = result.model_copy(deep=True)
+        return result
+
+    async def update_eval_result(self, result: EvalResultRecord) -> EvalResultRecord:
+        return await self.add_eval_result(result)
+
+    async def list_eval_results(self, *, eval_run_id: Optional[str] = None) -> list[EvalResultRecord]:
+        rows = []
+        for r in self._eval_results.values():
+            if eval_run_id is not None and r.eval_run_id != eval_run_id:
+                continue
+            rows.append(r)
+        rows.sort(key=lambda r: (r.eval_run_id, r.eval_case_id, r.created_at))
         return [r.model_copy(deep=True) for r in rows]
 
 

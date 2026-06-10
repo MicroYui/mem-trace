@@ -36,8 +36,9 @@
 对齐 architecture §6.9 / §14 Phase 3、draft §9。当前仅有表格 API（`GET /v1/dashboard/tables`，ADR-013）。**先做不依赖前端的 P3-A，再做可视化 P3-B（先 HTML/表，后 React 大前端）。**
 
 ### 3-A：后端可观测性（无需大前端，优先级最高）
+- **实施计划**：见 repo 根目录 `P3A_IMPLEMENTATION_PLAN.md`。执行约定：每完成计划 §11 的一个 Issue，都必须同步更新 `.ai/PROJECT_STATE.md`，并 tick 或注释本节对应 checkbox/sub-checkbox。
 - [ ] **Retrieval Replay**：`replay_retrieval(access_id)` / `replay_run(run_id)` 复现检索→重排→gate→packing。**这是把系统从「跑过一次 demo」升级为「每次检索决策可复现/可解释/可调试」的关键，优先级最高。** 出处：architecture §6.1/§6.9。
-- [ ] **eval 表落地**：`eval_cases / eval_runs / eval_results`（当前 benchmark 仅文件报告 + 内存表）。出处：architecture §7.1。
+- [x] **eval 表落地**：`eval_cases / eval_runs / eval_results` 已完成 Phase 3-A Issue 1：新增 eval records、Repository/InMemory/SQL 持久化、dashboard table 字段、Alembic `0004_phase3a_observability.py`，并补 `MemoryAccessLog.top_k` 以支持后续 replay 精确重放。出处：architecture §7.1。
 - [ ] **Quality & Safety 指标统一进 profiler**：failed_branch_contamination / stale_injection / tool_safety / workspace_leakage（部分 benchmark 已覆盖，需统一到 profiler）。
 - [ ] **完整 phase-aware Profiler**：扩到 architecture §6.9 的 10 阶段归因（Ingestion/Construction/Retrieval/Rerank/Gate/Context Packing/Generation/Maintenance/Quality/Safety）。
 - [ ] **最小 Dashboard（静态 HTML 报告优先，不急于上 React）**。

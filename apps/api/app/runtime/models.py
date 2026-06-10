@@ -304,6 +304,7 @@ class MemoryAccessLog(_Base):
     accepted_count: int = 0
     rejected_count: int = 0
     token_budget: int = 0
+    top_k: int = 10
     actual_tokens: int = 0
     latency_ms: int = 0
     created_at: datetime = Field(default_factory=_now)
@@ -358,6 +359,38 @@ class BenchmarkResultRecord(_Base):
     case_id: str
     strategy: str
     metrics: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class EvalCaseRecord(_Base):
+    eval_case_id: str
+    name: str
+    description: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    config: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class EvalRunRecord(_Base):
+    eval_run_id: str = Field(default_factory=lambda: _new_id("evalrun"))
+    name: Optional[str] = None
+    workspace_id: Optional[str] = None
+    status: str = "completed"
+    config: dict[str, Any] = Field(default_factory=dict)
+    started_at: datetime = Field(default_factory=_now)
+    finished_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=_now)
+
+
+class EvalResultRecord(_Base):
+    eval_result_id: str = Field(default_factory=lambda: _new_id("evalres"))
+    eval_run_id: str
+    eval_case_id: str
+    run_id: Optional[str] = None
+    access_id: Optional[str] = None
+    strategy: RetrievalStrategy | str | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    passed: bool = True
     created_at: datetime = Field(default_factory=_now)
 
 
@@ -427,6 +460,9 @@ class DashboardTables(_Base):
     profile_events: list[ProfileEvent] = Field(default_factory=list)
     benchmark_cases: list[BenchmarkCaseRecord] = Field(default_factory=list)
     benchmark_results: list[BenchmarkResultRecord] = Field(default_factory=list)
+    eval_cases: list[EvalCaseRecord] = Field(default_factory=list)
+    eval_runs: list[EvalRunRecord] = Field(default_factory=list)
+    eval_results: list[EvalResultRecord] = Field(default_factory=list)
     benchmark_summary: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 

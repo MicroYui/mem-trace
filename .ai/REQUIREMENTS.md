@@ -2,7 +2,11 @@
 
 ## Current Task
 
-P2 is feature-complete (6/6 mvp.md §2.3 slices, incl. the config-gated LLM extraction pipeline). Current task is review/commit readiness.
+P2 is feature-complete (6/6 mvp.md §2.3 slices, incl. the config-gated LLM extraction pipeline) and committed. Current task is **Phase 3-A backend observability**, planned in `P3A_IMPLEMENTATION_PLAN.md` at the repo root.
+
+Phase 3-A scope: Retrieval Replay, eval tables, Quality/Safety profiler metrics, expanded profiler phases, dashboard-table extension, and static JSON/Markdown/HTML observability reports. Use `P3A_IMPLEMENTATION_PLAN.md` as the concrete implementation plan before touching code. **Issue 1 is complete** (access fidelity + eval persistence schema); the next concrete slice is **Issue 2: side-effect-free retrieval trace pipeline**.
+
+**Phase 3-A maintenance rule:** after completing each Issue in `P3A_IMPLEMENTATION_PLAN.md` §11, update `.ai/PROJECT_STATE.md` and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox.
 
 ## Coding Readiness
 

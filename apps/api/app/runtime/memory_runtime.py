@@ -550,12 +550,21 @@ class MemoryRuntime:
         profile_events = await self._repo.list_profile_events()
         cases = await self._repo.list_benchmark_cases()
         results = await self._repo.list_benchmark_results()
+        eval_cases = await self._repo.list_eval_cases()
+        eval_runs = await self._repo.list_eval_runs(workspace_id=workspace_id)
+        eval_results = await self._repo.list_eval_results()
+        if workspace_id is not None:
+            eval_run_ids = {run.eval_run_id for run in eval_runs}
+            eval_results = [result for result in eval_results if result.eval_run_id in eval_run_ids]
         return DashboardTables(
             runs=runs,
             accesses=accesses,
             profile_events=profile_events,
             benchmark_cases=cases,
             benchmark_results=results,
+            eval_cases=eval_cases,
+            eval_runs=eval_runs,
+            eval_results=eval_results,
             benchmark_summary=_benchmark_summary_from_records(results),
         )
 

@@ -35,10 +35,23 @@ Status: complete (6/6), verified on 2026-06-10.
 
 ## Next Coding Task
 
-MVP (P0+P1+P2) is complete and committed. All remaining work — including the
-deferred P2 items 5-6 above — now lives in **`ROADMAP.md`** at the repo root
-(the authoritative backlog, mapped to `architecture.md` / `draft.md` / `.ai/`).
-Pick the next task from there; recommended order is in ROADMAP's closing section.
+MVP (P0+P1+P2) is complete and committed. The selected next slice is
+**Phase 3-A backend observability**, with the detailed implementation plan in
+**`P3A_IMPLEMENTATION_PLAN.md`** at the repo root.
+
+Implement `P3A_IMPLEMENTATION_PLAN.md` §11 issue-by-issue:
+
+1. access fidelity + eval persistence schema; ✅ complete (2026-06-10)
+2. side-effect-free retrieval trace pipeline; ⬅ next
+3. replay service + diff semantics;
+4. replay/observability APIs;
+5. Quality/Safety metrics + profiler phase expansion;
+6. dashboard table extension;
+7. JSON/Markdown/HTML observability reports;
+8. full regression, benchmark, and project-memory sync.
+
+**Maintenance rule:** after completing each Issue, update `.ai/PROJECT_STATE.md`
+and tick or annotate the corresponding `ROADMAP.md` checkbox/sub-checkbox.
 
 ## Suggested Test Strategy
 

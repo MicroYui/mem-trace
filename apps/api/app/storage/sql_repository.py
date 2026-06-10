@@ -18,6 +18,9 @@ from app.runtime.models import (
     MemoryAccessLog,
     BenchmarkCaseRecord,
     BenchmarkResultRecord,
+    EvalCaseRecord,
+    EvalResultRecord,
+    EvalRunRecord,
     MemoryGateLog,
     MemoryItem,
     ProfileEvent,
@@ -162,7 +165,7 @@ def _access_to_orm(a: MemoryAccessLog) -> orm.AccessLogORM:
         step_id=a.step_id, query=a.query, task_intent=a.task_intent,
         retrieval_strategy=a.retrieval_strategy.value, candidate_count=a.candidate_count,
         accepted_count=a.accepted_count, rejected_count=a.rejected_count,
-        token_budget=a.token_budget, actual_tokens=a.actual_tokens,
+        token_budget=a.token_budget, top_k=a.top_k, actual_tokens=a.actual_tokens,
         latency_ms=a.latency_ms, created_at=a.created_at,
     )
 
@@ -173,7 +176,7 @@ def _access_from_orm(o: orm.AccessLogORM) -> MemoryAccessLog:
         step_id=o.step_id, query=o.query, task_intent=o.task_intent,
         retrieval_strategy=o.retrieval_strategy, candidate_count=o.candidate_count,
         accepted_count=o.accepted_count, rejected_count=o.rejected_count,
-        token_budget=o.token_budget, actual_tokens=o.actual_tokens,
+        token_budget=o.token_budget, top_k=o.top_k, actual_tokens=o.actual_tokens,
         latency_ms=o.latency_ms, created_at=o.created_at,
     )
 
@@ -258,6 +261,83 @@ def _benchmark_result_from_orm(o: orm.BenchmarkResultORM) -> BenchmarkResultReco
         case_id=o.case_id,
         strategy=o.strategy,
         metrics=o.metrics or {},
+        created_at=o.created_at,
+    )
+
+
+def _eval_case_to_orm(c: EvalCaseRecord) -> orm.EvalCaseORM:
+    return orm.EvalCaseORM(
+        eval_case_id=c.eval_case_id,
+        name=c.name,
+        description=c.description,
+        tags=list(c.tags),
+        config=c.config,
+        created_at=c.created_at,
+    )
+
+
+def _eval_case_from_orm(o: orm.EvalCaseORM) -> EvalCaseRecord:
+    return EvalCaseRecord(
+        eval_case_id=o.eval_case_id,
+        name=o.name,
+        description=o.description,
+        tags=o.tags or [],
+        config=o.config or {},
+        created_at=o.created_at,
+    )
+
+
+def _eval_run_to_orm(r: EvalRunRecord) -> orm.EvalRunORM:
+    return orm.EvalRunORM(
+        eval_run_id=r.eval_run_id,
+        name=r.name,
+        workspace_id=r.workspace_id,
+        status=r.status,
+        config=r.config,
+        started_at=r.started_at,
+        finished_at=r.finished_at,
+        created_at=r.created_at,
+    )
+
+
+def _eval_run_from_orm(o: orm.EvalRunORM) -> EvalRunRecord:
+    return EvalRunRecord(
+        eval_run_id=o.eval_run_id,
+        name=o.name,
+        workspace_id=o.workspace_id,
+        status=o.status,
+        config=o.config or {},
+        started_at=o.started_at,
+        finished_at=o.finished_at,
+        created_at=o.created_at,
+    )
+
+
+def _eval_result_to_orm(r: EvalResultRecord) -> orm.EvalResultORM:
+    strategy = r.strategy.value if hasattr(r.strategy, "value") else r.strategy
+    return orm.EvalResultORM(
+        eval_result_id=r.eval_result_id,
+        eval_run_id=r.eval_run_id,
+        eval_case_id=r.eval_case_id,
+        run_id=r.run_id,
+        access_id=r.access_id,
+        strategy=strategy,
+        metrics=r.metrics,
+        passed=r.passed,
+        created_at=r.created_at,
+    )
+
+
+def _eval_result_from_orm(o: orm.EvalResultORM) -> EvalResultRecord:
+    return EvalResultRecord(
+        eval_result_id=o.eval_result_id,
+        eval_run_id=o.eval_run_id,
+        eval_case_id=o.eval_case_id,
+        run_id=o.run_id,
+        access_id=o.access_id,
+        strategy=o.strategy,
+        metrics=o.metrics or {},
+        passed=o.passed,
         created_at=o.created_at,
     )
 
@@ -508,6 +588,60 @@ class SqlRepository:
                 )
             )).scalars().all()
             return [_benchmark_result_from_orm(o) for o in rows]
+
+    # eval / dashboard tables
+    async def add_eval_case(self, case: EvalCaseRecord) -> EvalCaseRecord:
+        async with self._sf() as s:
+            await s.merge(_eval_case_to_orm(case))
+            await s.commit()
+        return case
+
+    async def list_eval_cases(self) -> list[EvalCaseRecord]:
+        async with self._sf() as s:
+            rows = (await s.execute(
+                select(orm.EvalCaseORM).order_by(orm.EvalCaseORM.eval_case_id)
+            )).scalars().all()
+            return [_eval_case_from_orm(o) for o in rows]
+
+    async def add_eval_run(self, run: EvalRunRecord) -> EvalRunRecord:
+        async with self._sf() as s:
+            await s.merge(_eval_run_to_orm(run))
+            await s.commit()
+        return run
+
+    async def update_eval_run(self, run: EvalRunRecord) -> EvalRunRecord:
+        return await self.add_eval_run(run)
+
+    async def list_eval_runs(self, *, workspace_id: Optional[str] = None) -> list[EvalRunRecord]:
+        async with self._sf() as s:
+            stmt = select(orm.EvalRunORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.EvalRunORM.workspace_id == workspace_id)
+            stmt = stmt.order_by(orm.EvalRunORM.created_at)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_eval_run_from_orm(o) for o in rows]
+
+    async def add_eval_result(self, result: EvalResultRecord) -> EvalResultRecord:
+        async with self._sf() as s:
+            await s.merge(_eval_result_to_orm(result))
+            await s.commit()
+        return result
+
+    async def update_eval_result(self, result: EvalResultRecord) -> EvalResultRecord:
+        return await self.add_eval_result(result)
+
+    async def list_eval_results(self, *, eval_run_id: Optional[str] = None) -> list[EvalResultRecord]:
+        async with self._sf() as s:
+            stmt = select(orm.EvalResultORM)
+            if eval_run_id is not None:
+                stmt = stmt.where(orm.EvalResultORM.eval_run_id == eval_run_id)
+            stmt = stmt.order_by(
+                orm.EvalResultORM.eval_run_id,
+                orm.EvalResultORM.eval_case_id,
+                orm.EvalResultORM.created_at,
+            )
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_eval_result_from_orm(o) for o in rows]
 
 
 __all__ = ["SqlRepository"]

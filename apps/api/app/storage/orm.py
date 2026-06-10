@@ -176,6 +176,7 @@ class AccessLogORM(Base):
     rejected_count: Mapped[int] = mapped_column(Integer, default=0)
     token_budget: Mapped[int] = mapped_column(Integer, default=0)
     actual_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    top_k: Mapped[int] = mapped_column(Integer, default=10, server_default="10")
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -236,6 +237,41 @@ class BenchmarkResultORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class EvalCaseORM(Base):
+    __tablename__ = "eval_cases"
+    eval_case_id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[list] = mapped_column(JSONB, default=list)
+    config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EvalRunORM(Base):
+    __tablename__ = "eval_runs"
+    eval_run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    workspace_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    status: Mapped[str] = mapped_column(String)
+    config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EvalResultORM(Base):
+    __tablename__ = "eval_results"
+    eval_result_id: Mapped[str] = mapped_column(String, primary_key=True)
+    eval_run_id: Mapped[str] = mapped_column(String, index=True)
+    eval_case_id: Mapped[str] = mapped_column(String, index=True)
+    run_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    access_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    strategy: Mapped[str | None] = mapped_column(String, nullable=True)
+    metrics: Mapped[dict] = mapped_column(JSONB, default=dict)
+    passed: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 __all__ = [
     "Base",
     "EMBED_DIM",
@@ -251,4 +287,7 @@ __all__ = [
     "ProfileEventORM",
     "BenchmarkCaseORM",
     "BenchmarkResultORM",
+    "EvalCaseORM",
+    "EvalRunORM",
+    "EvalResultORM",
 ]
