@@ -27,6 +27,7 @@
 - [ ] **LLM key 不稳定性**：模型对同一概念可能分配不同 key，破坏 key-based 冲突解析。已用受控 key 词表系统提示缓解，但仍是真实 LLM 路径脆弱点。可考虑「语义去重 / 同义 key 映射」根治。出处：PROJECT_STATE / llm_extractor `_SYSTEM_PROMPT`。
 - [ ] **PG15 数据卷与 pg16 镜像不兼容**：切换需 `docker-compose down -v`（破坏性）。运维注意。
 - [ ] **profiler 亚毫秒阶段读为 0ms**：四舍五入所致，属预期非 bug（真实负载下非 0）。
+- [ ] **检索超预算是丢弃式截断、无压缩补偿**：`packer.pack_context` 超出 `token_budget` 时整块 `break` 丢弃低优先级 block，被丢内容没有任何二次摘要/折叠，可能静默丢失约束。根治方案见 §9 Context Compaction。出处：`packer.py:pack_context`。
 
 ---
 
@@ -135,10 +136,29 @@ architecture §15 / draft §7 / MVP_SCOPE：
 
 ---
 
+## 9. Context Compaction（上下文压缩 / 历史折叠）★ 与系统定位强相关
+
+mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而长程 agent 的核心痛点正是 **context window 撑爆**。当前系统对「上下文超限」只做**丢弃式截断**（见 §1 技术债），缺少 LLM-agent 式的 context compaction——即「当上下文/历史超出预算时，把待丢弃或冗长的内容压缩成摘要再注入」。这是一个独立于 §3.2（生命周期衰减）与 §5（状态树压缩）的检索/打包层能力，三者协同但不重叠。
+
+现状盘点：
+- ✅ **run 结束摘要**（`summarizer.build_run_summary`，冷路径）：把已结束 run 的 trace 蒸馏成 episodic + procedural memory。压缩的是「已结束轨迹→长期记忆」，**不解决运行中长历史超窗**。
+- ✅ **active path 进度块**（`packer.build_active_path_block`）：把 completed 节点 label 串成一句，是拼接展示**非压缩**。
+- ❌ **运行时 context compaction**：完全缺失。
+
+待办：
+- [ ] **packer 超预算压缩补偿（替代纯丢弃）**：`pack_context` 超 `token_budget` 时，对被丢弃的低优先级块做「合并摘要 / 块内裁剪」而非整块丢弃，至少保留一条「已省略 N 条记忆（含约束 X/Y）」的占位摘要，避免约束静默丢失。出处：§1 技术债 / `packer.py`。
+- [ ] **运行中长历史折叠**：当一个 run 的事件流 / 对话历史超过窗口时，对早期历史做增量摘要（rolling summary）再注入上下文，类似 LLM agent 的 conversation compaction。可复用 `summarizer` 的 LLM 化版本。
+- [ ] **可配置 summarizer（规则 / LLM 双路）**：compaction 的摘要器需 config-gate（默认规则保 benchmark 可复现；启用 LLM 走 `LLMExtractionProvider` 同款注入 + 失败降级），与 extraction 管线对齐。
+- [ ] **压缩质量指标**：在 profiler/benchmark 中加 `compression_ratio` / 压缩前后任务成功率，量化「压缩是否丢了关键信息」。出处：architecture §6.8 `compression_gain`。
+- [ ] **协同项（交叉引用）**：state tree 的 completed subgoal → summary node（§5）、生命周期 decay/archive 把旧记忆降级压缩（§3.2）。这三处共同构成完整的「记忆/上下文压缩」体系，建议一并设计。
+
+---
+
 ## 附：推荐推进顺序（建议）
 
 1. **先清待决策**（§0）——尤其真实 embedding 与 auth，影响后续多处。
 2. **Phase 3 可观测性/前端**（§2）——价值高、相对独立、是项目亮点，不依赖重型基建。
-3. **Phase 4 异步基建**（§3.1）作为前置，再叠加 Reflection/Forgetting（§3.2）与冲突/版本（§3.3）。
-4. **Phase 5 高级存储**（§4）在 pgvector 触顶或需要图能力时启动。
-5. SDK/集成（§6）与评估扩展（§7）按需穿插。
+3. **Context Compaction**（§9）——与系统定位强相关，packer 压缩补偿可较早做（不依赖重型基建）；运行中历史折叠与可配置 summarizer 可随 §3.2 一起。
+4. **Phase 4 异步基建**（§3.1）作为前置，再叠加 Reflection/Forgetting（§3.2）与冲突/版本（§3.3）。
+5. **Phase 5 高级存储**（§4）在 pgvector 触顶或需要图能力时启动。
+6. SDK/集成（§6）与评估扩展（§7）按需穿插。
