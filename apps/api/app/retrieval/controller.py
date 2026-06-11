@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from app.retrieval import gate as gatemod
+from app.retrieval.negative_evidence import build_negative_evidence
 from app.retrieval.packer import pack_context
 from app.retrieval.similarity import cosine_similarity, lexical_similarity, stable_embedding
 from app.config import get_settings
@@ -256,17 +257,26 @@ class RetrievalController:
         gate_ms = int((time.perf_counter() - t1) * 1000)
         accepted_outcomes = [o for o in outcomes if o.accepted]
         rejected_outcomes = [o for o in outcomes if not o.accepted]
+        degraded_outcomes = [o for o in rejected_outcomes if o.degraded]
+        hard_rejected_outcomes = [o for o in rejected_outcomes if not o.degraded]
         phase_profile[ProfilePhase.gate.value] = {
             "latency_ms": gate_ms,
             "operation": request.strategy.value,
             "candidate_count": len(outcomes),
             "accepted_count": len(accepted_outcomes),
             "rejected_count": len(rejected_outcomes),
+            "metadata": {
+                "degraded_count": len(degraded_outcomes),
+                "hard_rejected_count": len(hard_rejected_outcomes),
+            },
         }
 
         # rank accepted by final score desc
         accepted_outcomes.sort(key=lambda o: o.final_score, reverse=True)
         accepted_memories = [o.memory for o in accepted_outcomes]
+        memories_by_id = {candidate.memory.memory_id: candidate.memory for candidate in candidates}
+        negative_evidence = build_negative_evidence(outcomes, memories_by_id, max_blocks=3)
+        sanitized_negative_evidence_count = sum(1 for ev in negative_evidence if ev.mode == "sanitized_risk_notice")
 
         # ---- phase: context packing ------------------------------------ #
         t2 = time.perf_counter()
@@ -276,10 +286,24 @@ class RetrievalController:
             token_budget=budget,
             active_path=active_path,
             prelude_blocks=prelude_blocks,
+            negative_evidence=negative_evidence,
             compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
         )
         blocks = pack_result.blocks
         actual_tokens = pack_result.used
+        retained_negative_evidence_count = sum(
+            1 for block in blocks
+            if block.type == "avoided_attempts" or block.source == "negative_evidence"
+        )
+        retained_sanitized_negative_evidence_count = sum(
+            1 for block in blocks
+            if (block.type == "avoided_attempts" or block.source == "negative_evidence")
+            and block.reason in {"failed_branch_sanitized", "rolled_back_sanitized"}
+        )
+        dropped_negative_evidence_count = sum(
+            1 for block in pack_result.dropped_blocks
+            if block.type == "avoided_attempts" or block.source == "negative_evidence"
+        )
         packing_ms = int((time.perf_counter() - t2) * 1000)
         phase_profile[ProfilePhase.context_packing.value] = {
             "latency_ms": packing_ms,
@@ -293,6 +317,12 @@ class RetrievalController:
                 "dropped_count": len(pack_result.dropped_blocks),
                 "compression_ratio": round(pack_result.used / max(1, pack_result.pre_compaction_tokens), 6),
                 "notice_kind": "budget_notice" if pack_result.notice is not None else None,
+                "degraded_count": len(degraded_outcomes),
+                "hard_rejected_count": len(hard_rejected_outcomes),
+                "negative_evidence_count": retained_negative_evidence_count,
+                "sanitized_negative_evidence_count": retained_sanitized_negative_evidence_count,
+                "built_negative_evidence_count": len(negative_evidence),
+                "dropped_negative_evidence_count": dropped_negative_evidence_count,
                 "retained_constraints": [f.model_dump(mode="json") for f in pack_result.retained_constraints],
                 "dropped_blocks": [b.model_dump(mode="json") for b in pack_result.dropped_blocks],
             },
@@ -301,7 +331,15 @@ class RetrievalController:
         # warnings: excluded failed/rolled_back + risk warns
         warnings = [*(prelude_warnings or [])]
         warnings.extend(pack_result.warnings)
-        warnings.extend(self._build_warnings(rejected_outcomes, accepted_outcomes, dropped_count=len(pack_result.dropped_blocks)))
+        warnings.extend(
+            self._build_warnings(
+                rejected_outcomes,
+                accepted_outcomes,
+                dropped_count=len(pack_result.dropped_blocks),
+                negative_evidence_count=retained_negative_evidence_count,
+                sanitized_negative_evidence_count=retained_sanitized_negative_evidence_count,
+            )
+        )
         if pending_compaction_logs:
             history_log = next((log for log in pending_compaction_logs if log.kind.value == "history_summary"), None)
             if history_log is not None:
@@ -484,10 +522,24 @@ class RetrievalController:
         return 0.4
 
     @staticmethod
-    def _build_warnings(rejected, accepted, *, dropped_count: int = 0) -> list[str]:
+    def _build_warnings(
+        rejected,
+        accepted,
+        *,
+        dropped_count: int = 0,
+        negative_evidence_count: int = 0,
+        sanitized_negative_evidence_count: int = 0,
+    ) -> list[str]:
         warnings: list[str] = []
         if dropped_count:
             warnings.append(f"context budget exceeded: omitted {dropped_count} blocks.")
+        raw_negative_evidence_count = max(0, negative_evidence_count - sanitized_negative_evidence_count)
+        if raw_negative_evidence_count:
+            warnings.append(f"{raw_negative_evidence_count} failed-branch memories injected as negative evidence.")
+        if sanitized_negative_evidence_count:
+            warnings.append(
+                f"{sanitized_negative_evidence_count} unsafe failed-branch memories were redacted into sanitized safety notices."
+            )
         failed_excluded = sum(
             1 for o in rejected
             if o.reject_reason in ("failed_branch", "rolled_back")

@@ -32,6 +32,11 @@ _METRIC_FIELDS = [
     "constraint_retention_hit",
     "unsafe_compaction_leakage",
     "compression_ratio",
+    "positive_contamination",
+    "negative_lesson_retained",
+    "correct_action",
+    "unsafe_negative_leakage",
+    "sanitized_notice_present",
     "retrieval_latency_ms",
     "gate_latency_ms",
 ]
@@ -77,6 +82,21 @@ def _summarize(results: list[CaseMetrics]) -> dict[str, dict[str, float]]:
             ),
             "avg_compression_ratio": _average(
                 [r.compression_ratio for r in rows if r.compression_ratio_present]
+            ),
+            "positive_contamination_rate": _average(
+                [r.positive_contamination for r in rows if r.positive_contamination_present]
+            ),
+            "negative_lesson_retained_rate": _average(
+                [r.negative_lesson_retained for r in rows if r.negative_lesson_retained_present]
+            ),
+            "correct_action_rate": _average(
+                [r.correct_action for r in rows if r.correct_action_present]
+            ),
+            "unsafe_negative_leakage_rate": _average(
+                [r.unsafe_negative_leakage for r in rows if r.unsafe_negative_leakage_present]
+            ),
+            "sanitized_notice_rate": _average(
+                [r.sanitized_notice_present for r in rows if r.sanitized_notice_present_present]
             ),
             "avg_retrieval_latency_ms": _average([r.retrieval_latency_ms for r in rows]),
             "avg_gate_latency_ms": _average([r.gate_latency_ms for r in rows]),
@@ -129,6 +149,10 @@ async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | N
                 compaction_positive_constraints=seed.extra.get("compaction_positive_constraints"),
                 unsafe_compaction_markers=seed.extra.get("unsafe_compaction_markers"),
                 compaction_logs=compaction_logs,
+                negative_lesson_markers=seed.extra.get("negative_lesson_markers"),
+                unsafe_negative_markers=seed.extra.get("unsafe_negative_markers"),
+                failure_learning_case=seed.extra.get("failure_learning_case", False),
+                sanitized_failure_case=seed.extra.get("sanitized_failure_case", False),
             )
         )
     return metrics
@@ -166,8 +190,8 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         "## Summary",
         "",
-        "| Strategy | task_success_rate | correct_active_path_hit_rate | failed_branch_contamination_rate | cross_workspace_leakage_rate | tool_sensitive_blocked_rate | procedural_reuse_hit_rate | compaction_trigger_rate | constraint_retention_hit_rate | unsafe_compaction_leakage_rate | avg_compression_ratio | avg_memory_token_overhead |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Strategy | task_success_rate | correct_active_path_hit_rate | failed_branch_contamination_rate | cross_workspace_leakage_rate | tool_sensitive_blocked_rate | procedural_reuse_hit_rate | compaction_trigger_rate | constraint_retention_hit_rate | unsafe_compaction_leakage_rate | negative_lesson_retained_rate | unsafe_negative_leakage_rate | sanitized_notice_rate | avg_compression_ratio | avg_memory_token_overhead |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for strategy, row in payload["summary"].items():
         lines.append(
@@ -175,6 +199,7 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
             "{failed_branch_contamination_rate} | {cross_workspace_leakage_rate} | "
             "{tool_sensitive_blocked_rate} | {procedural_reuse_hit_rate} | {compaction_trigger_rate} | "
             "{constraint_retention_hit_rate} | {unsafe_compaction_leakage_rate} | "
+            "{negative_lesson_retained_rate} | {unsafe_negative_leakage_rate} | {sanitized_notice_rate} | "
             "{avg_compression_ratio} | {avg_memory_token_overhead} |".format(
                 strategy=strategy,
                 **row,
@@ -184,13 +209,14 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         "## Case Results",
         "",
-        "| Case | Strategy | final_action | task_success | failed_branch_contamination | cross_workspace_leakage | tool_sensitive_blocked | compaction_triggered | constraint_retention_hit | unsafe_compaction_leakage | compression_ratio | candidate/accepted/rejected |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Case | Strategy | final_action | task_success | failed_branch_contamination | positive_contamination | negative_lesson_retained | unsafe_negative_leakage | sanitized_notice_present | cross_workspace_leakage | tool_sensitive_blocked | compaction_triggered | constraint_retention_hit | unsafe_compaction_leakage | compression_ratio | candidate/accepted/rejected |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for row in payload["results"]:
         lines.append(
             "| {case_id} | {strategy} | {final_action} | {task_success} | "
-            "{failed_branch_contamination} | {cross_workspace_leakage} | {tool_sensitive_blocked} | "
+            "{failed_branch_contamination} | {positive_contamination} | {negative_lesson_retained} | "
+            "{unsafe_negative_leakage} | {sanitized_notice_present} | {cross_workspace_leakage} | {tool_sensitive_blocked} | "
             "{compaction_triggered} | {constraint_retention_hit} | {unsafe_compaction_leakage} | "
             "{compression_ratio} | {candidate_count}/{accepted_count}/{rejected_count} |".format(**row)
         )
@@ -217,6 +243,17 @@ def _case_success(results: list[CaseMetrics], case_id: str, strategy: str) -> in
     return None
 
 
+def _case_metric(results: list[CaseMetrics], case_id: str, strategy: str, metric: str) -> int | float | None:
+    for row in results:
+        if row.case_id == case_id and row.strategy == strategy:
+            return getattr(row, metric)
+    return None
+
+
+def _case_present(results: list[CaseMetrics], case_id: str, strategy: str, present_metric: str) -> bool:
+    return _case_metric(results, case_id, strategy, present_metric) == 1
+
+
 def _acceptance(summary: dict[str, dict[str, float]], results: list[CaseMetrics]) -> dict[str, Any]:
     """Encode the computable mvp.md section 10.5 pass criteria.
 
@@ -234,19 +271,31 @@ def _acceptance(summary: dict[str, dict[str, float]], results: list[CaseMetrics]
         ),
         "variant_2_zero_cross_workspace_leakage": (
             v2.get("cross_workspace_leakage_rate", 1.0) == 0.0
+            and _case_present(results, "case_3_workspace_isolation", "variant_2", "cross_workspace_leakage_present")
+            and _case_metric(results, "case_3_workspace_isolation", "variant_2", "cross_workspace_leakage") == 0
         ),
         "variant_2_blocks_tool_sensitive": (
             v2.get("tool_sensitive_blocked_rate", 0.0) == 1.0
+            and _case_present(results, "case_4_tool_safety", "variant_2", "tool_sensitive_present")
+            and _case_metric(results, "case_4_tool_safety", "variant_2", "tool_sensitive_blocked") == 1
         ),
         "variant_2_reuses_procedural_memory": (
             v2.get("procedural_reuse_hit_rate", 0.0) == 1.0
+            and _case_present(results, "case_6_completed_run_reuse", "variant_2", "procedural_reuse_present")
+            and _case_metric(results, "case_6_completed_run_reuse", "variant_2", "procedural_reuse_hit") == 1
         ),
         "variant_2_excludes_superseded_memory": (
             v2.get("superseded_injection_rate", 1.0) == 0.0
+            and _case_present(results, "case_5_explicit_correction", "variant_2", "superseded_injection_present")
+            and _case_metric(results, "case_5_explicit_correction", "variant_2", "superseded_injection") == 0
         ),
         "variant_2_excludes_stale_memory": (
             v2.get("stale_memory_injection_rate", 1.0) == 0.0
             and b1.get("stale_memory_injection_rate", 0.0) > 0.0
+            and _case_present(results, "case_7_stale_rejection", "variant_2", "stale_memory_injection_present")
+            and _case_present(results, "case_7_stale_rejection", "baseline_1", "stale_memory_injection_present")
+            and _case_metric(results, "case_7_stale_rejection", "variant_2", "stale_memory_injection") == 0
+            and (_case_metric(results, "case_7_stale_rejection", "baseline_1", "stale_memory_injection") or 0) > 0
         ),
         "variant_2_succeeds_where_no_memory_baseline_fails": (
             case8_b0 == 0 and case8_v2 == 1
@@ -255,6 +304,31 @@ def _acceptance(summary: dict[str, dict[str, float]], results: list[CaseMetrics]
             v2.get("compaction_trigger_rate", 0.0) == 1.0
             and v2.get("constraint_retention_hit_rate", 0.0) == 1.0
             and v2.get("unsafe_compaction_leakage_rate", 1.0) == 0.0
+            and _case_present(results, "case_9_over_budget_compaction", "variant_2", "compaction_triggered_present")
+            and _case_present(results, "case_9_over_budget_compaction", "variant_2", "constraint_retention_hit_present")
+            and _case_present(results, "case_9_over_budget_compaction", "variant_2", "unsafe_compaction_leakage_present")
+            and _case_metric(results, "case_9_over_budget_compaction", "variant_2", "compaction_triggered") == 1
+            and _case_metric(results, "case_9_over_budget_compaction", "variant_2", "constraint_retention_hit") == 1
+            and _case_metric(results, "case_9_over_budget_compaction", "variant_2", "unsafe_compaction_leakage") == 0
+        ),
+        "variant_2_learns_from_failure_without_repeating": (
+            v2.get("positive_contamination_rate", 1.0) == 0.0
+            and v2.get("negative_lesson_retained_rate", 0.0) == 1.0
+            and v2.get("correct_action_rate", 0.0) == 1.0
+            and _case_present(results, "case_10_avoid_repeating_failed_attempt", "variant_2", "positive_contamination_present")
+            and _case_present(results, "case_10_avoid_repeating_failed_attempt", "variant_2", "negative_lesson_retained_present")
+            and _case_present(results, "case_10_avoid_repeating_failed_attempt", "variant_2", "correct_action_present")
+            and _case_metric(results, "case_10_avoid_repeating_failed_attempt", "variant_2", "positive_contamination") == 0
+            and _case_metric(results, "case_10_avoid_repeating_failed_attempt", "variant_2", "negative_lesson_retained") == 1
+            and _case_metric(results, "case_10_avoid_repeating_failed_attempt", "variant_2", "correct_action") == 1
+        ),
+        "variant_2_sanitizes_destructive_failure_without_leakage": (
+            v2.get("unsafe_negative_leakage_rate", 1.0) == 0.0
+            and v2.get("sanitized_notice_rate", 0.0) == 1.0
+            and _case_present(results, "case_11_sanitized_failed_destructive_attempt", "variant_2", "unsafe_negative_leakage_present")
+            and _case_present(results, "case_11_sanitized_failed_destructive_attempt", "variant_2", "sanitized_notice_present_present")
+            and _case_metric(results, "case_11_sanitized_failed_destructive_attempt", "variant_2", "unsafe_negative_leakage") == 0
+            and _case_metric(results, "case_11_sanitized_failed_destructive_attempt", "variant_2", "sanitized_notice_present") == 1
         ),
     }
     return {"passed": all(checks.values()), "checks": checks}

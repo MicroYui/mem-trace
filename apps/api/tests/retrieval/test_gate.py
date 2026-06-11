@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.retrieval import gate as gatemod
 from app.retrieval.gate import GateConfig
 from app.runtime.models import (
@@ -46,9 +48,98 @@ def test_hard_reject_secret():
     assert out.reject_reason == "secret"
 
 
+def test_hard_reject_contains_secret_flag_even_when_completed():
+    out = _eval(
+        _mem(
+            branch_status=BranchStatus.completed,
+            sensitivity=Sensitivity.internal,
+            risk_flags=RiskFlags(contains_secret=True),
+        )
+    )
+    assert out.decision == GateDecisionType.reject
+    assert out.reject_reason == "secret"
+    assert out.accepted is False
+
+
 def test_hard_reject_failed_and_rolled_back_branch():
     assert _eval(_mem(branch_status=BranchStatus.failed)).reject_reason == "failed_branch"
     assert _eval(_mem(branch_status=BranchStatus.rolled_back)).reject_reason == "rolled_back"
+
+
+def test_failure_learning_degrades_safe_failed_branch_without_positive_acceptance():
+    out = _eval(
+        _mem(branch_status=BranchStatus.failed),
+        config=GateConfig(enable_failure_learning=True),
+    )
+    assert out.decision == GateDecisionType.degrade
+    assert out.reject_reason == "failed_branch_degraded"
+    assert out.accepted is False
+    assert out.degraded is True
+    assert out.final_score == 0.5
+
+
+def test_failure_learning_degrades_safe_rolled_back_branch():
+    out = _eval(
+        _mem(branch_status=BranchStatus.rolled_back),
+        config=GateConfig(enable_failure_learning=True),
+    )
+    assert out.decision == GateDecisionType.degrade
+    assert out.reject_reason == "rolled_back_degraded"
+    assert out.accepted is False
+    assert out.degraded is True
+
+
+def test_failure_learning_sanitizes_unsafe_failed_branch_before_risk_policy():
+    out = _eval(
+        _mem(
+            branch_status=BranchStatus.failed,
+            risk_flags=RiskFlags(destructive_command=True, tool_sensitive=True),
+        ),
+        config=GateConfig(enable_failure_learning=True),
+    )
+    assert out.decision == GateDecisionType.reject
+    assert out.reject_reason == "failed_branch_sanitized"
+    assert out.degraded is False
+
+
+def test_failure_learning_sanitizes_secret_and_production_failed_branch():
+    secret = _eval(
+        _mem(branch_status=BranchStatus.failed, sensitivity=Sensitivity.secret),
+        config=GateConfig(enable_failure_learning=True),
+    )
+    production = _eval(
+        _mem(branch_status=BranchStatus.failed, risk_flags=RiskFlags(production_env=True)),
+        config=GateConfig(enable_failure_learning=True),
+    )
+    assert secret.reject_reason == "failed_branch_sanitized"
+    assert production.reject_reason == "failed_branch_sanitized"
+
+
+@pytest.mark.parametrize(
+    ("branch_status", "expected_reason"),
+    [
+        (BranchStatus.failed, "failed_branch_sanitized"),
+        (BranchStatus.rolled_back, "rolled_back_sanitized"),
+    ],
+)
+@pytest.mark.parametrize(
+    "memory_kwargs",
+    [
+        {"sensitivity": Sensitivity.secret},
+        {"risk_flags": RiskFlags(contains_secret=True)},
+        {"risk_flags": RiskFlags(destructive_command=True)},
+        {"risk_flags": RiskFlags(tool_sensitive=True)},
+        {"risk_flags": RiskFlags(production_env=True)},
+    ],
+)
+def test_failure_learning_sanitizes_all_unsafe_failedish_branches(branch_status, expected_reason, memory_kwargs):
+    out = _eval(
+        _mem(branch_status=branch_status, **memory_kwargs),
+        config=GateConfig(enable_failure_learning=True),
+    )
+    assert out.decision == GateDecisionType.reject
+    assert out.reject_reason == expected_reason
+    assert out.degraded is False
 
 
 def test_risk_reject_stale():
@@ -82,7 +173,23 @@ def test_variant_1_downweights_failed_branch_without_reject():
     assert failed.final_score < completed.final_score
 
 
-def test_variant_2_rejects_failed_branch():
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        (RetrievalStrategy.baseline_0, False),
+        (RetrievalStrategy.baseline_1, False),
+        (RetrievalStrategy.variant_1, False),
+        (RetrievalStrategy.variant_2, True),
+    ],
+)
+def test_failure_learning_enabled_only_for_variant_2(strategy, expected):
+    assert GateConfig.for_strategy(strategy).enable_failure_learning is expected
+
+
+def test_variant_2_enables_failure_learning_for_safe_failed_branch():
     cfg = GateConfig.for_strategy(RetrievalStrategy.variant_2)
     out = _eval(_mem(branch_status=BranchStatus.failed), config=cfg)
-    assert out.decision == GateDecisionType.reject
+    assert cfg.enable_failure_learning is True
+    assert out.decision == GateDecisionType.degrade
+    assert out.reject_reason == "failed_branch_degraded"
+    assert out.accepted is False

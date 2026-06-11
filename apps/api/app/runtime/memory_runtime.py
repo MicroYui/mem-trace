@@ -835,6 +835,8 @@ class MemoryRuntime:
             GateDecisionType,
             GateDecisionView,
         )
+        from app.retrieval.gate import GateOutcome
+        from app.retrieval.negative_evidence import build_negative_evidence, safe_observability_content
         from app.retrieval.packer import pack_context
 
         access = await self._repo.get_access_log(access_id)
@@ -844,9 +846,33 @@ class MemoryRuntime:
 
         views: list[GateDecisionView] = []
         accepted_mems: list[MemoryItem] = []
+        outcomes = []
+        memories_by_id: dict[str, MemoryItem] = {}
+        missing_negative: list[str] = []
         for g in gate_logs:
             mem = await self._repo.get_memory(g.memory_id)
-            content = mem.content if mem else ""
+            content = safe_observability_content(mem, reject_reason=g.reject_reason)
+            if mem is None and (
+                g.decision == GateDecisionType.degrade
+                or g.reject_reason in {"failed_branch_sanitized", "rolled_back_sanitized"}
+            ):
+                missing_negative.append(g.memory_id)
+            if mem:
+                memories_by_id[mem.memory_id] = mem
+                outcomes.append(
+                    GateOutcome(
+                        memory=mem,
+                        layer=g.layer,
+                        decision=g.decision,
+                        reject_reason=g.reject_reason,
+                        relevance_score=g.relevance_score,
+                        state_match_score=g.state_match_score,
+                        freshness_score=g.freshness_score,
+                        trust_score=g.trust_score,
+                        risk_score=g.risk_score,
+                        final_score=g.final_score,
+                    )
+                )
             views.append(
                 GateDecisionView(
                     memory_id=g.memory_id,
@@ -863,13 +889,14 @@ class MemoryRuntime:
                     branch_status=mem.branch_status if mem else None,
                 )
             )
-            if g.decision in (GateDecisionType.accept, GateDecisionType.degrade, GateDecisionType.warn) and mem:
+            if g.decision in (GateDecisionType.accept, GateDecisionType.warn) and mem:
                 accepted_mems.append(mem)
 
         accepted_mems.sort(
             key=lambda m: next((v.final_score for v in views if v.memory_id == m.memory_id), 0.0),
             reverse=True,
         )
+        negative_evidence = build_negative_evidence(outcomes, memories_by_id, max_blocks=3)
         active_node = None
         active_path: list = []
         if access.run_id:
@@ -879,10 +906,15 @@ class MemoryRuntime:
             accepted=accepted_mems,
             token_budget=access.token_budget or 512,
             active_path=active_path,
+            negative_evidence=negative_evidence,
             compaction_notice_reserve_tokens=self._retrieval._compaction_notice_reserve_tokens,
         )
         blocks = pack_result.blocks
         profile = self._retrieval._profile_summary(access)
+        warnings = [
+            f"negative evidence source memory {memory_id} is missing; raw failed-attempt text was not reconstructed"
+            for memory_id in missing_negative
+        ]
         # candidates: the retrieved candidate pool ranked by relevance (the
         # gate's input view). gate_decisions: the per-candidate admission outcome
         # in gate-processing order (the gate's output view). Both derive from the
@@ -897,6 +929,7 @@ class MemoryRuntime:
             gate_decisions=views,
             context_blocks=blocks,
             profile=profile,
+            warnings=warnings,
         )
 
 
@@ -942,6 +975,21 @@ def _benchmark_summary_from_records(results) -> dict[str, dict[str, float]]:
             ]),
             "avg_compression_ratio": _avg([
                 float(r.get("compression_ratio", 0)) for r in rows if r.get("compression_ratio_present")
+            ]),
+            "positive_contamination_rate": _avg([
+                float(r.get("positive_contamination", 0)) for r in rows if r.get("positive_contamination_present")
+            ]),
+            "negative_lesson_retained_rate": _avg([
+                float(r.get("negative_lesson_retained", 0)) for r in rows if r.get("negative_lesson_retained_present")
+            ]),
+            "correct_action_rate": _avg([
+                float(r.get("correct_action", 0)) for r in rows if r.get("correct_action_present")
+            ]),
+            "unsafe_negative_leakage_rate": _avg([
+                float(r.get("unsafe_negative_leakage", 0)) for r in rows if r.get("unsafe_negative_leakage_present")
+            ]),
+            "sanitized_notice_rate": _avg([
+                float(r.get("sanitized_notice_present", 0)) for r in rows if r.get("sanitized_notice_present_present")
             ]),
             "avg_retrieval_latency_ms": _avg([float(r.get("retrieval_latency_ms", 0)) for r in rows]),
             "avg_gate_latency_ms": _avg([float(r.get("gate_latency_ms", 0)) for r in rows]),

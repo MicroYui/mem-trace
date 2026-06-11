@@ -2,7 +2,10 @@
 
 Three policy layers run in order (mvp.md section 7):
   1. hard_policy  : workspace mismatch, deleted/quarantined, secret,
-                    failed/rolled_back branch -> reject immediately
+                    failed/rolled_back branches reject by default; when failure
+                    learning is enabled, safe failures degrade into the
+                    negative-evidence channel and unsafe failures reject with
+                    sanitized reasons
   2. risk_policy  : stale (expires_at < now), tool_sensitive, destructive,
                     production_env, conflicted -> reject/warn/degrade
   3. soft_ranking : weighted relevance/state/freshness/trust/risk -> final_score
@@ -37,6 +40,7 @@ class GateConfig:
     enable_hard_policy: bool = True
     enable_risk_policy: bool = True
     enable_state_match: bool = True
+    enable_failure_learning: bool = False
     # failed-branch downweight factor for variant_1 (no hard reject)
     failed_branch_penalty: float = 0.5
 
@@ -49,6 +53,7 @@ class GateConfig:
                 enable_state_match=False,
                 allow_failed_branch=True,
                 allow_rolled_back=True,
+                enable_failure_learning=False,
             )
         if strategy == RetrievalStrategy.variant_1:
             return cls(
@@ -57,9 +62,13 @@ class GateConfig:
                 enable_state_match=True,
                 allow_failed_branch=True,
                 allow_rolled_back=True,
+                enable_failure_learning=False,
             )
-        # variant_2 (default) and baseline_0 (no candidates anyway)
-        return cls()
+        if strategy == RetrievalStrategy.variant_2:
+            return cls(enable_failure_learning=True)
+        # baseline_0 has no candidates, but keep its config contract explicit:
+        # failure learning is only enabled for variant_2.
+        return cls(enable_failure_learning=False)
 
 
 @dataclass
@@ -78,7 +87,11 @@ class GateOutcome:
 
     @property
     def accepted(self) -> bool:
-        return self.decision in (GateDecisionType.accept, GateDecisionType.degrade, GateDecisionType.warn)
+        return self.decision in (GateDecisionType.accept, GateDecisionType.warn)
+
+    @property
+    def degraded(self) -> bool:
+        return self.decision == GateDecisionType.degrade
 
 
 def _now() -> datetime:
@@ -104,12 +117,56 @@ def evaluate(
             return _reject(memory, GateLayer.hard_policy, "workspace_mismatch", relevance, state_match, freshness, trust, risk)
         if memory.status in (MemoryStatus.deleted, MemoryStatus.quarantined):
             return _reject(memory, GateLayer.hard_policy, "invalid_status", relevance, state_match, freshness, trust, risk)
-        if memory.sensitivity == Sensitivity.secret:
-            return _reject(memory, GateLayer.hard_policy, "secret", relevance, state_match, freshness, trust, risk)
         if memory.branch_status == BranchStatus.failed and not config.allow_failed_branch:
+            if config.enable_failure_learning:
+                if _is_unsafe_failed(memory):
+                    return _reject(
+                        memory,
+                        GateLayer.hard_policy,
+                        "failed_branch_sanitized",
+                        relevance,
+                        state_match,
+                        freshness,
+                        trust,
+                        risk,
+                    )
+                return _degrade(
+                    memory,
+                    GateLayer.hard_policy,
+                    "failed_branch_degraded",
+                    relevance,
+                    state_match,
+                    freshness,
+                    trust,
+                    risk,
+                )
             return _reject(memory, GateLayer.hard_policy, "failed_branch", relevance, state_match, freshness, trust, risk)
         if memory.branch_status == BranchStatus.rolled_back and not config.allow_rolled_back:
+            if config.enable_failure_learning:
+                if _is_unsafe_failed(memory):
+                    return _reject(
+                        memory,
+                        GateLayer.hard_policy,
+                        "rolled_back_sanitized",
+                        relevance,
+                        state_match,
+                        freshness,
+                        trust,
+                        risk,
+                    )
+                return _degrade(
+                    memory,
+                    GateLayer.hard_policy,
+                    "rolled_back_degraded",
+                    relevance,
+                    state_match,
+                    freshness,
+                    trust,
+                    risk,
+                )
             return _reject(memory, GateLayer.hard_policy, "rolled_back", relevance, state_match, freshness, trust, risk)
+        if memory.sensitivity == Sensitivity.secret or memory.risk_flags.contains_secret:
+            return _reject(memory, GateLayer.hard_policy, "secret", relevance, state_match, freshness, trust, risk)
 
     warnings: list[str] = []
     # ---- Layer 2: risk policy ------------------------------------------- #
@@ -168,6 +225,32 @@ def _reject(memory, layer, reason, relevance, state_match, freshness, trust, ris
         trust_score=trust,
         risk_score=risk,
         final_score=0.0,
+    )
+
+
+def _degrade(memory, layer, reason, relevance, state_match, freshness, trust, risk) -> GateOutcome:
+    return GateOutcome(
+        memory=memory,
+        layer=layer,
+        decision=GateDecisionType.degrade,
+        reject_reason=reason,
+        relevance_score=relevance,
+        state_match_score=state_match,
+        freshness_score=freshness,
+        trust_score=trust,
+        risk_score=risk,
+        final_score=relevance,
+    )
+
+
+def _is_unsafe_failed(memory: MemoryItem) -> bool:
+    flags = memory.risk_flags
+    return (
+        memory.sensitivity == Sensitivity.secret
+        or flags.contains_secret
+        or flags.destructive_command
+        or flags.tool_sensitive
+        or flags.production_env
     )
 
 

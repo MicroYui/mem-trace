@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from app.retrieval.gate import GateOutcome
+from app.retrieval.negative_evidence import build_negative_evidence
 from app.runtime.models import (
     BranchStatus,
     CompactionKind,
@@ -13,12 +15,21 @@ from app.runtime.models import (
     MemoryGateLog,
     MemoryItem,
     MemoryStatus,
+    NegativeEvidence,
     ObservabilitySummary,
 )
 from app.runtime.repository import Repository
 
 
-_ACCEPTED_DECISIONS = {GateDecisionType.accept, GateDecisionType.degrade, GateDecisionType.warn}
+_ACCEPTED_DECISIONS = {GateDecisionType.accept, GateDecisionType.warn}
+_FAILED_BRANCH_REASONS = {
+    "failed_branch",
+    "rolled_back",
+    "failed_branch_degraded",
+    "rolled_back_degraded",
+    "failed_branch_sanitized",
+    "rolled_back_sanitized",
+}
 
 
 async def build_observability_summary(
@@ -59,6 +70,9 @@ async def build_observability_summary(
         rejected_count=int(totals["rejected_count"]),
         failed_branch_rejected=int(totals["failed_branch_rejected"]),
         failed_branch_injected=int(totals["failed_branch_injected"]),
+        degraded_negative_evidence_count=int(totals["degraded_negative_evidence_count"]),
+        sanitized_failure_notice_count=int(totals["sanitized_failure_notice_count"]),
+        negative_evidence_block_count=int(totals["negative_evidence_block_count"]),
         stale_rejected=int(totals["stale_rejected"]),
         stale_injected=int(totals["stale_injected"]),
         tool_sensitive_blocked=int(totals["tool_sensitive_blocked"]),
@@ -112,6 +126,7 @@ def build_access_observability_metrics(
     """
     now = datetime.now(timezone.utc)
     compaction_logs = compaction_logs or []
+    negative_evidence = _rebuilt_negative_evidence(gate_logs, candidate_memories)
     return {
         "access_count": 1.0,
         "candidate_count": float(access.candidate_count),
@@ -120,11 +135,16 @@ def build_access_observability_metrics(
         "latency_ms": float(access.latency_ms),
         "actual_tokens": float(access.actual_tokens),
         "failed_branch_rejected": float(
-            sum(g.reject_reason in {"failed_branch", "rolled_back"} for g in gate_logs)
+            sum(g.reject_reason in _FAILED_BRANCH_REASONS for g in gate_logs)
         ),
         "failed_branch_injected": float(
             sum(m.branch_status in {BranchStatus.failed, BranchStatus.rolled_back} for m in accepted_memories)
         ),
+        "degraded_negative_evidence_count": float(sum(g.decision == GateDecisionType.degrade for g in gate_logs)),
+        "sanitized_failure_notice_count": float(
+            sum(g.reject_reason in {"failed_branch_sanitized", "rolled_back_sanitized"} for g in gate_logs)
+        ),
+        "negative_evidence_block_count": float(len(negative_evidence)),
         "stale_rejected": float(sum(g.reject_reason == "stale" for g in gate_logs)),
         "stale_injected": float(sum(m.expires_at is not None and m.expires_at < now for m in accepted_memories)),
         "tool_sensitive_blocked": float(sum(g.reject_reason == "tool_sensitive" for g in gate_logs)),
@@ -143,6 +163,27 @@ def build_access_observability_metrics(
     }
 
 
+def _rebuilt_negative_evidence(gate_logs: list[MemoryGateLog], memories: list[MemoryItem]) -> list[NegativeEvidence]:
+    memories_by_id = {memory.memory_id: memory for memory in memories}
+    outcomes = [
+        GateOutcome(
+            memory=memory,
+            layer=gate_log.layer,
+            decision=gate_log.decision,
+            reject_reason=gate_log.reject_reason,
+            relevance_score=gate_log.relevance_score,
+            state_match_score=gate_log.state_match_score,
+            freshness_score=gate_log.freshness_score,
+            trust_score=gate_log.trust_score,
+            risk_score=gate_log.risk_score,
+            final_score=gate_log.final_score,
+        )
+        for gate_log in gate_logs
+        if (memory := memories_by_id.get(gate_log.memory_id)) is not None
+    ]
+    return build_negative_evidence(outcomes, memories_by_id, max_blocks=3)
+
+
 def _empty_totals() -> dict[str, float]:
     return {
         "access_count": 0.0,
@@ -153,6 +194,9 @@ def _empty_totals() -> dict[str, float]:
         "actual_tokens": 0.0,
         "failed_branch_rejected": 0.0,
         "failed_branch_injected": 0.0,
+        "degraded_negative_evidence_count": 0.0,
+        "sanitized_failure_notice_count": 0.0,
+        "negative_evidence_block_count": 0.0,
         "stale_rejected": 0.0,
         "stale_injected": 0.0,
         "tool_sensitive_blocked": 0.0,
@@ -205,6 +249,9 @@ def _strategy_summary(totals: dict[str, float]) -> dict[str, float]:
         "avg_accepted_count": _avg(totals, "accepted_count"),
         "avg_rejected_count": _avg(totals, "rejected_count"),
         "failed_branch_injection_rate": _rate(totals, "failed_branch_injected"),
+        "negative_evidence_block_rate": _rate(totals, "negative_evidence_block_count"),
+        "degraded_negative_evidence_rate": _rate(totals, "degraded_negative_evidence_count"),
+        "sanitized_failure_notice_rate": _rate(totals, "sanitized_failure_notice_count"),
         "stale_injection_rate": _rate(totals, "stale_injected"),
         "tool_sensitive_block_rate": _rate(totals, "tool_sensitive_blocked"),
         "destructive_command_block_rate": _rate(totals, "destructive_command_blocked"),

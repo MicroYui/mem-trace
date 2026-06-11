@@ -18,6 +18,7 @@ from app.runtime.models import (
     CompactionProvider,
     MemoryItem,
     MemoryType,
+    NegativeEvidence,
     PendingCompactionLog,
     Provenance,
     RetainedFact,
@@ -37,11 +38,12 @@ _TYPE_ORDER = {
     "active_state": 0,
     "active_path": 1,
     "history_summary": 2,
-    "tool_evidence": 3,
-    "project_memory": 4,
-    "profile": 5,
-    "procedural": 6,
-    "episodic": 7,
+    "project_memory": 3,
+    "avoided_attempts": 4,
+    "tool_evidence": 5,
+    "profile": 6,
+    "procedural": 7,
+    "episodic": 8,
 }
 
 _PROTECTED_ORDER = {
@@ -208,6 +210,26 @@ def build_compaction_notice(dropped: list[ContextBlock], *, kind: str = "budget_
     )
 
 
+def build_negative_evidence_block(ev: NegativeEvidence) -> ContextBlock:
+    if ev.mode == "raw_failed_attempt":
+        content = (
+            "AVOIDED — a previous attempt failed; do NOT re-execute:\n"
+            f"{ev.safe_text}\n"
+            "(Shown as negative evidence only — do not run this.)"
+        )
+    else:
+        content = ev.safe_text
+    return ContextBlock(
+        type="avoided_attempts",
+        content=content,
+        source="negative_evidence",
+        memory_id=ev.source_memory_id,
+        reason=ev.reason,
+        provenance=ev.provenance,
+        tokens=estimate_tokens(content),
+    )
+
+
 def _unique_nonempty(values) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -328,6 +350,7 @@ def pack_context(
     token_budget: int,
     active_path: Optional[list[StateNode]] = None,
     prelude_blocks: Optional[list[ContextBlock]] = None,
+    negative_evidence: Optional[list[NegativeEvidence]] = None,
     compaction_notice_reserve_tokens: int = 64,
 ) -> PackResult:
     """Build ordered, budget-bounded context blocks.
@@ -401,6 +424,9 @@ def pack_context(
         )
     if proj_block is not None:
         blocks.append(proj_block)
+
+    if negative_evidence:
+        blocks.extend(build_negative_evidence_block(ev) for ev in negative_evidence)
 
     if any(block.type == "history_summary" for block in blocks):
         blocks = _ordered_blocks(blocks)
@@ -517,6 +543,7 @@ __all__ = [
     "build_active_path_block",
     "build_compacted_constraints_block",
     "build_compaction_notice",
+    "build_negative_evidence_block",
     "extract_retained_facts",
     "fit_block",
     "estimate_tokens",

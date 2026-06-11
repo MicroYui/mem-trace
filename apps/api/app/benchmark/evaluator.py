@@ -20,20 +20,35 @@ from app.runtime.models import (
 
 def decide_action(ctx: MemoryContext) -> str:
     """Pick the test/deploy command implied by the packed context."""
+    positive_blocks = _positive_blocks(ctx)
     if contaminated(ctx):
         return "npm test"
-    text = " ".join(b.content.lower() for b in ctx.context_blocks)
+    text = " ".join(b.content.lower() for b in positive_blocks)
     if "bun" in text:
         return "bun test"
     return "unknown"
 
 
 def contaminated(ctx: MemoryContext) -> bool:
-    """failed_branch_contamination: a failed/rolled-back memory reached context."""
+    """failed_branch_contamination: failed memory reached positive context."""
     return any(
         "npm" in b.content.lower() and "failed" in b.content.lower()
-        for b in ctx.context_blocks
+        for b in _positive_blocks(ctx)
     )
+
+
+def _positive_blocks(ctx: MemoryContext):
+    return [
+        block for block in ctx.context_blocks
+        if block.type != "avoided_attempts" and block.source != "negative_evidence"
+    ]
+
+
+def _negative_blocks(ctx: MemoryContext):
+    return [
+        block for block in ctx.context_blocks
+        if block.type == "avoided_attempts" or block.source == "negative_evidence"
+    ]
 
 
 @dataclass
@@ -69,6 +84,16 @@ class CaseMetrics:
     unsafe_compaction_leakage_present: int = 0
     compression_ratio: float = 0.0
     compression_ratio_present: int = 0
+    positive_contamination: int = 0
+    positive_contamination_present: int = 0
+    negative_lesson_retained: int = 0
+    negative_lesson_retained_present: int = 0
+    correct_action: int = 0
+    correct_action_present: int = 0
+    unsafe_negative_leakage: int = 0
+    unsafe_negative_leakage_present: int = 0
+    sanitized_notice_present: int = 0
+    sanitized_notice_present_present: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -103,6 +128,10 @@ def evaluate_case(
     compaction_positive_constraints: Optional[list[str]] = None,
     unsafe_compaction_markers: Optional[list[str]] = None,
     compaction_logs: Optional[list[ContextCompactionLog]] = None,
+    negative_lesson_markers: Optional[list[str]] = None,
+    unsafe_negative_markers: Optional[list[str]] = None,
+    failure_learning_case: bool = False,
+    sanitized_failure_case: bool = False,
 ) -> CaseMetrics:
     """Build metrics for one (case, strategy) run.
 
@@ -122,6 +151,8 @@ def evaluate_case(
     m.actual_tokens = int(prof.get("actual_tokens", 0))
     m.total_latency_ms = int(prof.get("latency_ms", 0))
     m.warnings = list(ctx.warnings)
+    positive_blocks = _positive_blocks(ctx)
+    negative_blocks = _negative_blocks(ctx)
 
     if access is not None:
         m.retrieval_latency_ms = _phase_latency(profile_events, access.access_id, "retrieval")
@@ -210,6 +241,30 @@ def evaluate_case(
         if logs:
             m.compression_ratio_present = 1
             m.compression_ratio = round(post_tokens / max(1, pre_tokens), 6)
+
+    # Failure-aware negative-memory learning: score positive and negative
+    # channels separately so an avoided npm lesson is not counted as positive
+    # contamination and does not make the deterministic action repeat npm.
+    if failure_learning_case:
+        markers = [marker.lower() for marker in (negative_lesson_markers or [])]
+        negative_text = " ".join(block.content.lower() for block in negative_blocks)
+        m.positive_contamination_present = 1
+        m.negative_lesson_retained_present = 1
+        m.correct_action_present = 1
+        m.positive_contamination = 1 if contaminated(ctx) else 0
+        m.negative_lesson_retained = 1 if markers and any(marker in negative_text for marker in markers) else 0
+        m.correct_action = 1 if m.final_action == "bun test" else 0
+
+    if sanitized_failure_case:
+        markers = [marker.lower() for marker in (unsafe_negative_markers or [])]
+        negative_text = " ".join(block.content.lower() for block in negative_blocks)
+        m.unsafe_negative_leakage_present = 1
+        m.sanitized_notice_present_present = 1
+        m.unsafe_negative_leakage = 1 if any(marker in negative_text for marker in markers) else 0
+        m.sanitized_notice_present = 1 if (
+            "redacted" in negative_text
+            and "destructive operation" in negative_text
+        ) else 0
 
     return m
 

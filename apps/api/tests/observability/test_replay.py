@@ -9,15 +9,20 @@ from app.runtime.models import (
     CompactionKind,
     CompactionProvider,
     ContextCompactionLog,
+    EventRole,
+    EventType,
     FinishStepRequest,
     MemoryItem,
     MemoryStatus,
     MemoryType,
     RetrievalRequest,
     RetrievalStrategy,
+    RiskFlags,
+    RollbackRequest,
     StartRunRequest,
     StartStepRequest,
     StepStatus,
+    WriteEventRequest,
 )
 from app.runtime.repository import InMemoryRepository
 
@@ -55,6 +60,44 @@ async def _retrieve_once(runtime: MemoryRuntime, run_id: str, step_id: str, *, t
         )
     )
     return ctx.access_id
+
+
+async def _seed_failure_learning_runtime() -> tuple[MemoryRuntime, InMemoryRepository, str, str]:
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_negative")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_negative", task="fix tests", workspace_id="ws_replay_negative")
+    )
+    planning = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=planning.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="This project uses Bun to run tests, not npm.",
+        )
+    )
+    await runtime.finish_step(FinishStepRequest(run_id=run.run_id, step_id=planning.step_id, status=StepStatus.completed))
+    failed = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="debug failed npm"))
+    await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=failed.step_id,
+            role=EventRole.tool,
+            event_type=EventType.tool_result,
+            status="failed",
+            content="Tried npm test and it failed because npm is unavailable.",
+        )
+    )
+    await runtime.finish_step(
+        FinishStepRequest(run_id=run.run_id, step_id=failed.step_id, status=StepStatus.failed, error_message="npm")
+    )
+    await runtime.rollback_branch(RollbackRequest(run_id=run.run_id, step_id=failed.step_id, reason="npm"))
+    recovery = await runtime.start_step(
+        StartStepRequest(run_id=run.run_id, intent="recover with bun", recovery_from_step_id=failed.step_id)
+    )
+    return runtime, repo, run.run_id, recovery.step_id
 
 
 @pytest.mark.asyncio
@@ -102,9 +145,212 @@ async def test_replay_detects_decision_drift_after_memory_branch_status_change()
     assert decision_diffs
     assert decision_diffs[0].memory_id == memory_id
     assert decision_diffs[0].original == "accept"
-    assert decision_diffs[0].replayed == "reject"
+    assert decision_diffs[0].replayed == "degrade"
     assert decision_diffs[0].severity == "warning"
-    assert any(d.kind == "reject_reason_changed" and d.replayed == "rolled_back" for d in replay.diffs)
+    assert any(d.kind == "reject_reason_changed" and d.replayed == "rolled_back_degraded" for d in replay.diffs)
+
+
+@pytest.mark.asyncio
+async def test_replay_reconstructs_negative_evidence_without_false_context_drift():
+    runtime, _, run_id, step_id = await _seed_failure_learning_runtime()
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run_id,
+            step_id=step_id,
+            query="npm test failed how should I run tests now",
+            strategy=RetrievalStrategy.variant_2,
+            token_budget=160,
+            top_k=5,
+        )
+    )
+    assert any(block.type == "avoided_attempts" for block in ctx.context_blocks)
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    assert any(block.type == "avoided_attempts" for block in replay.original_context_blocks_reconstructed)
+    assert any(block.type == "avoided_attempts" for block in replay.replayed_context_blocks)
+    assert not [d for d in replay.diffs if d.kind.startswith("context_block_")]
+    assert not _positive_failed_blocks(replay.original_context_blocks_reconstructed)
+    assert not _positive_failed_blocks(replay.replayed_context_blocks)
+    degraded_count = sum(g.decision.value == "degrade" for g in replay.original_gate_decisions)
+    original_negative_blocks = sum(block.type == "avoided_attempts" for block in replay.original_context_blocks_reconstructed)
+    assert replay.metrics["degraded_negative_evidence_count"] == degraded_count
+    assert replay.metrics["negative_evidence_block_count"] == original_negative_blocks
+
+
+def _positive_failed_blocks(blocks):
+    return [
+        block
+        for block in blocks
+        if block.type != "avoided_attempts"
+        and block.source != "negative_evidence"
+        and "npm" in block.content.lower()
+        and "failed" in block.content.lower()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_replay_sanitizes_original_and_replayed_candidate_views_for_sanitized_failure():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_sanitized_view")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_sanitized_view", task="recover", workspace_id="ws_replay_sanitized_view")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="recover"))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_replay_sanitized_view",
+            run_id=run.run_id,
+            memory_type=MemoryType.tool_evidence,
+            key="tool.raw.git push --force RAW_KEY_MARKER",
+            value="git push --force RAW_VALUE_MARKER",
+            content="Tried git push --force to production and it failed. RAW_FORCE_MARKER",
+            branch_status=BranchStatus.failed,
+            risk_flags=RiskFlags(destructive_command=True, tool_sensitive=True),
+        )
+    )
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="git push force production failed RAW_FORCE_MARKER",
+            strategy=RetrievalStrategy.variant_2,
+            top_k=5,
+        )
+    )
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    serialized = repr(
+        {
+            "original_candidates": [candidate.model_dump() for candidate in replay.original_candidates],
+            "replayed_candidates": [candidate.model_dump() for candidate in replay.replayed_candidates],
+        }
+    )
+    assert "git push" not in serialized
+    assert "--force" not in serialized
+    assert "RAW_FORCE_MARKER" not in serialized
+    assert "RAW_KEY_MARKER" not in serialized
+    assert "RAW_VALUE_MARKER" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_replay_marks_sanitized_reject_to_accept_as_critical():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_sanitized")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_sanitized", task="recover", workspace_id="ws_replay_sanitized")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="recover"))
+    mem = await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_replay_sanitized",
+            run_id=run.run_id,
+            memory_type=MemoryType.tool_evidence,
+            content="Tried git push --force to production and it failed.",
+            branch_status=BranchStatus.failed,
+            risk_flags=RiskFlags(destructive_command=True, tool_sensitive=True),
+        )
+    )
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="git push force production failed",
+            strategy=RetrievalStrategy.variant_2,
+            top_k=5,
+        )
+    )
+    gate_logs = await repo.list_gate_logs(ctx.access_id)
+    assert any(g.memory_id == mem.memory_id and g.reject_reason == "failed_branch_sanitized" for g in gate_logs)
+    mem.branch_status = BranchStatus.completed
+    mem.risk_flags = RiskFlags()
+    await repo.update_memory(mem)
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    assert any(
+        d.kind == "decision_changed"
+        and d.memory_id == mem.memory_id
+        and d.original == "reject"
+        and d.replayed in {"accept", "warn"}
+        and d.severity == "critical"
+        for d in replay.diffs
+    )
+
+
+@pytest.mark.asyncio
+async def test_replay_marks_sanitized_reject_to_degrade_as_critical():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_sanitized_degrade")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_sanitized_degrade", task="recover", workspace_id="ws_replay_sanitized_degrade")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="recover"))
+    mem = await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_replay_sanitized_degrade",
+            run_id=run.run_id,
+            memory_type=MemoryType.tool_evidence,
+            content="Tried git push --force to production and it failed.",
+            branch_status=BranchStatus.failed,
+            risk_flags=RiskFlags(destructive_command=True, tool_sensitive=True),
+        )
+    )
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="git push force production failed",
+            strategy=RetrievalStrategy.variant_2,
+            top_k=5,
+        )
+    )
+    mem.risk_flags = RiskFlags()
+    await repo.update_memory(mem)
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    assert any(
+        d.kind == "decision_changed"
+        and d.memory_id == mem.memory_id
+        and d.original == "reject"
+        and d.replayed == "degrade"
+        and d.severity == "critical"
+        for d in replay.diffs
+    )
+
+
+@pytest.mark.asyncio
+async def test_replay_warns_without_raw_negative_evidence_when_source_memory_missing():
+    runtime, repo, run_id, step_id = await _seed_failure_learning_runtime()
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run_id,
+            step_id=step_id,
+            query="npm test failed how should I run tests now",
+            strategy=RetrievalStrategy.variant_2,
+            top_k=5,
+        )
+    )
+    degraded_ids = [g.memory_id for g in await repo.list_gate_logs(ctx.access_id) if g.decision.value == "degrade"]
+    assert degraded_ids
+    for degraded_id in degraded_ids:
+        del repo._memories[degraded_id]  # noqa: SLF001 - simulate historical source memory deletion
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    assert all(
+        any(degraded_id in warning and "negative evidence source memory" in warning for warning in replay.warnings)
+        for degraded_id in degraded_ids
+    )
+    assert not [b for b in replay.original_context_blocks_reconstructed if b.type == "avoided_attempts"]
+    assert "Tried npm test" not in repr(replay.model_dump())
 
 
 @pytest.mark.asyncio

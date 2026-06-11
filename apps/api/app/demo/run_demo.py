@@ -94,14 +94,21 @@ def _decide_action(ctx: MemoryContext) -> str:
     """
     if _contaminated(ctx):
         return "npm test"
-    text = " ".join(b.content.lower() for b in ctx.context_blocks)
+    text = " ".join(b.content.lower() for b in _positive_blocks(ctx))
     if "bun" in text:
         return "bun test"
     return "unknown"
 
 
 def _contaminated(ctx: MemoryContext) -> bool:
-    return any("npm" in b.content.lower() and "failed" in b.content.lower() for b in ctx.context_blocks)
+    return any("npm" in b.content.lower() and "failed" in b.content.lower() for b in _positive_blocks(ctx))
+
+
+def _positive_blocks(ctx: MemoryContext):
+    return [
+        block for block in ctx.context_blocks
+        if block.type != "avoided_attempts" and block.source != "negative_evidence"
+    ]
 
 
 async def run_demo(*, use_sql: bool = False) -> dict:

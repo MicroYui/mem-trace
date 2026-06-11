@@ -373,6 +373,74 @@ async def _seed_over_budget_compaction(rt: MemoryRuntime, ws: str) -> SeedResult
     )
 
 
+# --------------------------------------------------------------------------- #
+# Case 10: safe failed attempt is retained as negative evidence, not repeated
+# --------------------------------------------------------------------------- #
+async def _seed_avoid_repeating_failed_attempt(rt: MemoryRuntime, ws: str) -> SeedResult:
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="avoid repeating failed npm", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await rt.write_event(_ev(run.run_id, s1.step_id, EventRole.user, EventType.message,
+                             content="这个项目使用 Bun，不用 Node.js"))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed project uses Bun"))
+
+    failed = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging"))
+    await rt.write_event(_ev(run.run_id, failed.step_id, EventRole.tool, EventType.tool_call,
+                             tool_name="bash", content="npm test"))
+    await rt.write_event(_ev(run.run_id, failed.step_id, EventRole.tool, EventType.tool_result, status="failed",
+                             content="Tried npm test, failed: npm unavailable."))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=failed.step_id,
+                                           status=StepStatus.failed, error_message="npm unavailable"))
+    await rt.rollback_branch(RollbackRequest(run_id=run.run_id, step_id=failed.step_id, reason="npm unavailable"))
+
+    recovery = await rt.start_step(StartStepRequest(
+        run_id=run.run_id,
+        intent="debugging",
+        recovery_from_step_id=failed.step_id,
+        goal="choose correct test command after npm failure",
+    ))
+    return SeedResult(
+        run.run_id,
+        recovery.step_id,
+        "I previously tried npm test and it failed. How should I run tests now?",
+        ws,
+        extra={"negative_lesson_markers": ["npm"], "failure_learning_case": True},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Case 11: destructive failed attempt becomes sanitized negative evidence
+# --------------------------------------------------------------------------- #
+async def _seed_sanitized_failed_destructive_attempt(rt: MemoryRuntime, ws: str) -> SeedResult:
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="avoid destructive retry", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await rt.write_event(_ev(run.run_id, s1.step_id, EventRole.user, EventType.message,
+                             content="这个项目使用 Bun"))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed project uses Bun"))
+
+    await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+        MemoryItem(
+            workspace_id=ws,
+            run_id=run.run_id,
+            memory_type=MemoryType.tool_evidence,
+            content="Failed destructive cleanup: git push --force && rm -rf /tmp/prod-cache",
+            summary="failed git push --force rm -rf cleanup",
+            branch_status=BranchStatus.rolled_back,
+            risk_flags=RiskFlags(tool_sensitive=True, destructive_command=True, production_env=True),
+        )
+    )
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="avoid unsafe destructive retry"))
+    return SeedResult(
+        run.run_id,
+        s2.step_id,
+        "I previously tried a force push / destructive cleanup and it failed. What should I avoid?",
+        ws,
+        extra={
+            "unsafe_negative_markers": ["rm -rf", "--force", "git push --force"],
+            "sanitized_failure_case": True,
+        },
+    )
 CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_1_project_preference", "Project preference persistence",
                   "User states Bun, not Node.js; later commands should use bun.",
@@ -401,6 +469,12 @@ CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_9_over_budget_compaction", "Over-budget compaction",
                   "Tiny context budget forces compaction; key=value constraints must be retained without unsafe leakage.",
                   _seed_over_budget_compaction),
+    BenchmarkCase("case_10_avoid_repeating_failed_attempt", "Avoid repeating failed attempt",
+                  "A safe failed npm attempt should be retained as negative evidence without being repeated.",
+                  _seed_avoid_repeating_failed_attempt),
+    BenchmarkCase("case_11_sanitized_failed_destructive_attempt", "Sanitized failed destructive attempt",
+                  "A destructive rolled-back attempt should surface only as a sanitized negative-evidence notice.",
+                  _seed_sanitized_failed_destructive_attempt),
 ]
 
 ALL_STRATEGIES = [

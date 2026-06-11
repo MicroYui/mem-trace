@@ -17,6 +17,7 @@ from app.runtime.models import (
     EventRole,
     EventType,
     FinishStepRequest,
+    GateDecisionType,
     MemoryItem,
     MemoryType,
     RetrievalRequest,
@@ -62,6 +63,14 @@ def _contaminated(ctx) -> bool:
     return any("npm" in b.content.lower() and "failed" in b.content.lower() for b in ctx.context_blocks)
 
 
+def _positive_contaminated(ctx) -> bool:
+    return any(
+        "npm" in b.content.lower() and "failed" in b.content.lower()
+        for b in ctx.context_blocks
+        if b.type != "avoided_attempts" and b.source != "negative_evidence"
+    )
+
+
 async def test_baseline_1_is_contaminated_by_failed_branch(runtime):
     run, s3 = await _seed_bun_vs_node(runtime)
     ctx = await runtime.retrieve_context(
@@ -79,10 +88,111 @@ async def test_variant_2_eliminates_contamination_and_keeps_bun(runtime):
                          query="How do I run the test suite with npm test?",
                          strategy=RetrievalStrategy.variant_2)
     )
-    assert _contaminated(ctx) is False
+    assert _positive_contaminated(ctx) is False
     joined = " ".join(b.content for b in ctx.context_blocks)
     assert "Bun" in joined and "Nodejs" in joined  # merged positive+negative
-    assert any("failed-branch" in w for w in ctx.warnings)
+    assert any("negative evidence" in w for w in ctx.warnings)
+
+
+async def test_variant_2_injects_safe_failed_branch_as_negative_evidence(runtime):
+    run, s3 = await _seed_bun_vs_node(runtime)
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s3.step_id,
+                         query="How do I run tests after npm test failed?",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+
+    avoided = [b for b in ctx.context_blocks if b.type == "avoided_attempts"]
+    assert len(avoided) == 1
+    assert "npm test" in avoided[0].content.lower()
+    assert "do NOT re-execute" in avoided[0].content
+    assert _positive_contaminated(ctx) is False
+    assert any("failed-branch memories injected as negative evidence" in w for w in ctx.warnings)
+
+    access = await runtime._repo.get_access_log(ctx.access_id)  # noqa: SLF001
+    assert access is not None
+    assert access.candidate_count == access.accepted_count + access.rejected_count
+
+    gate_logs = await runtime._repo.list_gate_logs(ctx.access_id)  # noqa: SLF001
+    assert any(g.decision == GateDecisionType.degrade and g.reject_reason == "rolled_back_degraded" for g in gate_logs)
+
+    profile_events = await runtime._repo.list_profile_events(access_id=ctx.access_id)  # noqa: SLF001
+    packing = [p for p in profile_events if p.phase.value == "context_packing"][-1]
+    degraded_logs = [g for g in gate_logs if g.decision == GateDecisionType.degrade]
+    assert packing.metadata["degraded_count"] == len(degraded_logs)
+    assert packing.metadata["hard_rejected_count"] == access.rejected_count - len(degraded_logs)
+    assert packing.metadata["negative_evidence_count"] == 1
+    assert packing.metadata["sanitized_negative_evidence_count"] == 0
+
+
+async def test_variant_2_sanitizes_unsafe_failed_branch_negative_evidence(runtime):
+    run = await runtime.start_run(StartRunRequest(session_id="s", task="t", workspace_id="ws_test"))
+    s = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="recover from unsafe deploy"))
+    await runtime._repo.add_memory(  # noqa: SLF001
+        MemoryItem(workspace_id="ws_test", memory_type=MemoryType.project,
+                   key="project.runtime", value="bun",
+                   content="This project uses Bun", branch_status=BranchStatus.completed)
+    )
+    await runtime._repo.add_memory(  # noqa: SLF001
+        MemoryItem(workspace_id="ws_test", memory_type=MemoryType.tool_evidence,
+                   content="Tried git push --force to production and it failed badly.",
+                   branch_status=BranchStatus.failed,
+                   risk_flags=RiskFlags(tool_sensitive=True, destructive_command=True))
+    )
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s.step_id,
+                         query="force push production failed avoid",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+
+    avoided = [b for b in ctx.context_blocks if b.type == "avoided_attempts"]
+    assert len(avoided) == 1
+    assert "destructive operation" in avoided[0].content
+    assert "git push" not in avoided[0].content
+    assert "--force" not in avoided[0].content
+    assert all("git push --force" not in b.content for b in ctx.context_blocks if b.type != "avoided_attempts")
+    assert any("redacted into sanitized safety notices" in w for w in ctx.warnings)
+
+    profile_events = await runtime._repo.list_profile_events(access_id=ctx.access_id)  # noqa: SLF001
+    packing = [p for p in profile_events if p.phase.value == "context_packing"][-1]
+    assert packing.metadata["degraded_count"] == 0
+    assert packing.metadata["negative_evidence_count"] == 1
+    assert packing.metadata["sanitized_negative_evidence_count"] == 1
+
+    access = await runtime.inspect_access(ctx.access_id)
+    assert access is not None
+    serialized_inspection = repr(access.model_dump())
+    assert "git push" not in serialized_inspection
+    assert "--force" not in serialized_inspection
+    assert [b.type for b in access.context_blocks] == [b.type for b in ctx.context_blocks]
+    assert [b.content for b in access.context_blocks] == [b.content for b in ctx.context_blocks]
+
+
+async def test_inspect_access_warns_without_raw_negative_evidence_when_source_memory_missing(runtime):
+    run, s3 = await _seed_bun_vs_node(runtime)
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s3.step_id, query="npm test failed now use bun",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+    degraded_ids = [
+        g.memory_id
+        for g in await runtime._repo.list_gate_logs(ctx.access_id)  # noqa: SLF001
+        if g.decision == GateDecisionType.degrade
+    ]
+    assert degraded_ids
+    for memory_id in degraded_ids:
+        del runtime._repo._memories[memory_id]  # noqa: SLF001 - simulate historical source deletion
+
+    access = await runtime.inspect_access(ctx.access_id)
+
+    assert access is not None
+    assert all(
+        any(memory_id in warning and "negative evidence source memory" in warning for warning in access.warnings)
+        for memory_id in degraded_ids
+    )
+    assert not [b for b in access.context_blocks if b.type == "avoided_attempts"]
 
 
 async def test_access_inspection_records_all_gate_decisions(runtime):
@@ -94,8 +204,9 @@ async def test_access_inspection_records_all_gate_decisions(runtime):
     access = await runtime.inspect_access(ctx.access_id)
     assert access is not None
     assert len(access.gate_decisions) >= 1
-    # at least one rejection recorded for the failed branch
-    assert any(g.decision.value == "reject" for g in access.gate_decisions)
+    # failed/rolled-back branch decisions are still logged, now as the I3
+    # negative-evidence ``degrade`` channel instead of positive acceptance.
+    assert any(g.decision.value == "degrade" for g in access.gate_decisions)
 
 
 async def test_workspace_isolation_no_cross_workspace_candidates():
@@ -491,12 +602,16 @@ async def test_compaction_never_includes_failed_branch_block(runtime):
                          strategy=RetrievalStrategy.variant_2, token_budget=6),
         workspace_id="ws_test",
     )
-    dropped_text = " ".join(b.content for b in trace.phase_profile["context_packing"]["metadata"]["dropped_blocks"])
+    dropped_blocks = trace.phase_profile["context_packing"]["metadata"]["dropped_blocks"]
+    dropped_positive_text = " ".join(
+        b["content"] for b in dropped_blocks
+        if b["type"] != "avoided_attempts" and b.get("source") != "negative_evidence"
+    )
     retained_text = " ".join(
         f"{f['key']}={f['value']}" for f in trace.phase_profile["context_packing"]["metadata"]["retained_constraints"]
     )
 
-    assert "npm test" not in dropped_text.lower()
+    assert "npm test" not in dropped_positive_text.lower()
     assert "npm test" not in retained_text.lower()
 
 

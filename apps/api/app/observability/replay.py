@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 from app.retrieval import gate as gatemod
 from app.retrieval.controller import RetrievalCandidateTrace, RetrievalController, RetrievalPipelineTrace
+from app.retrieval.negative_evidence import build_negative_evidence, safe_observability_content, safe_observability_key_value
 from app.retrieval.packer import pack_context
 from app.runtime.models import (
     BranchStatus,
@@ -35,7 +36,7 @@ from app.runtime.state_tree import active_path_chain
 
 _EPSILON = 0.000001
 _SEVERITY_RANK = {"critical": 0, "warning": 1, "info": 2}
-_ACCEPTED_DECISIONS = {GateDecisionType.accept, GateDecisionType.degrade, GateDecisionType.warn}
+_ACCEPTED_DECISIONS = {GateDecisionType.accept, GateDecisionType.warn}
 _CRITICAL_REASONS = {
     "failed_branch",
     "rolled_back",
@@ -54,6 +55,7 @@ class _OriginalReplayView:
     gate_decisions: list[ReplayGateDecisionView]
     context_blocks: list[ContextBlock]
     missing_memory_ids: list[str]
+    missing_negative_evidence_memory_ids: list[str]
     accepted_memories: list[MemoryItem]
 
 
@@ -79,6 +81,10 @@ class RetrievalReplayService:
         original = await self._build_original_view(access, gate_logs, prelude_blocks=history_prelude)
         warnings: list[str] = []
         diffs = self._integrity_diffs(original.missing_memory_ids)
+        warnings.extend(
+            f"negative evidence source memory {memory_id} is missing; raw failed-attempt text was not reconstructed"
+            for memory_id in original.missing_negative_evidence_memory_ids
+        )
 
         if access.run_id is None:
             warnings.append("access has no run_id; active-state replay unavailable")
@@ -121,8 +127,9 @@ class RetrievalReplayService:
                 pending_compaction_logs=history_pending,
             )
 
-        replay_candidates = [_candidate_from_trace(c) for c in replay_trace.candidates]
         replay_gate_decisions = [_gate_from_outcome(o) for o in replay_trace.gate_outcomes]
+        replay_outcomes_by_id = {outcome.memory.memory_id: outcome for outcome in replay_trace.gate_outcomes}
+        replay_candidates = [_candidate_from_trace(c, replay_outcomes_by_id.get(c.memory.memory_id)) for c in replay_trace.candidates]
         diffs.extend(
             _diff_candidates(original.candidates, replay_candidates)
             + _diff_scores_and_gate(original.gate_decisions, replay_gate_decisions)
@@ -132,7 +139,7 @@ class RetrievalReplayService:
         )
         diffs = _sort_diffs(diffs)
 
-        metrics = _access_metrics(access, gate_logs, original.accepted_memories, diffs)
+        metrics = _access_metrics(access, gate_logs, original.accepted_memories, original.context_blocks, diffs)
         warnings.extend(replay_trace.warnings)
         return ReplayRetrievalResult(
             access_id=access.access_id,
@@ -182,18 +189,27 @@ class RetrievalReplayService:
         decisions: list[ReplayGateDecisionView] = []
         accepted: list[tuple[MemoryGateLog, MemoryItem]] = []
         missing: list[str] = []
+        missing_negative: list[str] = []
+        outcomes: list[gatemod.GateOutcome] = []
+        memories_by_id: dict[str, MemoryItem] = {}
 
         for gate_log in gate_logs:
             mem = await self._repo.get_memory(gate_log.memory_id)
             if mem is None:
                 missing.append(gate_log.memory_id)
+                if _negative_evidence_source_decision(gate_log):
+                    missing_negative.append(gate_log.memory_id)
             candidates.append(_candidate_from_gate_log(gate_log, mem))
             decisions.append(_gate_from_log(gate_log))
+            if mem is not None:
+                memories_by_id[mem.memory_id] = mem
+                outcomes.append(_outcome_from_log(gate_log, mem))
             if mem is not None and gate_log.decision in _ACCEPTED_DECISIONS:
                 accepted.append((gate_log, mem))
 
         accepted.sort(key=lambda pair: pair[0].final_score, reverse=True)
         accepted_memories = [mem for _, mem in accepted]
+        negative_evidence = build_negative_evidence(outcomes, memories_by_id, max_blocks=3)
         active_node, active_path = await self._load_original_access_state(access)
         pack_result = pack_context(
             active_node=active_node,
@@ -201,6 +217,7 @@ class RetrievalReplayService:
             token_budget=access.token_budget or 512,
             active_path=active_path,
             prelude_blocks=prelude_blocks,
+            negative_evidence=negative_evidence,
             compaction_notice_reserve_tokens=self._retrieval._compaction_notice_reserve_tokens,
         )
         blocks = pack_result.blocks
@@ -209,6 +226,7 @@ class RetrievalReplayService:
             gate_decisions=decisions,
             context_blocks=blocks,
             missing_memory_ids=missing,
+            missing_negative_evidence_memory_ids=missing_negative,
             accepted_memories=accepted_memories,
         )
 
@@ -271,12 +289,13 @@ class RetrievalReplayService:
 
 
 def _candidate_from_gate_log(gate_log: MemoryGateLog, mem: MemoryItem | None) -> ReplayCandidateView:
+    key, value = safe_observability_key_value(mem, reject_reason=gate_log.reject_reason)
     return ReplayCandidateView(
         memory_id=gate_log.memory_id,
-        content=mem.content if mem else "",
+        content=safe_observability_content(mem, reject_reason=gate_log.reject_reason),
         memory_type=mem.memory_type if mem else None,
-        key=mem.key if mem else None,
-        value=mem.value if mem else None,
+        key=key,
+        value=value,
         status=mem.status if mem else None,
         branch_status=mem.branch_status if mem else None,
         sensitivity=mem.sensitivity if mem else None,
@@ -286,14 +305,18 @@ def _candidate_from_gate_log(gate_log: MemoryGateLog, mem: MemoryItem | None) ->
     )
 
 
-def _candidate_from_trace(candidate: RetrievalCandidateTrace) -> ReplayCandidateView:
+def _candidate_from_trace(
+    candidate: RetrievalCandidateTrace, outcome: gatemod.GateOutcome | None = None
+) -> ReplayCandidateView:
     mem = candidate.memory
+    reject_reason = outcome.reject_reason if outcome else None
+    key, value = safe_observability_key_value(mem, reject_reason=reject_reason)
     return ReplayCandidateView(
         memory_id=mem.memory_id,
-        content=mem.content,
+        content=safe_observability_content(mem, reject_reason=reject_reason),
         memory_type=mem.memory_type,
-        key=mem.key,
-        value=mem.value,
+        key=key,
+        value=value,
         status=mem.status,
         branch_status=mem.branch_status,
         sensitivity=mem.sensitivity,
@@ -318,6 +341,28 @@ def _gate_from_log(gate_log: MemoryGateLog) -> ReplayGateDecisionView:
         risk_score=gate_log.risk_score,
         final_score=gate_log.final_score,
     )
+
+
+def _outcome_from_log(gate_log: MemoryGateLog, mem: MemoryItem) -> gatemod.GateOutcome:
+    return gatemod.GateOutcome(
+        memory=mem,
+        layer=gate_log.layer,
+        decision=gate_log.decision,
+        reject_reason=gate_log.reject_reason,
+        relevance_score=gate_log.relevance_score,
+        state_match_score=gate_log.state_match_score,
+        freshness_score=gate_log.freshness_score,
+        trust_score=gate_log.trust_score,
+        risk_score=gate_log.risk_score,
+        final_score=gate_log.final_score,
+    )
+
+
+def _negative_evidence_source_decision(gate_log: MemoryGateLog) -> bool:
+    return gate_log.decision == GateDecisionType.degrade or gate_log.reject_reason in {
+        "failed_branch_sanitized",
+        "rolled_back_sanitized",
+    }
 
 
 def _gate_from_outcome(outcome: gatemod.GateOutcome) -> ReplayGateDecisionView:
@@ -430,8 +475,13 @@ def _diff_scores_and_gate(
 
 def _decision_severity(original: ReplayGateDecisionView, replayed: ReplayGateDecisionView) -> str:
     original_rejected = original.decision == GateDecisionType.reject
-    replayed_accepted = replayed.decision in _ACCEPTED_DECISIONS
-    if original_rejected and replayed_accepted and original.reject_reason in _CRITICAL_REASONS:
+    original_sanitized = original.reject_reason in {"failed_branch_sanitized", "rolled_back_sanitized"}
+    replayed_accepted_or_degraded = replayed.decision in _ACCEPTED_DECISIONS or replayed.decision == GateDecisionType.degrade
+    if original_rejected and replayed_accepted_or_degraded and (
+        original.reject_reason in _CRITICAL_REASONS or original_sanitized
+    ):
+        return "critical"
+    if original.decision == GateDecisionType.degrade and replayed.decision in _ACCEPTED_DECISIONS:
         return "critical"
     if original.decision in _ACCEPTED_DECISIONS and replayed.decision == GateDecisionType.reject:
         return "warning"
@@ -543,6 +593,7 @@ def _access_metrics(
     access: MemoryAccessLog,
     gate_logs: list[MemoryGateLog],
     accepted_memories: list[MemoryItem],
+    original_context_blocks: list[ContextBlock],
     diffs: list[ReplayDiffItem],
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
@@ -552,9 +603,28 @@ def _access_metrics(
         "rejected_count": access.rejected_count,
         "actual_tokens": access.actual_tokens,
         "latency_ms": access.latency_ms,
-        "failed_branch_rejected": sum(g.reject_reason in {"failed_branch", "rolled_back"} for g in gate_logs),
+        "failed_branch_rejected": sum(
+            g.reject_reason
+            in {
+                "failed_branch",
+                "rolled_back",
+                "failed_branch_degraded",
+                "rolled_back_degraded",
+                "failed_branch_sanitized",
+                "rolled_back_sanitized",
+            }
+            for g in gate_logs
+        ),
         "failed_branch_injected": sum(
             m.branch_status in {BranchStatus.failed, BranchStatus.rolled_back} for m in accepted_memories
+        ),
+        "degraded_negative_evidence_count": sum(g.decision == GateDecisionType.degrade for g in gate_logs),
+        "sanitized_failure_notice_count": sum(
+            g.reject_reason in {"failed_branch_sanitized", "rolled_back_sanitized"} for g in gate_logs
+        ),
+        "negative_evidence_block_count": sum(
+            block.type == "avoided_attempts" or block.source == "negative_evidence"
+            for block in original_context_blocks
         ),
         "stale_rejected": sum(g.reject_reason == "stale" for g in gate_logs),
         "stale_injected": sum(m.expires_at is not None and m.expires_at < now for m in accepted_memories),

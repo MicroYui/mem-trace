@@ -170,6 +170,25 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 
 ---
 
+## 9.1 Failure-aware Negative Memory Injection（失败感知负向记忆注入）★ 首批已完成
+
+> **实施计划（2026-06-11）**：Issue-by-Issue 计划 `docs/design/FAILURE_AWARE_NEGATIVE_MEMORY_PLAN.md`。首批 I1-I6 已完成：I1 Gate 三路输出、I2 DTO/builder/packer、I3 controller 主路径接线、I4 inspect/replay/metrics 接线、I5 benchmark/evaluator 扩展、I6 文档/项目记忆同步。I7 compaction negative retained 继续 deferred，作为独立后续设计，不改变当前 compaction 行为。
+
+这是 §9 Context Compaction「安全过滤」的**反向补集**：compaction 把 failed/rolled_back/secret 从 summary 中排除，而本节在**安全前提下受控保留失败教训**，二者共享同一套安全分级口径。
+
+当前 gate 对 failed/rolled_back 分支一刀切 hard reject（`gate.py:109-112`），coding agent 因此丢失「以前为什么错、哪个命令失败过、哪条路径不要再走」的负向学习信号。升级方向：**失败分支不作为正向上下文注入，但失败原因以「负向证据 / 避坑提示」受控注入**。
+
+- [x] **Gate 三路输出**：I1 已完成。把 `accept / reject` 二元升级为 `accept / degrade / reject`；failed/rolled_back 且安全（非 secret/destructive/tool_sensitive/production_env）→ `degrade` 进负向通道；危险/secret/production 操作仍 hard reject。新增 `GateConfig.enable_failure_learning`，仅 variant_2 启用；baseline_0/baseline_1/variant_1 保持现有策略语义且不启用 failure learning。controller 接线已在 I3 完成；inspect/replay/metrics 完整接线已在 I4 完成。
+- [x] **Packer `avoided_attempts` block**：I2 已完成 runtime `NegativeEvidence` DTO、共享 `retrieval/negative_evidence.py` builder（safe raw、unsafe sanitized、二次 redaction、source-state 去重、`max_blocks` 截断、固定模板）与 packer `avoided_attempts` 渲染。排序在 `project_memory`/`project_constraints` 之后、`tool_evidence` 之前（正向约束先定方向），ordinary（可被预算丢弃）。非危险失败保留原文（经二次 redaction）+ must-not-execute 框；destructive/secret/tool_sensitive/production-env 原始 memory hard reject，仅由共享 builder 生成不含原命令/参数/路径的固定模板安全提示（gate 不网开一面）。inspect/replay 三路径重建已在 I4 完成。
+- [x] **Controller 主路径接线**：I3 已完成 hot path 调用共享 builder、`pack_context(negative_evidence=...)`、accepted/rejected/degraded 计数闭合、`context_packing.metadata` 记录 `degraded_count` / `hard_rejected_count` / retained `negative_evidence_count` / retained `sanitized_negative_evidence_count` / built+dropped negative evidence 计数，并输出 safe negative evidence 与 sanitized notice 两类 warning。demo/benchmark evaluator 已把 `avoided_attempts` 排除在正向污染/action 判定之外，case_1..case_9 acceptance 保持通过。I3 review 已修复 replay `_ACCEPTED_DECISIONS` 兼容问题和预算 drop 误报 injected 的 profile/warning 问题，复审未发现 P0/P1/P2 缺陷。
+- [x] **Inspect / Replay / Observability 接线**：I4 已完成 `inspect_access` 与 replay original-view 通过共享 builder 重建 `avoided_attempts`，degrade 不再进入正向 accepted memory；replay 对缺失 source memory 只输出 warning、不恢复 raw failed text，并将 `reject(sanitized)→accept/degrade`、`degrade→accept` 判为 critical；observability summary/report/dashboard 模型新增 `degraded_negative_evidence_count` / `sanitized_failure_notice_count` / `negative_evidence_block_count`，degrade 不计入正向 failed-branch injection。
+- [x] **Benchmark `case_10`（safe failure learning）+ `case_11`（sanitized destructive）**：I5 已完成。关键 evaluator 正/负向块显式分区（`contaminated`/action 只看正向区，negative_lesson/unsafe_negative_leakage 只看负向区）；runs 36→44；新增 acceptance `variant_2_learns_from_failure_without_repeating` + `variant_2_sanitizes_destructive_failure_without_leakage`，benchmark `acceptance.passed=true`（10/10 checks）。
+- [x] **文档 / 项目记忆同步**：I6 已完成。`ROADMAP`、`CONTEXT_COMPACTION_PLAN`、Failure-aware 计划和 `.ai/` project memory 已统一标记 I1-I6 完成；`CONTEXT_COMPACTION_PLAN` 新增 C6/I7 协同占位，明确首批不改变 compaction 行为；下一步从 Phase 3.5 SDK/LangGraph adapter（§6）或 6-strategy benchmark expansion（§7）中选择。
+- [ ] **后续候选（本节衍生）**：stale → 「过时警告」降级（首批不做，避免破坏 case_9 `variant_2_excludes_stale_memory`）；compaction 负向 retained（计划 I7，触及 `ContextCompactionLog` 持久化快照 + replay，独立落地）。
+- **贯穿约束**：负向通道在 gate 之后从既有 candidate 派生，不新增检索入口、不绕过 §1 的 `_RETRIEVABLE_STATUSES` 生命周期过滤；I7 触碰 compaction 路径时须重申该约束。
+
+---
+
 ## 10. Provider Registry（统一外部能力抽象）
 
 当前已有真实 `LLMExtractionProvider`；后续 embedding / summarizer / LLM-judge 都会引入外部模型，且与「benchmark 可复现」「LLM key 不稳定」存在张力。建议抽象一个统一的 provider 注册层，**一处解决「确定性 default ↔ 真实模型 ↔ 可复现」的冲突**：
@@ -204,12 +223,13 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 2. ~~**Phase 3-A 后端可观测性**（§2）~~ ✅ **已完成 (2026-06-10)**：Retrieval Replay + eval 表 + Quality/Safety profiler + 最小 JSON/MD/HTML 报告，Issues 1-8 全部完成并端到端验证。
 3. ~~**展示资产 + 可复现基线**（§12 + §7 部分）~~ ✅ **已完成 (2026-06-10)**：README + Mermaid 架构图 + deterministic Quickstart + `scripts/reproduce.sh` / `scripts/smoke.sh` + demo/benchmark/observability 可再生成报告 + optional LLM bench 指引 + 技术博客 + integration reproducibility tests。
 4. ~~**Context Compaction**（§9 + §5/§10 协同子集）~~ ✅ **核心闭环已完成 (2026-06-11)**：C0-C5 完成 packer 超预算补偿、durable compaction log、observability/replay、SummarizerProvider、rolling history summary、压缩质量 benchmark/report/replay 同步；剩余协同项为 §5「completed subgoal → summary node」与 §10 Provider 抽象族。
-5. **Phase 3.5 SDK / Adapter / CLI**（§6 前段）：Python SDK + LangGraph Adapter + custom-loop 示例，证明「可插拔 runtime」；**CLI 入口**（三入口之一）随后。**← 当前推荐下一步。**
-6. **完整 6 策略对比 + benchmark 落库**（§7 主线）：no memory / long-context / vector / state-aware / +gate / +reflection 逐层量化（+reflection 依赖 §3.2）；配合 §2 eval 表把 benchmark report 落库。
-7. **Provider Registry + Key Ontology**（§10 + §11）：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移）。可与步骤 5/6 交织。
-8. **Phase 4 异步基建 + 生命周期 + 多租户治理**（§3 全段）：§3.1 Redis buffer/Celery（替换 §1 进程内 buffer）→ §3.2 Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志 → §3.3 memory_versions/conflicts 版本与冲突管理 → §3.4 API Key/JWT/quota/redaction 完整多租户治理。（托管 demo 所需的轻量 Hosted-Demo Safety Mode 可在此之前按需单独落地。）
-9. **Phase 3-B 前端可视化**（§2）：Timeline → State Tree Viewer → Gate Analysis → Sankey。
-10. **Phase 5 高级存储**（§4）：ES/Neo4j 混合检索 + 图谱 provenance + 多路融合 + Query Planner + 多跳检索，**仅在触发条件满足时启动**。
-11. **远期 / scale-only**：§5 状态树其余能力（subgoal 自动推断 / 完整 node_type / MAGE 四操作）、§6 TS SDK / OTel exporter / MCP Server / IDE 插件 / Go-Rust 组件、§7 小规模 LoCoMo/MemoryArena。**均设触发条件，不主动排期。**
+5. ~~**Failure-aware Negative Memory Injection**（§9.1）~~ ✅ **首批已完成 (2026-06-12)**：I1 gate 三路 `accept/degrade/reject`、I2 `NegativeEvidence` DTO + shared builder + packer `avoided_attempts`、I3 controller hot-path wiring、I4 replay/metrics/inspect sync、I5 benchmark/evaluator 扩展、I6 文档/项目记忆同步均已完成。benchmark 已含 `case_10` safe failure learning / `case_11` sanitized destructive failure（44 runs）并通过新增 acceptance；I7 compaction negative retained 仍 deferred。
+6. **Phase 3.5 SDK / Adapter / CLI**（§6 前段）：Python SDK + LangGraph Adapter + custom-loop 示例，证明「可插拔 runtime」；**CLI 入口**（三入口之一）随后。**← 推荐下一步之一。**
+7. **完整 6 策略对比 + benchmark 落库**（§7 主线）：no memory / long-context / vector / state-aware / +gate / +reflection 逐层量化（+reflection 依赖 §3.2）；配合 §2 eval 表把 benchmark report 落库。
+8. **Provider Registry + Key Ontology**（§10 + §11）：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移）。可与步骤 6/7 交织。
+9. **Phase 4 异步基建 + 生命周期 + 多租户治理**（§3 全段）：§3.1 Redis buffer/Celery（替换 §1 进程内 buffer）→ §3.2 Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志 → §3.3 memory_versions/conflicts 版本与冲突管理 → §3.4 API Key/JWT/quota/redaction 完整多租户治理。（托管 demo 所需的轻量 Hosted-Demo Safety Mode 可在此之前按需单独落地。）
+10. **Phase 3-B 前端可视化**（§2）：Timeline → State Tree Viewer → Gate Analysis → Sankey。
+11. **Phase 5 高级存储**（§4）：ES/Neo4j 混合检索 + 图谱 provenance + 多路融合 + Query Planner + 多跳检索，**仅在触发条件满足时启动**。
+12. **远期 / scale-only**：§5 状态树其余能力（subgoal 自动推断 / 完整 node_type / MAGE 四操作）、§6 TS SDK / OTel exporter / MCP Server / IDE 插件 / Go-Rust 组件、§7 小规模 LoCoMo/MemoryArena。**均设触发条件，不主动排期。**
 
 > **贯穿性约束（非排期项，但每一步都要遵守，来自 §1）**：① 任何新检索路径必须重新应用生命周期过滤（`_RETRIEVABLE_STATUSES`），否则泄漏退役记忆；② 切 pg16 镜像需 `docker-compose down -v`（破坏性，运维注意）；③ profiler 亚毫秒阶段读 0ms 属预期非 bug。

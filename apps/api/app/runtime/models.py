@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -507,6 +507,25 @@ class RetainedFact(_Base):
     provenance: Optional[Provenance] = None
 
 
+class NegativeEvidence(_Base):
+    """Warning-only evidence derived from failed/rolled-back memories.
+
+    This DTO deliberately carries only safe rendered text for the packer. For
+    unsafe failed attempts, ``safe_text`` is a fixed sanitized template and no
+    raw memory content is exposed downstream.
+    """
+
+    source_memory_id: Optional[str] = None
+    source_state_node_id: Optional[str] = None
+    memory_type: Optional[MemoryType] = None
+    branch_status: BranchStatus
+    mode: Literal["raw_failed_attempt", "sanitized_risk_notice"]
+    risk_kind: Optional[Literal["secret", "destructive", "tool_sensitive", "unknown"]] = None
+    reason: str
+    safe_text: str
+    provenance: Optional[Provenance] = None
+
+
 class GateDecisionView(_Base):
     """Flattened gate decision for access inspection output."""
 
@@ -543,6 +562,7 @@ class AccessInspection(_Base):
     gate_decisions: list[GateDecisionView] = Field(default_factory=list)
     context_blocks: list[ContextBlock] = Field(default_factory=list)
     profile: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ReplayCandidateView(_Base):
@@ -620,6 +640,9 @@ class ObservabilitySummary(_Base):
     rejected_count: int = 0
     failed_branch_rejected: int = 0
     failed_branch_injected: int = 0
+    degraded_negative_evidence_count: int = 0
+    sanitized_failure_notice_count: int = 0
+    negative_evidence_block_count: int = 0
     stale_rejected: int = 0
     stale_injected: int = 0
     tool_sensitive_blocked: int = 0

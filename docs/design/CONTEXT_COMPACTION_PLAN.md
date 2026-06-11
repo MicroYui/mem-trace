@@ -32,6 +32,10 @@ Six Issues, dependency-ordered:
 5. **C4 — In-flight rolling history summary with access-level snapshot:** ✅ complete — when active-path history exceeds threshold, fold safe early history into a protected `history_summary` block. Reuses C3 provider seam, persists to C2 compaction log, guarded by separate `compaction_timeout_ms`, degrades to no-fold (never empty context). Default-off (`compaction_enabled=False`) to keep benchmarks reproducible.
 6. **C5 — Benchmark + observability + replay diff + project-memory sync:** ✅ complete — new benchmark case with **retention quality metrics**, not just `avg_compression_ratio`.
 
+Related deferred design note:
+
+7. **C6 / I7 — Failure-aware negative retained facts:** deferred — do **not** change compaction behavior in the completed C0-C5 loop. This is a future cross-feature design for preserving safe failed-branch lessons through compaction as a separate negative-evidence channel, coordinated with `docs/design/FAILURE_AWARE_NEGATIVE_MEMORY_PLAN.md` I7.
+
 ## 2. Non-goals (deferred)
 
 - State-tree completed-subgoal -> summary node (ROADMAP §5, co-design item, separately scheduled).
@@ -487,8 +491,8 @@ Rationale: C0 removes the refactor risk before behavior changes; C1 ships a defa
 2. Targeted regression: `uv run --extra dev pytest apps/api/tests/retrieval apps/api/tests/memory apps/api/tests/observability apps/api/tests/benchmark apps/api/tests/runtime apps/api/tests/storage -q`.
 3. Migration: `uv run alembic upgrade head` + `downgrade -1` round-trip.
 4. Full regression: `uv run --extra dev pytest -q` all green.
-5. Deterministic benchmark: `uv run python -m app.benchmark.runner --output-dir reports`, confirm `reports/benchmark_results.json` `acceptance.passed=true` and **8/8 checks true**, including `variant_2_retains_constraints_under_compaction=true`.
-6. Reproducibility script: `./scripts/reproduce.sh` passes and prints `acceptance.passed=true (8/8 checks true)`.
+5. Deterministic benchmark: `uv run python -m app.benchmark.runner --output-dir reports`, confirm `reports/benchmark_results.json` `acceptance.passed=true`. C5 originally introduced **8/8** checks including `variant_2_retains_constraints_under_compaction=true`; after Failure-aware I5 the current global acceptance suite is **10/10** with the two negative-memory checks added.
+6. Reproducibility script: `./scripts/reproduce.sh` passes. C5-era output printed `acceptance.passed=true (8/8 checks true)`; current output after Failure-aware I5/I6 is `acceptance.passed=true (10/10 checks true)`.
 7. Enabled-path manual checks:
    - **C1 always-on:** tiny-budget run -> `compacted_constraints` block present, key=value preserved, compaction log row exists, observability summary's `compaction_trigger_rate` > 0.
    - **C4 enabled:** `compaction_enabled=True` + over-window run -> `history_summary` block present, retained_facts non-empty, replay returns identical block; LLM provider enabled with key -> LLM path; offline/bad-key/timeout -> `provider="fallback_rule"` and no info loss.

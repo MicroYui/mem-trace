@@ -47,6 +47,95 @@ def _gate(access_id: str, memory_id: str, decision: GateDecisionType, reject_rea
     )
 
 
+@pytest.mark.asyncio
+async def test_negative_evidence_metrics_are_explicit_and_not_positive_injection():
+    repo = InMemoryRepository()
+    access = await repo.add_access_log(
+        MemoryAccessLog(
+            workspace_id="ws_metrics",
+            run_id="run_negative",
+            retrieval_strategy=RetrievalStrategy.variant_2,
+            candidate_count=2,
+            accepted_count=0,
+            rejected_count=2,
+        )
+    )
+    degraded, degraded_gate = await _add_logged_memory(
+        repo,
+        access.access_id,
+        _memory(branch_status=BranchStatus.failed),
+        GateDecisionType.degrade,
+        "failed_branch_degraded",
+    )
+    sanitized, sanitized_gate = await _add_logged_memory(
+        repo,
+        access.access_id,
+        _memory(branch_status=BranchStatus.failed, risk_flags=RiskFlags(destructive_command=True)),
+        GateDecisionType.reject,
+        "failed_branch_sanitized",
+    )
+    gate_logs = [degraded_gate, sanitized_gate]
+
+    access_metrics = metrics.build_access_observability_metrics(
+        access,
+        gate_logs,
+        [degraded, sanitized],
+        [],
+        [],
+    )
+    summary = await metrics.build_observability_summary(repo, workspace_id="ws_metrics", run_id="run_negative")
+
+    assert access_metrics["failed_branch_injected"] == 0.0
+    assert access_metrics["degraded_negative_evidence_count"] == 1.0
+    assert access_metrics["sanitized_failure_notice_count"] == 1.0
+    assert access_metrics["negative_evidence_block_count"] == 2.0
+    assert summary.failed_branch_injected == 0
+    assert summary.degraded_negative_evidence_count == 1
+    assert summary.sanitized_failure_notice_count == 1
+    assert summary.negative_evidence_block_count == 2
+    assert summary.by_strategy["variant_2"]["negative_evidence_block_rate"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_negative_evidence_block_count_uses_builder_dedupe_not_gate_count():
+    repo = InMemoryRepository()
+    access = await repo.add_access_log(
+        MemoryAccessLog(
+            workspace_id="ws_metrics",
+            run_id="run_negative_dedupe",
+            retrieval_strategy=RetrievalStrategy.variant_2,
+            candidate_count=2,
+            accepted_count=0,
+            rejected_count=2,
+        )
+    )
+    first, first_gate = await _add_logged_memory(
+        repo,
+        access.access_id,
+        _memory(branch_status=BranchStatus.failed, source_state_node_id="node_same"),
+        GateDecisionType.degrade,
+        "failed_branch_degraded",
+    )
+    second, second_gate = await _add_logged_memory(
+        repo,
+        access.access_id,
+        _memory(branch_status=BranchStatus.failed, source_state_node_id="node_same"),
+        GateDecisionType.degrade,
+        "failed_branch_degraded",
+    )
+
+    access_metrics = metrics.build_access_observability_metrics(
+        access,
+        [first_gate, second_gate],
+        [first, second],
+        [],
+        [],
+    )
+
+    assert access_metrics["degraded_negative_evidence_count"] == 2.0
+    assert access_metrics["negative_evidence_block_count"] == 1.0
+
+
 def _compaction_log(access_id: str, **overrides) -> ContextCompactionLog:
     defaults = {
         "access_id": access_id,
@@ -201,6 +290,9 @@ async def test_access_metrics_cover_all_quality_safety_signals():
         "actual_tokens": 321.0,
         "failed_branch_rejected": 1.0,
         "failed_branch_injected": 1.0,
+        "degraded_negative_evidence_count": 0.0,
+        "sanitized_failure_notice_count": 0.0,
+        "negative_evidence_block_count": 0.0,
         "stale_rejected": 1.0,
         "stale_injected": 1.0,
         "tool_sensitive_blocked": 1.0,
@@ -286,6 +378,9 @@ async def test_summary_filters_and_by_strategy_rates():
     assert summary.accepted_count == 3
     assert summary.rejected_count == 3
     assert summary.failed_branch_rejected == 1
+    assert summary.degraded_negative_evidence_count == 0
+    assert summary.sanitized_failure_notice_count == 0
+    assert summary.negative_evidence_block_count == 0
     assert summary.stale_injected == 1
     assert summary.tool_sensitive_blocked == 1
     assert summary.superseded_injected == 1
@@ -302,6 +397,9 @@ async def test_summary_filters_and_by_strategy_rates():
         "avg_accepted_count": 1.5,
         "avg_rejected_count": 1.5,
         "failed_branch_injection_rate": 0.0,
+        "negative_evidence_block_rate": 0.0,
+        "degraded_negative_evidence_rate": 0.0,
+        "sanitized_failure_notice_rate": 0.0,
         "stale_injection_rate": 0.5,
         "tool_sensitive_block_rate": 0.5,
         "destructive_command_block_rate": 0.0,
