@@ -24,8 +24,10 @@ from app.runtime.models import (
     RiskFlags,
     RollbackRequest,
     Sensitivity,
+    StateNode,
     StartRunRequest,
     StartStepRequest,
+    StateNodeType,
     StepStatus,
     WriteEventRequest,
 )
@@ -258,11 +260,307 @@ def test_pack_context_emits_dynamic_key_project_memory():
     runtime = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
                          key="project.runtime", value="bun",
                          content="This project uses Bun", summary="project.runtime=bun")
-    blocks, used = pack_context(active_node=None, accepted=[db, runtime], token_budget=256)
-    joined = " ".join(b.content for b in blocks)
+    result = pack_context(active_node=None, accepted=[db, runtime], token_budget=256)
+    joined = " ".join(b.content for b in result.blocks)
     # dynamic-key project memory is packed (as its own project_memory block)...
     assert "PostgreSQL" in joined
     # ...and the runtime constraint is still merged into the canonical sentence.
     assert "Bun" in joined
-    assert used > 0
+    assert result.used > 0
 
+
+def test_pack_result_preserves_existing_behavior_when_no_truncation():
+    """C0: pack_context should return a structured PackResult without changing
+    the packed blocks or token count when the budget is ample."""
+    from app.retrieval.packer import PackResult, pack_context
+
+    db = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                    key="project.database", value="PostgreSQL",
+                    content="数据库选 PostgreSQL", summary="project.database=PostgreSQL")
+    runtime = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                         key="project.runtime", value="bun",
+                         content="This project uses Bun", summary="project.runtime=bun")
+
+    result = pack_context(active_node=None, accepted=[db, runtime], token_budget=256)
+
+    assert isinstance(result, PackResult)
+    assert [b.content for b in result.blocks] == ["project.database=PostgreSQL", "This project uses Bun."]
+    assert result.used == sum(b.tokens for b in result.blocks)
+    assert result.pre_compaction_tokens == result.used
+    assert result.dropped_blocks == []
+    assert result.notice is None
+    assert result.retained_constraints == []
+
+
+def test_pack_result_reports_pre_compaction_tokens_when_truncated():
+    """pre_compaction_tokens describes all candidate blocks, not only the final
+    packed subset; C1 also records the blocks omitted under budget pressure."""
+    from app.retrieval.packer import pack_context
+
+    first = MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                       content="first retained memory about bun tests")
+    second = MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                        content="second lower priority memory about postgres migrations")
+
+    result = pack_context(active_node=None, accepted=[first, second], token_budget=3)
+    ample_budget_result = pack_context(active_node=None, accepted=[first, second], token_budget=256)
+    expected_candidate_tokens = sum(b.tokens for b in ample_budget_result.blocks)
+
+    assert result.blocks
+    assert result.pre_compaction_tokens >= result.used
+    assert result.pre_compaction_tokens == expected_candidate_tokens
+    assert result.pre_compaction_tokens > result.used
+    assert result.dropped_blocks
+    assert result.notice is not None
+
+
+def test_compacted_constraints_preserve_key_values_when_over_budget():
+    from app.retrieval.packer import pack_context
+
+    runtime = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                         key="project.runtime", value="bun",
+                         content="This project uses Bun", summary="project.runtime=bun")
+    database = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                          key="project.database", value="postgres",
+                          content="Use Postgres for durable storage",
+                          summary="project.database=postgres")
+    endpoint = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                          key="endpoint.current", value="/v2/users",
+                          content="Current users endpoint is /v2/users",
+                          summary="endpoint.current=/v2/users")
+    filler = MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                        content="Long lower priority detail " * 20)
+
+    result = pack_context(active_node=None, accepted=[runtime, database, endpoint, filler], token_budget=14)
+
+    compacted = [b for b in result.blocks if b.type == "compacted_constraints"]
+    assert compacted
+    assert "project.database=postgres" in compacted[0].content
+    assert "endpoint.current=/v2/users" in compacted[0].content
+    assert [(f.key, f.value) for f in result.retained_constraints] == [
+        ("endpoint.current", "/v2/users"),
+        ("project.database", "postgres"),
+    ]
+    assert result.dropped_blocks
+    assert result.used <= 14
+
+
+def test_compaction_notice_emitted_when_over_budget():
+    from app.retrieval.packer import pack_context
+
+    memories = [
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                   content="first ordinary memory with many words"),
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                   content="second ordinary memory with many words"),
+    ]
+
+    result = pack_context(active_node=None, accepted=memories, token_budget=8)
+
+    assert result.notice is not None
+    assert result.notice.type == "compaction_notice"
+    assert result.notice.reason == "kind=budget_notice"
+    assert f"dropped {len(result.dropped_blocks)} blocks" in result.notice.content
+    assert any(b.type == "compaction_notice" for b in result.blocks)
+    assert result.used <= 8
+
+
+def test_compaction_notice_absent_when_within_budget():
+    from app.retrieval.packer import pack_context
+
+    memories = [
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                   key="project.database", value="postgres",
+                   content="Use Postgres", summary="project.database=postgres"),
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                   content="short detail"),
+    ]
+
+    result = pack_context(active_node=None, accepted=memories, token_budget=128)
+
+    assert result.notice is None
+    assert result.retained_constraints == []
+    assert result.dropped_blocks == []
+    assert result.pre_compaction_tokens == result.used
+    assert all(b.type not in {"compacted_constraints", "compaction_notice"} for b in result.blocks)
+
+
+def test_active_state_is_protected_under_tiny_budget():
+    from app.retrieval.packer import pack_context
+
+    active = StateNode(workspace_id="ws", run_id="run", node_type=StateNodeType.step,
+                       goal="Implement the currently selected migration safely")
+    filler = MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                        content="Long lower priority detail " * 30)
+
+    result = pack_context(active_node=active, accepted=[filler], token_budget=20)
+
+    assert result.blocks[0].type == "active_state"
+    assert "migration" in result.blocks[0].content
+    assert result.used <= 20
+
+
+def test_protected_block_truncated_not_dropped_when_oversized():
+    from app.retrieval.packer import pack_context
+
+    active = StateNode(workspace_id="ws", run_id="run", node_type=StateNodeType.step,
+                       goal=" ".join(f"important{i}" for i in range(80)))
+
+    result = pack_context(active_node=active, accepted=[], token_budget=20)
+
+    assert [b.type for b in result.blocks] == ["active_state"]
+    assert result.blocks[0].tokens <= 20
+    assert "truncated" in (result.blocks[0].reason or "")
+    assert result.used <= 20
+
+
+def test_notice_and_summary_never_exceed_budget():
+    from app.retrieval.packer import pack_context
+
+    memories = [
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                   key="project.database", value="postgres-with-a-very-long-value-that-must-be-trimmed",
+                   content="database detail", summary="project.database=postgres"),
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                   key="endpoint.current", value="/v2/users/with/a/very/long/path/that/must/be-trimmed",
+                   content="endpoint detail", summary="endpoint.current=/v2/users"),
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                   content="ordinary detail " * 20),
+    ]
+
+    result = pack_context(active_node=None, accepted=memories, token_budget=6)
+
+    assert result.used <= 6
+    assert all(b.tokens >= 0 for b in result.blocks)
+
+
+def test_compaction_notice_is_in_blocks_when_protected_block_fills_budget():
+    from app.retrieval.packer import pack_context
+
+    active = StateNode(workspace_id="ws", run_id="run", node_type=StateNodeType.step,
+                       goal=" ".join(f"critical{i}" for i in range(40)))
+    filler = MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                        content="ordinary detail that must be omitted")
+
+    result = pack_context(active_node=active, accepted=[filler], token_budget=8)
+
+    assert result.notice is not None
+    assert any(b.type == "compaction_notice" for b in result.blocks)
+    assert result.used <= 8
+
+
+def test_pack_context_respects_custom_compaction_notice_reserve_tokens():
+    from app.retrieval.packer import pack_context
+
+    runtime = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                         key="project.runtime", value="bun",
+                         content="This project uses Bun", summary="project.runtime=bun")
+    database = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                          key="project.database", value="postgres",
+                          content="Use Postgres for durable storage",
+                          summary="project.database=postgres")
+    endpoint = MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                          key="endpoint.current", value="/v2/users",
+                          content="Current users endpoint is /v2/users",
+                          summary="endpoint.current=/v2/users")
+    filler = MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                        content="Long lower priority detail " * 20)
+
+    high_reserve = pack_context(
+        active_node=None,
+        accepted=[runtime, database, endpoint, filler],
+        token_budget=14,
+        compaction_notice_reserve_tokens=12,
+    )
+    low_reserve = pack_context(
+        active_node=None,
+        accepted=[runtime, database, endpoint, filler],
+        token_budget=14,
+        compaction_notice_reserve_tokens=4,
+    )
+
+    assert [f.key for f in high_reserve.retained_constraints] == ["endpoint.current", "project.database"]
+    assert low_reserve.retained_constraints == []
+
+
+async def test_compaction_never_includes_failed_branch_block(runtime):
+    run, s3 = await _seed_bun_vs_node(runtime)
+
+    trace = await runtime._retrieval.trace(  # noqa: SLF001
+        RetrievalRequest(run_id=run.run_id, step_id=s3.step_id, query="run tests npm bun",
+                         strategy=RetrievalStrategy.variant_2, token_budget=6),
+        workspace_id="ws_test",
+    )
+    dropped_text = " ".join(b.content for b in trace.phase_profile["context_packing"]["metadata"]["dropped_blocks"])
+    retained_text = " ".join(
+        f"{f['key']}={f['value']}" for f in trace.phase_profile["context_packing"]["metadata"]["retained_constraints"]
+    )
+
+    assert "npm test" not in dropped_text.lower()
+    assert "npm test" not in retained_text.lower()
+
+
+def test_pack_result_pre_compaction_tokens_equals_sum_of_candidates():
+    from app.retrieval.packer import pack_context
+
+    memories = [
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                   key="project.runtime", value="bun", content="This project uses Bun"),
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.project,
+                   key="project.database", value="postgres", content="Use Postgres", summary="project.database=postgres"),
+        MemoryItem(workspace_id="ws", memory_type=MemoryType.episodic,
+                   content="ordinary detail " * 8),
+    ]
+    compacted = pack_context(active_node=None, accepted=memories, token_budget=8)
+    ample = pack_context(active_node=None, accepted=memories, token_budget=256)
+
+    assert compacted.pre_compaction_tokens == sum(b.tokens for b in ample.blocks)
+
+
+async def test_context_budget_warning_and_profile_metadata(runtime):
+    run = await runtime.start_run(StartRunRequest(session_id="s", task="t", workspace_id="ws_test"))
+    s = await runtime.start_step(StartStepRequest(run_id=run.run_id))
+    await runtime.write_event(
+        WriteEventRequest(run_id=run.run_id, step_id=s.step_id, role=EventRole.user,
+                          event_type=EventType.message, content="This project uses Bun and Postgres")
+    )
+    await runtime._repo.add_memory(  # noqa: SLF001
+        MemoryItem(workspace_id="ws_test", memory_type=MemoryType.project,
+                   key="project.database", value="postgres",
+                   content="Use postgres for storage", summary="project.database=postgres",
+                   branch_status=BranchStatus.completed)
+    )
+    await runtime._repo.add_memory(  # noqa: SLF001
+        MemoryItem(workspace_id="ws_test", memory_type=MemoryType.episodic,
+                   content="postgres bun migration detail " * 20,
+                   branch_status=BranchStatus.completed)
+    )
+    await runtime.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s.step_id, status=StepStatus.completed))
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s.step_id, query="bun postgres",
+                         strategy=RetrievalStrategy.variant_2, token_budget=5)
+    )
+
+    assert any("context budget exceeded" in w for w in ctx.warnings)
+    profile_events = await runtime._repo.list_profile_events(run_id=run.run_id)  # noqa: SLF001
+    packing = [p for p in profile_events if p.phase.value == "context_packing"][-1]
+    assert packing.metadata["dropped_count"] > 0
+    assert packing.metadata["pre_compaction_tokens"] >= packing.metadata["actual_tokens"]
+    assert 0 <= packing.metadata["compression_ratio"] <= 1
+
+
+async def test_inspect_access_unchanged_after_pack_result_refactor(runtime):
+    """C0 callsite guard: inspect_access should still reconstruct the same
+    context blocks after pack_context returns PackResult."""
+    run, s3 = await _seed_bun_vs_node(runtime)
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=s3.step_id, query="run tests bun",
+                         strategy=RetrievalStrategy.variant_2)
+    )
+
+    access = await runtime.inspect_access(ctx.access_id)
+
+    assert access is not None
+    assert [b.type for b in access.context_blocks] == [b.type for b in ctx.context_blocks]
+    assert [b.content for b in access.context_blocks] == [b.content for b in ctx.context_blocks]

@@ -15,9 +15,13 @@ from app.observability.reports import write_observability_report
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     BranchStatus,
+    CompactionKind,
+    CompactionProvider,
+    ContextCompactionLog,
     MemoryItem,
     MemoryType,
     ObservabilityReportRequest,
+    RetainedFact,
     RetrievalRequest,
     RetrievalStrategy,
     StartRunRequest,
@@ -172,6 +176,120 @@ async def test_report_json_is_deterministic_enough_for_assertions(monkeypatch, t
         }
     ]
     assert first_payload["replays"] == []
+
+
+@pytest.mark.asyncio
+async def test_report_includes_compaction_section_with_retained_facts(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_report")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_report_compaction", task="choose stack", workspace_id="ws_report")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="choose stack"))
+    for key, value in [
+        ("project.runtime", "bun"),
+        ("project.database", "postgres"),
+        ("endpoint.current", "/v2/users"),
+    ]:
+        await repo.add_memory(
+            MemoryItem(
+                workspace_id="ws_report",
+                run_id=run.run_id,
+                memory_type=MemoryType.project,
+                key=key,
+                value=value,
+                content=f"{key}={value}",
+                branch_status=BranchStatus.completed,
+            )
+        )
+    for i in range(6):
+        await repo.add_memory(
+            MemoryItem(
+                workspace_id="ws_report",
+                run_id=run.run_id,
+                memory_type=MemoryType.episodic,
+                content=f"benign verbose observation {i} about previous API debugging that can be omitted",
+                branch_status=BranchStatus.completed,
+            )
+        )
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="which DB/runtime/endpoint should I use?",
+            strategy=RetrievalStrategy.variant_2,
+            token_budget=18,
+            top_k=10,
+        )
+    )
+    assert await repo.list_compaction_logs(access_id=ctx.access_id)
+
+    result = await runtime.write_observability_report(
+        ObservabilityReportRequest(workspace_id="ws_report", output_dir="reports", include_replay=True)
+    )
+
+    payload = json.loads((tmp_path / result.json_path).read_text())
+    assert payload["compactions"]
+    retained = payload["compactions"][0]["retained_facts"]
+    assert {f"{fact['key']}={fact['value']}" for fact in retained} >= {
+        "project.database=postgres",
+        "endpoint.current=/v2/users",
+    }
+    markdown = (tmp_path / result.markdown_path).read_text()
+    html = (tmp_path / result.html_path).read_text()
+    assert "## Compaction" in markdown
+    assert "project.database=postgres" in markdown
+    assert "<h2>Compaction</h2>" in html
+    assert "endpoint.current=/v2/users" in html
+
+
+@pytest.mark.asyncio
+async def test_report_filters_compaction_rows_and_escapes_markdown(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_report")
+    run_id, access_id = await _seed_observable_access(runtime, repo)
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=access_id,
+            workspace_id="ws_report",
+            run_id=run_id,
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            pre_tokens=20,
+            post_tokens=5,
+            dropped_block_count=1,
+            compression_ratio=0.25,
+            retained_facts=[RetainedFact(key="project.pipe", value="bun|safe\nvalue<script>![x](https://evil.test/pixel)")],
+        )
+    )
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=access_id,
+            workspace_id="ws_other",
+            run_id=run_id,
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            pre_tokens=100,
+            post_tokens=100,
+            dropped_block_count=99,
+            compression_ratio=1.0,
+            retained_facts=[RetainedFact(key="wrong.workspace", value="must-not-render")],
+        )
+    )
+
+    result = await runtime.write_observability_report(
+        ObservabilityReportRequest(workspace_id="ws_report", output_dir="reports", include_replay=True)
+    )
+
+    payload = json.loads((tmp_path / result.json_path).read_text())
+    assert len(payload["compactions"]) == 1
+    assert payload["compactions"][0]["retained_facts"][0]["key"] == "project.pipe"
+    markdown = (tmp_path / result.markdown_path).read_text()
+    assert "must-not-render" not in markdown
+    assert "project.pipe=bun\\|safe<br>value&lt;script&gt;\\!\\[x\\]\\(https://evil.test/pixel\\)" in markdown
+    assert "![x](https://evil.test/pixel)" not in markdown
 
 
 @pytest.mark.asyncio

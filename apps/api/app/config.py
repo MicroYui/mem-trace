@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     embedding_dim: int = 256
     retrieval_token_budget: int = 512
     retrieval_timeout_ms: int = 2000
+    # Reserved budget for C1 context-compaction notice/retained constraints.
+    # The C1 rule path is always on; later LLM rolling summaries are gated
+    # separately so benchmark/default behavior stays deterministic.
+    compaction_notice_reserve_tokens: int = 64
+    # C3/C4 context-compaction controls. ``compaction_enabled`` gates the future
+    # rolling-history fold only; it does not disable C1's default-on budget
+    # notice/retained-constraint safety path. The summarizer provider is always
+    # available as a deterministic rule fallback, while the LLM path is opt-in.
+    compaction_enabled: bool = False
+    llm_summarizer_enabled: bool = False
+    compaction_history_token_threshold: int = 2048
+    compaction_summary_budget_tokens: int = 192
+    compaction_timeout_ms: int = 1500
     # Extraction freshness/latency policy (architecture.md §12.1): "sync" extracts
     # inline on write_event (default; keeps demo/benchmark deterministic), while
     # "buffered" defers extraction to an explicit or lazy flush.

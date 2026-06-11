@@ -2,11 +2,13 @@
 
 ## Current Task
 
-P2 is feature-complete (6/6 mvp.md §2.3 slices, incl. the config-gated LLM extraction pipeline) and committed. Current task is **Phase 3-A backend observability**, planned in `docs/design/P3A_IMPLEMENTATION_PLAN.md`.
+P2 is feature-complete (6/6 mvp.md §2.3 slices, incl. the config-gated LLM extraction pipeline) and committed. Phase 3-A backend observability is complete. **Context Compaction (ROADMAP §9) is complete through C5**, per `docs/design/CONTEXT_COMPACTION_PLAN.md`. Current next priority is Phase 3.5 SDK/LangGraph adapter (§6) or 6-strategy benchmark expansion (§7).
 
-Phase 3-A scope: Retrieval Replay, eval tables, Quality/Safety profiler metrics, expanded profiler phases, dashboard-table extension, and static JSON/Markdown/HTML observability reports. Use `docs/design/P3A_IMPLEMENTATION_PLAN.md` as the concrete implementation plan before touching code. **Issues 1-8 are complete**: access fidelity + eval persistence schema, side-effect-free retrieval trace pipeline, replay service + deterministic diff semantics, replay/observability APIs, Quality/Safety metrics + profiler phase expansion, dashboard table extension, JSON/Markdown/HTML observability reports, and full regression/benchmark/project-memory sync. The next concrete work should come from `docs/design/ROADMAP.md` post-P3A priorities: showcase assets, Context Compaction, Phase 3.5 SDK/LangGraph adapter, or 6-strategy benchmark expansion.
+Phase 3-A scope: Retrieval Replay, eval tables, Quality/Safety profiler metrics, expanded profiler phases, dashboard-table extension, and static JSON/Markdown/HTML observability reports. Use `docs/design/P3A_IMPLEMENTATION_PLAN.md` as the concrete implementation plan before touching code. **Issues 1-8 are complete**: access fidelity + eval persistence schema, side-effect-free retrieval trace pipeline, replay service + deterministic diff semantics, replay/observability APIs, Quality/Safety metrics + profiler phase expansion, dashboard table extension, JSON/Markdown/HTML observability reports, and full regression/benchmark/project-memory sync.
 
-**Phase 3-A maintenance rule:** after completing each Issue in `docs/design/P3A_IMPLEMENTATION_PLAN.md` §11, update `.ai/PROJECT_STATE.md` and tick or annotate the corresponding `docs/design/ROADMAP.md` checkbox/sub-checkbox.
+**Context Compaction (ROADMAP §9):** Issue-by-Issue plan lives at `docs/design/CONTEXT_COMPACTION_PLAN.md`. **C0, C1, C2, C3, C4, and C5 are complete**: `PackResult` + all `pack_context` callsite migrations landed behavior-preservingly; over-budget ordinary block drops now emit `compacted_constraints` + `compaction_notice` with protected-block truncation; budget compaction now persists durable `ContextCompactionLog` records surfaced through observability/replay; C3 adds the deterministic-rule plus config-gated OpenAI-compatible `SummarizerProvider` seam with validation/fallback; C4 adds config-gated in-flight rolling active-history summaries that inject protected `history_summary` blocks and persist `ContextCompactionLog(kind=history_summary)` without rerunning summarizers during replay; and C5 adds the retention-quality benchmark/report/replay loop (`case_9_over_budget_compaction`, compaction trigger/constraint retention/unsafe leakage/compression metrics, report Compaction section, replay drift coverage). Showcase assets (§12) are already done; remaining post-P3A priorities are Phase 3.5 SDK/LangGraph adapter (§6) and 6-strategy benchmark expansion (§7).
+
+**Context Compaction maintenance rule:** after completing each Issue in `docs/design/CONTEXT_COMPACTION_PLAN.md` §4, update `.ai/PROJECT_STATE.md` and tick or annotate the corresponding `docs/design/ROADMAP.md` / `docs/design/CONTEXT_COMPACTION_PLAN.md` checkbox/sub-checkbox.
 
 ## Coding Readiness
 
@@ -58,7 +60,7 @@ apps/api/app/
   api/       deps.py, routes.py
   demo/      run_demo.py
   config.py, main.py
-apps/api/tests/   runtime/, memory/, retrieval/, benchmark/, api/, observability/, storage/ (132 tests)
+apps/api/tests/   runtime/, memory/, retrieval/, benchmark/, api/, observability/, storage/ (full regression count changes as features land; see `.ai/PROJECT_STATE.md` latest verification)
 migrations/       env.py, versions/0001_initial.py, versions/0002_pgvector.py, versions/0003_memory_superseded_by.py
 ```
 

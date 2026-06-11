@@ -184,7 +184,7 @@ async def test_observability_summary_endpoint_returns_quality_safety_counts():
     assert payload["by_strategy"]["variant_2"]["access_count"] == 1
 
 
-async def test_observability_summary_counts_workspace_leakage_from_all_candidates():
+async def test_observability_summary_counts_workspace_mismatch_without_accepted_leakage():
     repo = InMemoryRepository()
     runtime = MemoryRuntime(repo, default_workspace_id="ws_obs")
     other_memory = await repo.add_memory(
@@ -224,5 +224,5 @@ async def test_observability_summary_counts_workspace_leakage_from_all_candidate
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["workspace_mismatch_rejected"] == 1
-    assert payload["workspace_leakage"] == 1
+    assert payload["workspace_leakage"] == 0
     assert payload["accepted_count"] == 0

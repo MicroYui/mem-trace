@@ -10,12 +10,15 @@ from app.retrieval.controller import RetrievalCandidateTrace, RetrievalControlle
 from app.retrieval.packer import pack_context
 from app.runtime.models import (
     BranchStatus,
+    CompactionKind,
+    ContextCompactionLog,
     ContextBlock,
     GateDecisionType,
     MemoryAccessLog,
     MemoryGateLog,
     MemoryItem,
     MemoryStatus,
+    PendingCompactionLog,
     ReplayCandidateView,
     ReplayDiffItem,
     ReplayGateDecisionView,
@@ -67,7 +70,13 @@ class RetrievalReplayService:
             return None
 
         gate_logs = await self._repo.list_gate_logs(access.access_id)
-        original = await self._build_original_view(access, gate_logs)
+        compaction_logs = [
+            log
+            for log in await self._repo.list_compaction_logs(access_id=access.access_id, workspace_id=access.workspace_id)
+            if log.run_id == access.run_id
+        ]
+        history_prelude, history_pending = _history_prelude_from_logs(compaction_logs)
+        original = await self._build_original_view(access, gate_logs, prelude_blocks=history_prelude)
         warnings: list[str] = []
         diffs = self._integrity_diffs(original.missing_memory_ids)
 
@@ -108,6 +117,8 @@ class RetrievalReplayService:
                 self._request_from_access(access),
                 workspace_id=access.workspace_id,
                 access_id=access.access_id,
+                prelude_blocks=history_prelude,
+                pending_compaction_logs=history_pending,
             )
 
         replay_candidates = [_candidate_from_trace(c) for c in replay_trace.candidates]
@@ -117,6 +128,7 @@ class RetrievalReplayService:
             + _diff_scores_and_gate(original.gate_decisions, replay_gate_decisions)
             + _diff_context_blocks(original.context_blocks, replay_trace.context_blocks)
             + _diff_token_usage(access.actual_tokens, replay_trace.actual_tokens)
+            + _diff_compaction_logs(compaction_logs, replay_trace.pending_compaction_logs)
         )
         diffs = _sort_diffs(diffs)
 
@@ -137,6 +149,7 @@ class RetrievalReplayService:
             replayed_candidates=replay_candidates,
             replayed_gate_decisions=replay_gate_decisions,
             replayed_context_blocks=replay_trace.context_blocks,
+            compaction_logs=compaction_logs,
             diffs=diffs,
             metrics=metrics,
             warnings=_dedupe_preserve_order(warnings),
@@ -163,7 +176,7 @@ class RetrievalReplayService:
         )
 
     async def _build_original_view(
-        self, access: MemoryAccessLog, gate_logs: list[MemoryGateLog]
+        self, access: MemoryAccessLog, gate_logs: list[MemoryGateLog], *, prelude_blocks: list[ContextBlock] | None = None
     ) -> _OriginalReplayView:
         candidates: list[ReplayCandidateView] = []
         decisions: list[ReplayGateDecisionView] = []
@@ -182,12 +195,15 @@ class RetrievalReplayService:
         accepted.sort(key=lambda pair: pair[0].final_score, reverse=True)
         accepted_memories = [mem for _, mem in accepted]
         active_node, active_path = await self._load_original_access_state(access)
-        blocks, _ = pack_context(
+        pack_result = pack_context(
             active_node=active_node,
             accepted=accepted_memories,
             token_budget=access.token_budget or 512,
             active_path=active_path,
+            prelude_blocks=prelude_blocks,
+            compaction_notice_reserve_tokens=self._retrieval._compaction_notice_reserve_tokens,
         )
+        blocks = pack_result.blocks
         return _OriginalReplayView(
             candidates=candidates,
             gate_decisions=decisions,
@@ -461,6 +477,59 @@ def _diff_token_usage(original_tokens: int, replayed_tokens: int) -> list[Replay
             severity="warning",
         )
     ]
+
+
+def _diff_compaction_logs(persisted: list[ContextCompactionLog], replayed_pending) -> list[ReplayDiffItem]:
+    persisted_budget = [log for log in persisted if log.kind == CompactionKind.budget_notice]
+    replayed_budget = [log for log in replayed_pending if log.kind == CompactionKind.budget_notice]
+    persisted_dropped = sum(log.dropped_block_count for log in persisted_budget)
+    replayed_dropped = sum(log.dropped_block_count for log in replayed_budget)
+    if persisted_dropped == replayed_dropped:
+        return []
+    return [
+        ReplayDiffItem(
+            kind="compaction_drift",
+            field="dropped_block_count",
+            original=persisted_dropped,
+            replayed=replayed_dropped,
+            severity="warning",
+        )
+    ]
+
+
+def _history_prelude_from_logs(logs: list[ContextCompactionLog]) -> tuple[list[ContextBlock], list[PendingCompactionLog]]:
+    blocks: list[ContextBlock] = []
+    pending: list[PendingCompactionLog] = []
+    for log in logs:
+        if log.kind != CompactionKind.history_summary:
+            continue
+        if log.summary_text:
+            blocks.append(
+                ContextBlock(
+                    type="history_summary",
+                    content=log.summary_text,
+                    source="context_compaction",
+                    reason="kind=history_summary",
+                    tokens=log.post_tokens,
+                )
+            )
+        pending.append(
+            PendingCompactionLog(
+                kind=log.kind,
+                provider=log.provider,
+                pre_tokens=log.pre_tokens,
+                post_tokens=log.post_tokens,
+                dropped_block_count=log.dropped_block_count,
+                compression_ratio=log.compression_ratio,
+                summary_text=log.summary_text,
+                retained_facts=list(log.retained_facts),
+                source_memory_ids=list(log.source_memory_ids),
+                source_event_ids=list(log.source_event_ids),
+                source_state_node_ids=list(log.source_state_node_ids),
+                warnings=list(log.warnings),
+            )
+        )
+    return blocks, pending
 
 
 def _sort_diffs(diffs: Iterable[ReplayDiffItem]) -> list[ReplayDiffItem]:

@@ -46,7 +46,7 @@ MVP (P0+P1+P2) is complete and committed. **Phase 3-A backend observability is c
 7. JSON/Markdown/HTML observability reports; ✅ complete
 8. full regression, benchmark, and project-memory sync; ✅ complete (`uv run pytest -q` -> 145 passed; benchmark `acceptance.passed=true`)
 
-Select the next implementation slice from `docs/design/ROADMAP.md` post-P3A priorities: showcase assets (§12), Context Compaction (§9), Phase 3.5 SDK/LangGraph adapter (§6), or 6-strategy benchmark expansion (§7). Heavy infra and advanced storage remain deferred.
+The selected Context Compaction slice (ROADMAP §9) is complete through **C5**. Its Issue-by-Issue plan is `docs/design/CONTEXT_COMPACTION_PLAN.md`: C0 `PackResult`, C1 budget-aware `compacted_constraints` + `compaction_notice`, C2 durable `ContextCompactionLog` + observability/replay wiring, C3 rule/LLM `SummarizerProvider`, C4 config-gated rolling `history_summary`, and C5 retention-quality benchmark/report/replay/project-memory sync are implemented. Next implementation slice should be **Phase 3.5 SDK/LangGraph adapter (§6)** or **6-strategy benchmark expansion (§7)**; heavy infra/advanced storage remain deferred.
 
 ## Suggested Test Strategy
 

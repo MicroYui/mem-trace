@@ -8,7 +8,9 @@ from app.api.deps import get_runtime
 from app.api.routes import router
 from app.benchmark.runner import run_benchmark
 from app.runtime.memory_runtime import MemoryRuntime
+from app.runtime.memory_runtime import _benchmark_summary_from_records
 from app.runtime.models import (
+    BenchmarkResultRecord,
     EvalCaseRecord,
     EvalResultRecord,
     EvalRunRecord,
@@ -26,7 +28,7 @@ from app.runtime.repository import InMemoryRepository
 async def test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows(tmp_path):
     repo = InMemoryRepository()
     runtime = MemoryRuntime(repo, default_workspace_id="dash_ws")
-    await run_benchmark(output_dir=tmp_path, repo=repo)
+    report = await run_benchmark(output_dir=tmp_path, repo=repo)
 
     app = FastAPI()
     app.include_router(router)
@@ -38,14 +40,45 @@ async def test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows(tmp_
 
     assert resp.status_code == 200
     payload = resp.json()
-    # Eight benchmark cases: case 3 seeds a competing workspace run and case 6
-    # seeds a prior completed run plus a follow-up run; cases 7 and 8 seed one
-    # run each, for 10 runs total.
-    assert len(payload["runs"]) == 10
-    assert len(payload["accesses"]) == 32
-    assert len(payload["benchmark_cases"]) == 8
-    assert len(payload["benchmark_results"]) == 32
+    # Nine benchmark cases: case 3 seeds a competing workspace run, case 6
+    # seeds a prior completed run plus a follow-up run, and case 9 seeds one
+    # over-budget compaction run, for 11 runs total.
+    assert len(payload["runs"]) == 11
+    assert len(payload["accesses"]) == 36
+    assert len(payload["benchmark_cases"]) == 9
+    assert len(payload["benchmark_results"]) == 36
     assert payload["benchmark_summary"]["variant_2"]["failed_branch_contamination_rate"] == 0
+    assert payload["benchmark_summary"]["variant_2"]["constraint_retention_hit_rate"] == 1
+    for field in [
+        "stale_memory_injection_rate",
+        "superseded_injection_rate",
+        "compaction_trigger_rate",
+        "constraint_retention_hit_rate",
+        "unsafe_compaction_leakage_rate",
+        "cross_workspace_leakage_rate",
+        "avg_compression_ratio",
+        "avg_memory_token_overhead",
+    ]:
+        assert payload["benchmark_summary"]["variant_2"][field] == report["summary"]["variant_2"][field]
+
+
+def test_dashboard_benchmark_summary_filters_cross_workspace_rate_by_present_flag():
+    summary = _benchmark_summary_from_records(
+        [
+            BenchmarkResultRecord(
+                case_id="case_3_workspace_isolation",
+                strategy="variant_2",
+                metrics={"cross_workspace_leakage": 1, "cross_workspace_leakage_present": 1},
+            ),
+            BenchmarkResultRecord(
+                case_id="case_1_project_preference",
+                strategy="variant_2",
+                metrics={"cross_workspace_leakage": 0, "cross_workspace_leakage_present": 0},
+            ),
+        ]
+    )
+
+    assert summary["variant_2"]["cross_workspace_leakage_rate"] == 1
 
 
 async def test_dashboard_tables_include_eval_rows_and_workspace_observability_summary():

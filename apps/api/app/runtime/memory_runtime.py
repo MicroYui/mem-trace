@@ -13,6 +13,7 @@ State-tree invariants enforced here:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -21,10 +22,18 @@ from app.memory import secrets, summarizer, writer
 from app.memory import llm_extractor, resolver
 from app.memory.candidate_buffer import CandidateBuffer
 from app.memory.llm_extractor import ExtractionProvider
+from app.config import get_settings
+from app.memory.summarizer_provider import (
+    RuleSummarizerProvider,
+    SummarizeRequest,
+    SummarizeResult,
+    SummarizerProvider,
+)
 from app.observability.metrics import build_observability_summary
 from app.observability.replay import RetrievalReplayService
 from app.observability.reports import write_observability_report
 from app.retrieval.controller import RetrievalController
+from app.retrieval.packer import estimate_tokens as _estimate_history_tokens
 from app.runtime import state_tree
 from app.runtime.models import (
     AgentEvent,
@@ -51,13 +60,22 @@ from app.runtime.models import (
     RollbackResult,
     RunReplayResult,
     RunStatus,
+    Sensitivity,
     StartRunRequest,
     StartStepRequest,
     StateNode,
+    StateNodeStatus,
     StateNodeType,
     StepStatus,
     WriteEventRequest,
     WriteEventResult,
+    CompactionProvider,
+    CompactionKind,
+    ContextBlock,
+    PendingCompactionLog,
+    ProfilePhase,
+    Provenance,
+    RetainedFact,
 )
 from app.runtime.repository import Repository
 
@@ -91,7 +109,9 @@ class MemoryRuntime:
         token_budget: int = 512,
         extraction_mode: ExtractionMode = ExtractionMode.sync,
         extraction_provider: Optional[ExtractionProvider] = None,
+        summarizer_provider: Optional[SummarizerProvider] = None,
     ):
+        settings = get_settings()
         self._repo = repo
         self._default_ws = default_workspace_id
         self._retrieval = RetrievalController(repo, default_token_budget=token_budget)
@@ -103,6 +123,13 @@ class MemoryRuntime:
         # extraction goes through the provider instead of the rule-based writer;
         # ``None`` (default) keeps the deterministic writer path.
         self._extraction_provider = extraction_provider
+        # C3 summarizer seam. Always keep a deterministic provider available so
+        # C4 can degrade to rule summaries without losing retained facts.
+        self._summarizer_provider = summarizer_provider or RuleSummarizerProvider()
+        self._compaction_enabled = settings.compaction_enabled
+        self._compaction_history_token_threshold = settings.compaction_history_token_threshold
+        self._compaction_summary_budget_tokens = settings.compaction_summary_budget_tokens
+        self._compaction_timeout_ms = settings.compaction_timeout_ms
         self._buffer = CandidateBuffer()
 
     # ------------------------------------------------------------------ #
@@ -401,6 +428,15 @@ class MemoryRuntime:
         # reflected in the retrieved memory (architecture.md §12.1 "lazy").
         await self._flush_session(run.session_id)
         ws = request.workspace_id or run.workspace_id
+        prelude_blocks, pending_logs, prelude_warnings = await self._maybe_fold_history(request, workspace_id=ws)
+        if prelude_blocks or pending_logs or prelude_warnings:
+            return await self._retrieval.retrieve_with_prelude(
+                request,
+                workspace_id=ws,
+                prelude_blocks=prelude_blocks,
+                pending_compaction_logs=pending_logs,
+                prelude_warnings=prelude_warnings,
+            )
         return await self._retrieval.retrieve(request, workspace_id=ws)
 
     async def flush_session(self, session_id: str) -> FlushResult:
@@ -427,6 +463,168 @@ class MemoryRuntime:
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+    async def _maybe_fold_history(
+        self, request: RetrievalRequest, *, workspace_id: str
+    ) -> tuple[list[ContextBlock], list[PendingCompactionLog], list[str]]:
+        if not self._compaction_enabled or not request.run_id:
+            return [], [], []
+        try:
+            return await asyncio.wait_for(
+                self._fold_history_impl(request, workspace_id=workspace_id),
+                timeout=max(1, self._compaction_timeout_ms) / 1000,
+            )
+        except Exception as exc:  # noqa: BLE001 - compaction must degrade to no-fold
+            logger.warning("History compaction skipped for run %s", request.run_id, exc_info=True)
+            return [], [], [f"history compaction skipped: {exc.__class__.__name__}"]
+
+    async def _fold_history_impl(
+        self, request: RetrievalRequest, *, workspace_id: str
+    ) -> tuple[list[ContextBlock], list[PendingCompactionLog], list[str]]:
+        nodes = await self._repo.list_state_nodes(request.run_id)
+        if not nodes:
+            return [], [], []
+        active_ids = state_tree.active_path_node_ids(nodes)
+        active_nodes = {
+            node.node_id: node
+            for node in nodes
+            if node.node_id in active_ids and node.status not in {StateNodeStatus.failed, StateNodeStatus.rolled_back}
+        }
+        if not active_nodes:
+            return [], [], []
+
+        raw_blocks: list[ContextBlock] = []
+        source_event_ids: list[str] = []
+        source_state_node_ids: list[str] = []
+        for event in await self._repo.list_events(request.run_id):
+            if event.state_node_id not in active_nodes:
+                continue
+            if event.redaction_status != "none":
+                continue
+            if (event.status or "").lower() == "failed":
+                continue
+            if event.event_type in {EventType.tool_call, EventType.tool_result}:
+                risk = writer.detect_risk_flags(event.content)
+                if risk.tool_sensitive or risk.destructive_command:
+                    continue
+            content = event.content or ""
+            if not content.strip():
+                continue
+            raw_blocks.append(
+                ContextBlock(
+                    type="episodic",
+                    content=content,
+                    source="active_history",
+                    reason="active-path event selected for history compaction",
+                    provenance=Provenance(
+                        run_id=event.run_id,
+                        step_id=event.step_id,
+                        event_id=event.event_id,
+                        state_node_id=event.state_node_id,
+                    ),
+                    tokens=_estimate_history_tokens(content),
+                )
+            )
+            source_event_ids.append(event.event_id)
+            if event.state_node_id:
+                source_state_node_ids.append(event.state_node_id)
+
+        pre_tokens = sum(block.tokens for block in raw_blocks)
+        if pre_tokens < self._compaction_history_token_threshold:
+            return [], [], []
+
+        retained_facts, source_memory_ids = await self._history_retained_facts(
+            workspace_id=workspace_id,
+            run_id=request.run_id,
+            active_state_node_ids=set(active_nodes),
+        )
+        source_event_ids = _dedupe([*source_event_ids, *(fact.provenance.event_id for fact in retained_facts if fact.provenance)])
+        source_state_node_ids = _dedupe(
+            [*source_state_node_ids, *(fact.provenance.state_node_id for fact in retained_facts if fact.provenance)]
+        )
+        request_payload = SummarizeRequest(
+            blocks=raw_blocks,
+            must_retain_facts=retained_facts,
+            source_memory_ids=source_memory_ids,
+            source_event_ids=source_event_ids,
+            source_state_node_ids=source_state_node_ids,
+            summary_budget_tokens=self._compaction_summary_budget_tokens,
+            run_id=request.run_id,
+            workspace_id=workspace_id,
+            kind=CompactionKind.history_summary,
+        )
+        try:
+            result = await asyncio.wait_for(
+                self._summarizer_provider.summarize(request_payload),
+                timeout=max(1, self._compaction_timeout_ms) / 1000,
+            )
+        except Exception as exc:  # noqa: BLE001 - compaction must degrade to no-fold
+            logger.warning("History compaction skipped for run %s", request.run_id, exc_info=True)
+            return [], [], [f"history compaction skipped: {exc.__class__.__name__}"]
+
+        block = ContextBlock(
+            type="history_summary",
+            content=result.summary,
+            source="context_compaction",
+            reason="kind=history_summary",
+            provenance=Provenance(run_id=request.run_id),
+            tokens=result.post_tokens or _estimate_history_tokens(result.summary),
+        )
+        pending = PendingCompactionLog(
+            kind=CompactionKind.history_summary,
+            provider=result.provider,
+            pre_tokens=result.pre_tokens or pre_tokens,
+            post_tokens=block.tokens,
+            dropped_block_count=result.omitted_count,
+            compression_ratio=round(block.tokens / max(1, result.pre_tokens or pre_tokens), 6),
+            summary_text=result.summary,
+            retained_facts=list(result.retained_facts),
+            source_memory_ids=list(result.source_memory_ids),
+            source_event_ids=list(result.source_event_ids),
+            source_state_node_ids=list(result.source_state_node_ids),
+            warnings=list(result.warnings),
+        )
+        return [block], [pending], []
+
+    async def _history_retained_facts(
+        self, *, workspace_id: str, run_id: str, active_state_node_ids: set[str]
+    ) -> tuple[list[RetainedFact], list[str]]:
+        now = _now()
+        facts: list[RetainedFact] = []
+        memory_ids: list[str] = []
+        retrievable = {MemoryStatus.active, MemoryStatus.pinned}
+        for mem in await self._repo.list_memories(workspace_id=workspace_id, run_id=run_id):
+            if mem.status not in retrievable:
+                continue
+            if mem.branch_status in {BranchStatus.failed, BranchStatus.rolled_back}:
+                continue
+            if mem.expires_at is not None and mem.expires_at < now:
+                continue
+            if mem.sensitivity == Sensitivity.secret or mem.risk_flags.contains_secret:
+                continue
+            if mem.risk_flags.tool_sensitive or mem.risk_flags.destructive_command:
+                continue
+            if mem.source_state_node_id not in active_state_node_ids:
+                continue
+            if not mem.key or mem.value is None:
+                continue
+            if not mem.key.startswith(("project.", "endpoint.", "profile.", "procedure.")):
+                continue
+            facts.append(
+                RetainedFact(
+                    key=mem.key,
+                    value=str(mem.value),
+                    source_memory_id=mem.memory_id,
+                    provenance=Provenance(
+                        run_id=mem.source_run_id or mem.run_id,
+                        event_id=mem.source_event_id,
+                        state_node_id=mem.source_state_node_id,
+                    ),
+                )
+            )
+            memory_ids.append(mem.memory_id)
+        facts.sort(key=lambda fact: (fact.key, fact.value, fact.source_memory_id or ""))
+        return facts, _dedupe(memory_ids)
+
     async def _extract_user_message(self, event: AgentEvent) -> list[writer.MemoryWriteResult]:
         """Config-gated extraction: LLM provider when injected, else rule writer.
 
@@ -447,6 +645,34 @@ class MemoryRuntime:
                 )
                 return writer.write_from_user_message(event)
         return writer.write_from_user_message(event)
+
+    async def _summarize(self, request: SummarizeRequest, *, deadline_ms: int) -> SummarizeResult:
+        """Run the configured summarizer with deterministic fallback.
+
+        C3 deliberately introduces only the provider seam. C4 will call this from
+        rolling-history compaction; failures/timeouts must not erase retained
+        constraints, so the fallback is always the rule provider.
+        """
+        try:
+            return await asyncio.wait_for(
+                self._summarizer_provider.summarize(request),
+                timeout=max(1, deadline_ms) / 1000,
+            )
+        except Exception:
+            logger.warning(
+                "Context summarization failed for run %s; falling back to rule summarizer",
+                request.run_id,
+                exc_info=True,
+            )
+            fallback = await RuleSummarizerProvider().summarize(request)
+            warnings = list(fallback.warnings)
+            warnings.append("summarizer fallback: deterministic rule provider used")
+            return fallback.model_copy(
+                update={
+                    "provider": CompactionProvider.fallback_rule,
+                    "warnings": warnings,
+                }
+            )
 
     async def _apply_write_rules(self, event: AgentEvent) -> list[str]:
         created: list[str] = []
@@ -648,12 +874,14 @@ class MemoryRuntime:
         active_path: list = []
         if access.run_id:
             active_node, _, active_path = await self._retrieval._load_active_state(access.run_id)
-        blocks, _ = pack_context(
+        pack_result = pack_context(
             active_node=active_node,
             accepted=accepted_mems,
             token_budget=access.token_budget or 512,
             active_path=active_path,
+            compaction_notice_reserve_tokens=self._retrieval._compaction_notice_reserve_tokens,
         )
+        blocks = pack_result.blocks
         profile = self._retrieval._profile_summary(access)
         # candidates: the retrieved candidate pool ranked by relevance (the
         # gate's input view). gate_decisions: the per-candidate admission outcome
@@ -688,16 +916,48 @@ def _benchmark_summary_from_records(results) -> dict[str, dict[str, float]]:
             "task_success_rate": _avg([float(r.get("task_success", 0)) for r in rows]),
             "correct_active_path_hit_rate": _avg([float(r.get("correct_active_path_hit", 0)) for r in rows]),
             "failed_branch_contamination_rate": _avg([float(r.get("failed_branch_contamination", 0)) for r in rows]),
-            "stale_memory_injection_rate": _avg([float(r.get("stale_memory_injection", 0)) for r in rows]),
-            "cross_workspace_leakage_rate": _avg([float(r.get("cross_workspace_leakage", 0)) for r in rows]),
+            "stale_memory_injection_rate": _avg([
+                float(r.get("stale_memory_injection", 0)) for r in rows if r.get("stale_memory_injection_present")
+            ]),
+            "cross_workspace_leakage_rate": _avg([
+                float(r.get("cross_workspace_leakage", 0)) for r in rows if r.get("cross_workspace_leakage_present")
+            ]),
             "tool_sensitive_blocked_rate": _avg([
                 float(r.get("tool_sensitive_blocked", 0)) for r in rows if r.get("tool_sensitive_present")
             ]),
             "procedural_reuse_hit_rate": _avg([
                 float(r.get("procedural_reuse_hit", 0)) for r in rows if r.get("procedural_reuse_present")
             ]),
+            "superseded_injection_rate": _avg([
+                float(r.get("superseded_injection", 0)) for r in rows if r.get("superseded_injection_present")
+            ]),
+            "constraint_retention_hit_rate": _avg([
+                float(r.get("constraint_retention_hit", 0)) for r in rows if r.get("constraint_retention_hit_present")
+            ]),
+            "unsafe_compaction_leakage_rate": _avg([
+                float(r.get("unsafe_compaction_leakage", 0)) for r in rows if r.get("unsafe_compaction_leakage_present")
+            ]),
+            "compaction_trigger_rate": _avg([
+                float(r.get("compaction_triggered", 0)) for r in rows if r.get("compaction_triggered_present")
+            ]),
+            "avg_compression_ratio": _avg([
+                float(r.get("compression_ratio", 0)) for r in rows if r.get("compression_ratio_present")
+            ]),
+            "avg_retrieval_latency_ms": _avg([float(r.get("retrieval_latency_ms", 0)) for r in rows]),
+            "avg_gate_latency_ms": _avg([float(r.get("gate_latency_ms", 0)) for r in rows]),
+            "avg_memory_token_overhead": _avg([float(r.get("actual_tokens", 0)) for r in rows]),
         }
     return summary
+
+
+def _dedupe(values) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
 
 
 __all__ = ["MemoryRuntime", "RunNotFoundError", "StepNotFoundError"]

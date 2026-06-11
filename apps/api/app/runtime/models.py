@@ -7,6 +7,7 @@ HTTP layer, and demo.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -150,6 +151,7 @@ class ProfilePhase(str, Enum):
     retrieval = "retrieval"
     gate = "gate"
     context_packing = "context_packing"
+    context_compaction = "context_compaction"
     ingestion = "ingestion"
     construction = "construction"
     rerank = "rerank"
@@ -171,6 +173,17 @@ class ExtractionMode(str, Enum):
 
     sync = "sync"
     buffered = "buffered"
+
+
+class CompactionKind(str, Enum):
+    budget_notice = "budget_notice"
+    history_summary = "history_summary"
+
+
+class CompactionProvider(str, Enum):
+    rule = "rule"
+    llm = "llm"
+    fallback_rule = "fallback_rule"
 
 
 # --------------------------------------------------------------------------- #
@@ -401,6 +414,70 @@ class EvalResultRecord(_Base):
     created_at: datetime = Field(default_factory=_now)
 
 
+class ContextCompactionLog(_Base):
+    compaction_id: str = Field(default_factory=lambda: _new_id("cmp"))
+    access_id: str
+    run_id: Optional[str] = None
+    step_id: Optional[str] = None
+    workspace_id: str
+    kind: CompactionKind
+    provider: CompactionProvider
+    pre_tokens: int = 0
+    post_tokens: int = 0
+    dropped_block_count: int = 0
+    compression_ratio: float = 1.0
+    summary_text: Optional[str] = None
+    retained_facts: list["RetainedFact"] = Field(default_factory=list)
+    source_memory_ids: list[str] = Field(default_factory=list)
+    source_event_ids: list[str] = Field(default_factory=list)
+    source_state_node_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=_now)
+
+
+@dataclass(frozen=True, slots=True)
+class PendingCompactionLog:
+    kind: CompactionKind
+    provider: CompactionProvider
+    pre_tokens: int
+    post_tokens: int
+    dropped_block_count: int
+    compression_ratio: float
+    summary_text: str | None
+    retained_facts: list["RetainedFact"]
+    source_memory_ids: list[str]
+    source_event_ids: list[str]
+    source_state_node_ids: list[str]
+    warnings: list[str]
+
+    def materialize(
+        self,
+        *,
+        access_id: str,
+        run_id: str | None,
+        step_id: str | None,
+        workspace_id: str,
+    ) -> ContextCompactionLog:
+        return ContextCompactionLog(
+            access_id=access_id,
+            run_id=run_id,
+            step_id=step_id,
+            workspace_id=workspace_id,
+            kind=self.kind,
+            provider=self.provider,
+            pre_tokens=self.pre_tokens,
+            post_tokens=self.post_tokens,
+            dropped_block_count=self.dropped_block_count,
+            compression_ratio=self.compression_ratio,
+            summary_text=self.summary_text,
+            retained_facts=list(self.retained_facts),
+            source_memory_ids=list(self.source_memory_ids),
+            source_event_ids=list(self.source_event_ids),
+            source_state_node_ids=list(self.source_state_node_ids),
+            warnings=list(self.warnings),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Context blocks (retrieve_context output)
 # --------------------------------------------------------------------------- #
@@ -419,6 +496,15 @@ class ContextBlock(_Base):
     reason: Optional[str] = None
     provenance: Optional[Provenance] = None
     tokens: int = 0
+
+
+class RetainedFact(_Base):
+    """A structured key=value fact retained during context compaction."""
+
+    key: str
+    value: str
+    source_memory_id: Optional[str] = None
+    provenance: Optional[Provenance] = None
 
 
 class GateDecisionView(_Base):
@@ -512,6 +598,7 @@ class ReplayRetrievalResult(_Base):
     replayed_candidates: list[ReplayCandidateView] = Field(default_factory=list)
     replayed_gate_decisions: list[ReplayGateDecisionView] = Field(default_factory=list)
     replayed_context_blocks: list[ContextBlock] = Field(default_factory=list)
+    compaction_logs: list[ContextCompactionLog] = Field(default_factory=list)
     diffs: list[ReplayDiffItem] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
@@ -543,6 +630,10 @@ class ObservabilitySummary(_Base):
     superseded_injected: int = 0
     avg_latency_ms: float = 0.0
     avg_actual_tokens: float = 0.0
+    compaction_trigger_rate: float = 0.0
+    avg_compression_ratio: float = 0.0
+    total_dropped_blocks: int = 0
+    history_summary_count: int = 0
     by_strategy: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 

@@ -11,6 +11,9 @@ from app.runtime.models import (
     BranchStatus,
     GateDecisionType,
     GateLayer,
+    CompactionKind,
+    CompactionProvider,
+    ContextCompactionLog,
     MemoryAccessLog,
     MemoryGateLog,
     MemoryItem,
@@ -42,6 +45,21 @@ def _gate(access_id: str, memory_id: str, decision: GateDecisionType, reject_rea
         decision=decision,
         reject_reason=reject_reason,
     )
+
+
+def _compaction_log(access_id: str, **overrides) -> ContextCompactionLog:
+    defaults = {
+        "access_id": access_id,
+        "workspace_id": "ws_metrics",
+        "kind": CompactionKind.budget_notice,
+        "provider": CompactionProvider.rule,
+        "pre_tokens": 40,
+        "post_tokens": 10,
+        "dropped_block_count": 2,
+        "compression_ratio": 0.25,
+    }
+    defaults.update(overrides)
+    return ContextCompactionLog(**defaults)
 
 
 async def _add_logged_memory(
@@ -171,6 +189,7 @@ async def test_access_metrics_cover_all_quality_safety_signals():
         gate_logs,
         candidate_memories,
         accepted_memories,
+        [_compaction_log(access.access_id)],
     )
 
     assert access_metrics == {
@@ -188,8 +207,15 @@ async def test_access_metrics_cover_all_quality_safety_signals():
         "destructive_command_blocked": 1.0,
         "risk_blocked": 2.0,
         "workspace_mismatch_rejected": 1.0,
-        "workspace_leakage": 1.0,
+        "workspace_leakage": 0.0,
         "superseded_injected": 1.0,
+        "compaction_triggered": 1.0,
+        "dropped_block_count": 2.0,
+        "pre_compaction_tokens": 40.0,
+        "post_compaction_tokens": 10.0,
+        "compression_ratio_sum": 0.25,
+        "compression_ratio_present": 1.0,
+        "history_summary_count": 0.0,
     }
 
 
@@ -246,6 +272,8 @@ async def test_summary_filters_and_by_strategy_rates():
     await _add_logged_memory(repo, first.access_id, _memory(risk_flags=RiskFlags(tool_sensitive=True)), GateDecisionType.reject, "tool_sensitive")
     await _add_logged_memory(repo, second.access_id, _memory(expires_at=datetime.now(timezone.utc) - timedelta(days=1)), GateDecisionType.accept)
     await _add_logged_memory(repo, second.access_id, _memory(status=MemoryStatus.superseded), GateDecisionType.accept)
+    await repo.add_compaction_log(_compaction_log(first.access_id, run_id="run_keep", pre_tokens=40, post_tokens=10, dropped_block_count=2, compression_ratio=0.25))
+    await repo.add_compaction_log(_compaction_log(second.access_id, run_id="run_keep", pre_tokens=50, post_tokens=25, dropped_block_count=1, compression_ratio=0.5))
     await _add_logged_memory(repo, ignored_run.access_id, _memory(status=MemoryStatus.superseded), GateDecisionType.accept)
     await _add_logged_memory(repo, other_workspace.access_id, _memory(workspace_id="ws_metrics"), GateDecisionType.reject, "workspace_mismatch")
 
@@ -263,6 +291,10 @@ async def test_summary_filters_and_by_strategy_rates():
     assert summary.superseded_injected == 1
     assert summary.avg_latency_ms == 30.0
     assert summary.avg_actual_tokens == 150.0
+    assert summary.compaction_trigger_rate == 1.0
+    assert summary.avg_compression_ratio == 0.375
+    assert summary.total_dropped_blocks == 3
+    assert summary.history_summary_count == 0
     assert set(summary.by_strategy) == {"variant_2"}
     assert summary.by_strategy["variant_2"] == {
         "access_count": 2,
@@ -276,9 +308,40 @@ async def test_summary_filters_and_by_strategy_rates():
         "risk_block_rate": 0.5,
         "workspace_leakage_rate": 0.0,
         "superseded_injection_rate": 0.5,
+        "compaction_trigger_rate": 1.0,
+        "avg_compression_ratio": 0.375,
+        "avg_dropped_block_count": 1.5,
+        "history_summary_rate": 0.0,
         "avg_latency_ms": 30.0,
         "avg_actual_tokens": 150.0,
     }
+
+
+@pytest.mark.asyncio
+async def test_summary_filters_compaction_logs_to_access_workspace_and_run():
+    repo = InMemoryRepository()
+    access = await repo.add_access_log(
+        MemoryAccessLog(
+            workspace_id="ws_metrics",
+            run_id="run_keep",
+            retrieval_strategy=RetrievalStrategy.variant_2,
+        )
+    )
+    await repo.add_compaction_log(
+        _compaction_log(access.access_id, workspace_id="ws_metrics", run_id="run_keep", pre_tokens=40, post_tokens=10)
+    )
+    await repo.add_compaction_log(
+        _compaction_log(access.access_id, workspace_id="ws_other", run_id="run_keep", pre_tokens=1000, post_tokens=1000)
+    )
+    await repo.add_compaction_log(
+        _compaction_log(access.access_id, workspace_id="ws_metrics", run_id="run_other", pre_tokens=1000, post_tokens=1000)
+    )
+
+    summary = await metrics.build_observability_summary(repo, workspace_id="ws_metrics", run_id="run_keep")
+
+    assert summary.compaction_trigger_rate == 1.0
+    assert summary.avg_compression_ratio == 0.25
+    assert summary.total_dropped_blocks == 2
 
 
 @pytest.mark.asyncio
@@ -299,4 +362,3 @@ async def test_runtime_observability_summary_does_not_write_fake_quality_safety_
     assert len(profile_events) == 1
     assert [event.phase for event in profile_events] == [ProfilePhase.retrieval]
     assert all(event.phase not in {ProfilePhase.quality, ProfilePhase.safety} for event in profile_events)
-

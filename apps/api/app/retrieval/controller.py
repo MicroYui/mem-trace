@@ -22,6 +22,7 @@ from app.runtime.models import (
     MemoryGateLog,
     MemoryItem,
     MemoryStatus,
+    PendingCompactionLog,
     ProfileEvent,
     ProfilePhase,
     RetrievalRequest,
@@ -77,6 +78,7 @@ class RetrievalPipelineTrace:
     warnings: list[str] = field(default_factory=list)
     phase_profile: dict[str, dict[str, Any]] = field(default_factory=dict)
     actual_tokens: int = 0
+    pending_compaction_logs: list[PendingCompactionLog] = field(default_factory=list)
 
 
 class RetrievalController:
@@ -88,6 +90,7 @@ class RetrievalController:
         self._vector_weight = settings.retrieval_vector_weight
         self._embed_dim = settings.embedding_dim
         self._timeout_ms = settings.retrieval_timeout_ms
+        self._compaction_notice_reserve_tokens = settings.compaction_notice_reserve_tokens
 
     async def retrieve(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
         # Hot-path timeout (architecture.md §11 / §12.3: retrieve_context should
@@ -108,8 +111,68 @@ class RetrievalController:
                 )
         return await self._retrieve_impl(request, workspace_id=workspace_id)
 
-    async def _retrieve_impl(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
-        trace = await self.trace(request, workspace_id=workspace_id)
+    async def retrieve_with_prelude(
+        self,
+        request: RetrievalRequest,
+        *,
+        workspace_id: str,
+        prelude_blocks: list[ContextBlock] | None = None,
+        pending_compaction_logs: list[PendingCompactionLog] | None = None,
+        prelude_warnings: list[str] | None = None,
+    ) -> MemoryContext:
+        if self._timeout_ms and self._timeout_ms > 0:
+            try:
+                return await asyncio.wait_for(
+                    self._retrieve_impl(
+                        request,
+                        workspace_id=workspace_id,
+                        prelude_blocks=prelude_blocks,
+                        pending_compaction_logs=pending_compaction_logs,
+                        prelude_warnings=prelude_warnings,
+                    ),
+                    timeout=self._timeout_ms / 1000.0,
+                )
+            except asyncio.TimeoutError:
+                access = MemoryAccessLog(
+                    workspace_id=workspace_id,
+                    run_id=request.run_id,
+                    step_id=request.step_id,
+                    query=request.query,
+                    task_intent=request.task_intent,
+                    retrieval_strategy=request.strategy,
+                    token_budget=request.token_budget or self._default_budget,
+                    top_k=request.top_k,
+                )
+                await self._repo.add_access_log(access)
+                return MemoryContext(
+                    access_id=access.access_id,
+                    query=request.query,
+                    warnings=[*(prelude_warnings or []), f"retrieval timed out after {self._timeout_ms}ms; returned empty context"],
+                )
+        return await self._retrieve_impl(
+            request,
+            workspace_id=workspace_id,
+            prelude_blocks=prelude_blocks,
+            pending_compaction_logs=pending_compaction_logs,
+            prelude_warnings=prelude_warnings,
+        )
+
+    async def _retrieve_impl(
+        self,
+        request: RetrievalRequest,
+        *,
+        workspace_id: str,
+        prelude_blocks: list[ContextBlock] | None = None,
+        pending_compaction_logs: list[PendingCompactionLog] | None = None,
+        prelude_warnings: list[str] | None = None,
+    ) -> MemoryContext:
+        trace = await self.trace(
+            request,
+            workspace_id=workspace_id,
+            prelude_blocks=prelude_blocks,
+            pending_compaction_logs=pending_compaction_logs,
+            prelude_warnings=prelude_warnings,
+        )
         await self._persist_trace(trace)
         await self._bump_access_counts(trace.accepted_memories)
         return self._context_from_trace(trace)
@@ -120,6 +183,9 @@ class RetrievalController:
         *,
         workspace_id: str,
         access_id: str | None = None,
+        prelude_blocks: list[ContextBlock] | None = None,
+        pending_compaction_logs: list[PendingCompactionLog] | None = None,
+        prelude_warnings: list[str] | None = None,
     ) -> RetrievalPipelineTrace:
         """Run selection -> gate -> pack without persistence or mutations."""
         budget = request.token_budget or self._default_budget
@@ -204,23 +270,52 @@ class RetrievalController:
 
         # ---- phase: context packing ------------------------------------ #
         t2 = time.perf_counter()
-        blocks, actual_tokens = pack_context(
+        pack_result = pack_context(
             active_node=active_node,
             accepted=accepted_memories,
             token_budget=budget,
             active_path=active_path,
+            prelude_blocks=prelude_blocks,
+            compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
         )
+        blocks = pack_result.blocks
+        actual_tokens = pack_result.used
         packing_ms = int((time.perf_counter() - t2) * 1000)
         phase_profile[ProfilePhase.context_packing.value] = {
             "latency_ms": packing_ms,
             "operation": "pack",
             "candidate_count": 0,
             "accepted_count": len(blocks),
-            "rejected_count": 0,
+            "rejected_count": len(pack_result.dropped_blocks),
+            "metadata": {
+                "pre_compaction_tokens": pack_result.pre_compaction_tokens,
+                "actual_tokens": pack_result.used,
+                "dropped_count": len(pack_result.dropped_blocks),
+                "compression_ratio": round(pack_result.used / max(1, pack_result.pre_compaction_tokens), 6),
+                "notice_kind": "budget_notice" if pack_result.notice is not None else None,
+                "retained_constraints": [f.model_dump(mode="json") for f in pack_result.retained_constraints],
+                "dropped_blocks": [b.model_dump(mode="json") for b in pack_result.dropped_blocks],
+            },
         }
 
         # warnings: excluded failed/rolled_back + risk warns
-        warnings = self._build_warnings(rejected_outcomes, accepted_outcomes)
+        warnings = [*(prelude_warnings or [])]
+        warnings.extend(pack_result.warnings)
+        warnings.extend(self._build_warnings(rejected_outcomes, accepted_outcomes, dropped_count=len(pack_result.dropped_blocks)))
+        if pending_compaction_logs:
+            history_log = next((log for log in pending_compaction_logs if log.kind.value == "history_summary"), None)
+            if history_log is not None:
+                phase_profile[ProfilePhase.context_compaction.value] = {
+                    "latency_ms": 0,
+                    "operation": "history_summary",
+                    "input_tokens": history_log.pre_tokens,
+                    "output_tokens": history_log.post_tokens,
+                    "metadata": {
+                        "provider": history_log.provider.value,
+                        "timed_out": False,
+                        "kind": history_log.kind.value,
+                    },
+                }
 
         # persist logs
         access.candidate_count = len(outcomes)
@@ -240,6 +335,7 @@ class RetrievalController:
             warnings=warnings,
             phase_profile=phase_profile,
             actual_tokens=actual_tokens,
+            pending_compaction_logs=[*(pending_compaction_logs or []), *pack_result.pending_compaction_logs],
         )
 
     async def _persist_trace(self, trace: RetrievalPipelineTrace) -> None:
@@ -273,6 +369,8 @@ class RetrievalController:
                         phase=ProfilePhase(phase_name),
                         operation=fields.get("operation"),
                         latency_ms=int(fields.get("latency_ms", 0)),
+                        input_tokens=int(fields.get("input_tokens", 0)),
+                        output_tokens=int(fields.get("output_tokens", 0)),
                         candidate_count=int(fields.get("candidate_count", 0)),
                         accepted_count=int(fields.get("accepted_count", 0)),
                         rejected_count=int(fields.get("rejected_count", 0)),
@@ -281,6 +379,16 @@ class RetrievalController:
                 )
             except Exception:  # noqa: BLE001 - profiler must not break hot path
                 pass
+
+        for pending in trace.pending_compaction_logs:
+            await self._repo.add_compaction_log(
+                pending.materialize(
+                    access_id=access.access_id,
+                    run_id=access.run_id,
+                    step_id=access.step_id,
+                    workspace_id=access.workspace_id,
+                )
+            )
 
     async def _bump_access_counts(self, accepted_memories: list[MemoryItem]) -> None:
         for mem in accepted_memories:
@@ -376,8 +484,10 @@ class RetrievalController:
         return 0.4
 
     @staticmethod
-    def _build_warnings(rejected, accepted) -> list[str]:
+    def _build_warnings(rejected, accepted, *, dropped_count: int = 0) -> list[str]:
         warnings: list[str] = []
+        if dropped_count:
+            warnings.append(f"context budget exceeded: omitted {dropped_count} blocks.")
         failed_excluded = sum(
             1 for o in rejected
             if o.reject_reason in ("failed_branch", "rolled_back")

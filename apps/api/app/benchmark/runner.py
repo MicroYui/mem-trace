@@ -1,8 +1,8 @@
-"""P1 benchmark runner and report writer.
+"""Deterministic benchmark runner and report writer.
 
-Runs the four deterministic MVP benchmark cases from `mvp.md` section 10.4
-against the same seeded memory items for each strategy, then emits the required
-`benchmark_report.md` and `benchmark_results.json` artifacts.
+Runs the MVP plus post-MVP regression cases against the same seeded memory
+items for each strategy, then emits `benchmark_report.md` and
+`benchmark_results.json` artifacts.
 """
 from __future__ import annotations
 
@@ -28,6 +28,10 @@ _METRIC_FIELDS = [
     "tool_sensitive_blocked",
     "procedural_reuse_hit",
     "superseded_injection",
+    "compaction_triggered",
+    "constraint_retention_hit",
+    "unsafe_compaction_leakage",
+    "compression_ratio",
     "retrieval_latency_ms",
     "gate_latency_ms",
 ]
@@ -50,7 +54,9 @@ def _summarize(results: list[CaseMetrics]) -> dict[str, dict[str, float]]:
             "stale_memory_injection_rate": _average(
                 [r.stale_memory_injection for r in rows if r.stale_memory_injection_present]
             ),
-            "cross_workspace_leakage_rate": _average([r.cross_workspace_leakage for r in rows]),
+            "cross_workspace_leakage_rate": _average(
+                [r.cross_workspace_leakage for r in rows if r.cross_workspace_leakage_present]
+            ),
             "tool_sensitive_blocked_rate": _average(
                 [r.tool_sensitive_blocked for r in rows if r.tool_sensitive_present]
             ),
@@ -59,6 +65,18 @@ def _summarize(results: list[CaseMetrics]) -> dict[str, dict[str, float]]:
             ),
             "superseded_injection_rate": _average(
                 [r.superseded_injection for r in rows if r.superseded_injection_present]
+            ),
+            "compaction_trigger_rate": _average(
+                [r.compaction_triggered for r in rows if r.compaction_triggered_present]
+            ),
+            "constraint_retention_hit_rate": _average(
+                [r.constraint_retention_hit for r in rows if r.constraint_retention_hit_present]
+            ),
+            "unsafe_compaction_leakage_rate": _average(
+                [r.unsafe_compaction_leakage for r in rows if r.unsafe_compaction_leakage_present]
+            ),
+            "avg_compression_ratio": _average(
+                [r.compression_ratio for r in rows if r.compression_ratio_present]
             ),
             "avg_retrieval_latency_ms": _average([r.retrieval_latency_ms for r in rows]),
             "avg_gate_latency_ms": _average([r.gate_latency_ms for r in rows]),
@@ -86,10 +104,17 @@ async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | N
                 step_id=seed.step_id,
                 query=seed.query,
                 strategy=strategy,
+                token_budget=seed.extra.get("token_budget"),
+                top_k=seed.extra.get("top_k", 10),
             )
         )
         access = await runtime.inspect_access(ctx.access_id)
         profile_events = await runtime.get_profile(seed.run_id)
+        compaction_logs = [
+            log
+            for log in await repo.list_compaction_logs(access_id=ctx.access_id, workspace_id=seed.workspace_id)
+            if log.run_id == seed.run_id
+        ]
         metrics.append(
             evaluate_case(
                 case_id=case.case_id,
@@ -101,6 +126,9 @@ async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | N
                 procedural_reuse_case=(case.case_id == "case_6_completed_run_reuse"),
                 correction_case=(case.case_id == "case_5_explicit_correction"),
                 stale_markers=seed.extra.get("stale_markers"),
+                compaction_positive_constraints=seed.extra.get("compaction_positive_constraints"),
+                unsafe_compaction_markers=seed.extra.get("unsafe_compaction_markers"),
+                compaction_logs=compaction_logs,
             )
         )
     return metrics
@@ -138,14 +166,16 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         "## Summary",
         "",
-        "| Strategy | task_success_rate | correct_active_path_hit_rate | failed_branch_contamination_rate | cross_workspace_leakage_rate | tool_sensitive_blocked_rate | procedural_reuse_hit_rate | avg_memory_token_overhead |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Strategy | task_success_rate | correct_active_path_hit_rate | failed_branch_contamination_rate | cross_workspace_leakage_rate | tool_sensitive_blocked_rate | procedural_reuse_hit_rate | compaction_trigger_rate | constraint_retention_hit_rate | unsafe_compaction_leakage_rate | avg_compression_ratio | avg_memory_token_overhead |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for strategy, row in payload["summary"].items():
         lines.append(
             "| {strategy} | {task_success_rate} | {correct_active_path_hit_rate} | "
             "{failed_branch_contamination_rate} | {cross_workspace_leakage_rate} | "
-            "{tool_sensitive_blocked_rate} | {procedural_reuse_hit_rate} | {avg_memory_token_overhead} |".format(
+            "{tool_sensitive_blocked_rate} | {procedural_reuse_hit_rate} | {compaction_trigger_rate} | "
+            "{constraint_retention_hit_rate} | {unsafe_compaction_leakage_rate} | "
+            "{avg_compression_ratio} | {avg_memory_token_overhead} |".format(
                 strategy=strategy,
                 **row,
             )
@@ -154,14 +184,15 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         "## Case Results",
         "",
-        "| Case | Strategy | final_action | task_success | failed_branch_contamination | cross_workspace_leakage | tool_sensitive_blocked | candidate/accepted/rejected |",
-        "|---|---|---|---:|---:|---:|---:|---:|",
+        "| Case | Strategy | final_action | task_success | failed_branch_contamination | cross_workspace_leakage | tool_sensitive_blocked | compaction_triggered | constraint_retention_hit | unsafe_compaction_leakage | compression_ratio | candidate/accepted/rejected |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for row in payload["results"]:
         lines.append(
             "| {case_id} | {strategy} | {final_action} | {task_success} | "
             "{failed_branch_contamination} | {cross_workspace_leakage} | {tool_sensitive_blocked} | "
-            "{candidate_count}/{accepted_count}/{rejected_count} |".format(**row)
+            "{compaction_triggered} | {constraint_retention_hit} | {unsafe_compaction_leakage} | "
+            "{compression_ratio} | {candidate_count}/{accepted_count}/{rejected_count} |".format(**row)
         )
     acc = payload.get("acceptance", {})
     lines.extend([
@@ -179,15 +210,23 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _acceptance(summary: dict[str, dict[str, float]]) -> dict[str, Any]:
+def _case_success(results: list[CaseMetrics], case_id: str, strategy: str) -> int | None:
+    for row in results:
+        if row.case_id == case_id and row.strategy == strategy:
+            return row.task_success
+    return None
+
+
+def _acceptance(summary: dict[str, dict[str, float]], results: list[CaseMetrics]) -> dict[str, Any]:
     """Encode the computable mvp.md section 10.5 pass criteria.
 
     Criteria 4-6 (project constraints, profiler fields, access inspection) are
     covered by unit tests; criteria 1-3 are checked here against the summary.
     """
     b1 = summary.get("baseline_1", {})
-    b0 = summary.get("baseline_0", {})
     v2 = summary.get("variant_2", {})
+    case8_b0 = _case_success(results, "case_8_no_memory_baseline", "baseline_0")
+    case8_v2 = _case_success(results, "case_8_no_memory_baseline", "variant_2")
     checks = {
         "variant_2_contamination_below_baseline_1": (
             v2.get("failed_branch_contamination_rate", 1.0)
@@ -210,7 +249,12 @@ def _acceptance(summary: dict[str, dict[str, float]]) -> dict[str, Any]:
             and b1.get("stale_memory_injection_rate", 0.0) > 0.0
         ),
         "variant_2_succeeds_where_no_memory_baseline_fails": (
-            v2.get("task_success_rate", 0.0) > b0.get("task_success_rate", 1.0)
+            case8_b0 == 0 and case8_v2 == 1
+        ),
+        "variant_2_retains_constraints_under_compaction": (
+            v2.get("compaction_trigger_rate", 0.0) == 1.0
+            and v2.get("constraint_retention_hit_rate", 0.0) == 1.0
+            and v2.get("unsafe_compaction_leakage_rate", 1.0) == 0.0
         ),
     }
     return {"passed": all(checks.values()), "checks": checks}
@@ -238,7 +282,7 @@ async def run_benchmark(output_dir: str | Path = "reports", repo: Repository | N
         "summary": summary,
         "results": [r.as_dict() for r in results],
         "metric_fields": list(_METRIC_FIELDS),
-        "acceptance": _acceptance(summary),
+        "acceptance": _acceptance(summary, results),
     }
     _write_json(out / "benchmark_results.json", payload)
     _write_markdown(out / "benchmark_report.md", payload)

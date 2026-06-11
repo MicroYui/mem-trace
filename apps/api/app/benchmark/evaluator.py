@@ -12,8 +12,7 @@ from typing import Optional
 
 from app.runtime.models import (
     AccessInspection,
-    BranchStatus,
-    GateDecisionType,
+    ContextCompactionLog,
     MemoryContext,
     RetrievalStrategy,
 )
@@ -53,6 +52,7 @@ class CaseMetrics:
     failed_branch_contamination: int = 0
     correct_active_path_hit: int = 0
     cross_workspace_leakage: int = 0
+    cross_workspace_leakage_present: int = 0
     stale_memory_injection: int = 0
     stale_memory_injection_present: int = 0
     tool_sensitive_blocked: int = 0
@@ -61,6 +61,14 @@ class CaseMetrics:
     procedural_reuse_present: int = 0
     superseded_injection: int = 0
     superseded_injection_present: int = 0
+    compaction_triggered: int = 0
+    compaction_triggered_present: int = 0
+    constraint_retention_hit: int = 0
+    constraint_retention_hit_present: int = 0
+    unsafe_compaction_leakage: int = 0
+    unsafe_compaction_leakage_present: int = 0
+    compression_ratio: float = 0.0
+    compression_ratio_present: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -69,6 +77,16 @@ class CaseMetrics:
 
 def _phase_latency(profile_events, access_id: str, phase: str) -> int:
     return sum(p.latency_ms for p in profile_events if p.access_id == access_id and p.phase.value == phase)
+
+
+def _compaction_log_text(logs: list[ContextCompactionLog]) -> str:
+    parts: list[str] = []
+    for log in logs:
+        if log.summary_text:
+            parts.append(log.summary_text)
+        parts.extend(f"{fact.key}={fact.value}" for fact in log.retained_facts)
+        parts.extend(log.warnings)
+    return " ".join(parts).lower()
 
 
 def evaluate_case(
@@ -82,6 +100,9 @@ def evaluate_case(
     procedural_reuse_case: bool = False,
     correction_case: bool = False,
     stale_markers: Optional[list[str]] = None,
+    compaction_positive_constraints: Optional[list[str]] = None,
+    unsafe_compaction_markers: Optional[list[str]] = None,
+    compaction_logs: Optional[list[ContextCompactionLog]] = None,
 ) -> CaseMetrics:
     """Build metrics for one (case, strategy) run.
 
@@ -120,6 +141,7 @@ def evaluate_case(
     # cross-workspace leakage
     if other_workspace_markers:
         joined = " ".join(b.content.lower() for b in ctx.context_blocks)
+        m.cross_workspace_leakage_present = 1
         m.cross_workspace_leakage = 1 if any(mk.lower() in joined for mk in other_workspace_markers) else 0
 
     # stale injection: an expired memory (identified by its markers) that still
@@ -157,6 +179,37 @@ def evaluate_case(
             b.content.lower() for b in ctx.context_blocks if b.type == "project_memory"
         )
         m.superseded_injection = 1 if "nodejs" in proj_text else 0
+
+    # compaction quality: only scored for the over-budget compaction case.
+    if compaction_positive_constraints is not None:
+        logs = list(compaction_logs or [])
+        m.compaction_triggered_present = 1
+        m.constraint_retention_hit_present = 1
+        m.unsafe_compaction_leakage_present = 1
+        joined = " ".join(b.content.lower() for b in ctx.context_blocks)
+        compaction_log_text = _compaction_log_text(logs)
+        searchable_text = f"{joined} {compaction_log_text}"
+        m.compaction_triggered = 1 if logs or any(
+            b.type in {"compacted_constraints", "compaction_notice"} for b in ctx.context_blocks
+        ) or any("context budget exceeded" in warning.lower() for warning in ctx.warnings) else 0
+        def _constraint_present(constraint: str) -> bool:
+            key, _, value = constraint.partition("=")
+            if constraint.lower() in searchable_text:
+                return True
+            if key == "project.runtime" and value and value.lower() in searchable_text:
+                return True
+            return False
+
+        m.constraint_retention_hit = 1 if all(_constraint_present(c) for c in compaction_positive_constraints) else 0
+        markers = unsafe_compaction_markers or []
+        m.unsafe_compaction_leakage = 1 if any(
+            marker.lower() in joined or marker.lower() in compaction_log_text for marker in markers
+        ) else 0
+        pre_tokens = sum(log.pre_tokens for log in logs)
+        post_tokens = sum(log.post_tokens for log in logs)
+        if logs:
+            m.compression_ratio_present = 1
+            m.compression_ratio = round(post_tokens / max(1, pre_tokens), 6)
 
     return m
 

@@ -15,6 +15,7 @@ Cases:
   6. completed_run_reuse  - prior successful run -> later similar run recalls procedure
   7. stale_rejection      - expired legacy endpoint memory -> gate rejects as stale
   8. no_memory_baseline   - constraint only in memory -> no-memory baseline fails
+  9. over_budget_compaction - tiny context budget -> retain key=value facts safely
 """
 from __future__ import annotations
 
@@ -266,6 +267,112 @@ async def _seed_no_memory_baseline(rt: MemoryRuntime, ws: str) -> SeedResult:
     return SeedResult(run.run_id, s2.step_id, "How should I run the test suite?", ws)
 
 
+# --------------------------------------------------------------------------- #
+# Case 9: over-budget compaction retains constraints and excludes unsafe facts
+# --------------------------------------------------------------------------- #
+async def _seed_over_budget_compaction(rt: MemoryRuntime, ws: str) -> SeedResult:
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="choose app stack", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+
+    positive_facts = [
+        ("project.runtime", "bun"),
+        ("project.database", "postgres"),
+        ("endpoint.current", "/v2/users"),
+    ]
+    for key, value in positive_facts:
+        await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+            MemoryItem(
+                workspace_id=ws,
+                run_id=run.run_id,
+                memory_type=MemoryType.project,
+                key=key,
+                value=value,
+                content=f"{key}={value}",
+                summary=f"{key}={value}",
+                branch_status=BranchStatus.completed,
+            )
+        )
+
+    # Benign but verbose memories are useful to force the packer over budget.
+    for i in range(8):
+        await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+            MemoryItem(
+                workspace_id=ws,
+                run_id=run.run_id,
+                memory_type=MemoryType.episodic,
+                content=(
+                    f"benign debugging observation {i}: previous users API investigation "
+                    "contains verbose details that may be omitted under a small prompt budget"
+                ),
+                summary=f"benign users API observation {i}",
+                branch_status=BranchStatus.completed,
+            )
+        )
+
+    await rt._repo.add_memory(  # noqa: SLF001 - negative failed branch sample
+        MemoryItem(
+            workspace_id=ws,
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            key="project.runtime",
+            value="npm",
+            content="project.runtime=npm from a failed rolled-back branch",
+            summary="project.runtime=npm",
+            branch_status=BranchStatus.rolled_back,
+        )
+    )
+    await rt._repo.add_memory(  # noqa: SLF001 - negative stale sample
+        MemoryItem(
+            workspace_id=ws,
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            key="endpoint.current",
+            value="/v1/old",
+            content="endpoint.current=/v1/old",
+            summary="endpoint.current=/v1/old",
+            branch_status=BranchStatus.completed,
+            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+    )
+    await rt._repo.add_memory(  # noqa: SLF001 - negative secret sample
+        MemoryItem(
+            workspace_id=ws,
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="users endpoint runtime secret sample: SECRET_TOKEN=sk-live-should-never-appear",
+            summary="users endpoint runtime secret token should be blocked",
+            branch_status=BranchStatus.completed,
+            sensitivity=Sensitivity.secret,
+            risk_flags=RiskFlags(contains_secret=True),
+        )
+    )
+    await rt._repo.add_memory(  # noqa: SLF001 - negative destructive tool sample
+        MemoryItem(
+            workspace_id=ws,
+            run_id=run.run_id,
+            memory_type=MemoryType.tool_evidence,
+            content="users endpoint runtime dangerous prior command: git push --force && rm -rf /tmp/prod",
+            summary="users endpoint runtime git push --force rm -rf",
+            branch_status=BranchStatus.completed,
+            risk_flags=RiskFlags(tool_sensitive=True, destructive_command=True, production_env=True),
+        )
+    )
+
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="choose DB/runtime/endpoint"))
+    return SeedResult(
+        run.run_id,
+        s2.step_id,
+        "Which DB, runtime, and users endpoint should I use?",
+        ws,
+        extra={
+            "token_budget": 18,
+            "top_k": 20,
+            "compaction_positive_constraints": [f"{key}={value}" for key, value in positive_facts],
+            "unsafe_compaction_markers": ["project.runtime=npm", "/v1/old", "secret_token", "sk-live", "--force", "rm -rf"],
+        },
+    )
+
+
 CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_1_project_preference", "Project preference persistence",
                   "User states Bun, not Node.js; later commands should use bun.",
@@ -291,6 +398,9 @@ CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_8_no_memory_baseline", "No-memory baseline fails",
                   "The Bun constraint lives only in memory; a no-memory baseline fails while state-aware retrieval succeeds.",
                   _seed_no_memory_baseline),
+    BenchmarkCase("case_9_over_budget_compaction", "Over-budget compaction",
+                  "Tiny context budget forces compaction; key=value constraints must be retained without unsafe leakage.",
+                  _seed_over_budget_compaction),
 ]
 
 ALL_STRATEGIES = [

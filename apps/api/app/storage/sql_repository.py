@@ -18,6 +18,7 @@ from app.runtime.models import (
     MemoryAccessLog,
     BenchmarkCaseRecord,
     BenchmarkResultRecord,
+    ContextCompactionLog,
     EvalCaseRecord,
     EvalResultRecord,
     EvalRunRecord,
@@ -222,6 +223,52 @@ def _profile_from_orm(o: orm.ProfileEventORM) -> ProfileEvent:
         candidate_count=o.candidate_count, accepted_count=o.accepted_count,
         rejected_count=o.rejected_count, error_code=o.error_code,
         metadata=o.profile_metadata or {}, created_at=o.created_at,
+    )
+
+
+def _compaction_to_orm(c: ContextCompactionLog) -> orm.ContextCompactionORM:
+    return orm.ContextCompactionORM(
+        compaction_id=c.compaction_id,
+        access_id=c.access_id,
+        run_id=c.run_id,
+        step_id=c.step_id,
+        workspace_id=c.workspace_id,
+        kind=c.kind.value,
+        provider=c.provider.value,
+        pre_tokens=c.pre_tokens,
+        post_tokens=c.post_tokens,
+        dropped_block_count=c.dropped_block_count,
+        compression_ratio=c.compression_ratio,
+        summary_text=c.summary_text,
+        retained_facts=[fact.model_dump(mode="json") for fact in c.retained_facts],
+        source_memory_ids=list(c.source_memory_ids),
+        source_event_ids=list(c.source_event_ids),
+        source_state_node_ids=list(c.source_state_node_ids),
+        warnings=list(c.warnings),
+        created_at=c.created_at,
+    )
+
+
+def _compaction_from_orm(o: orm.ContextCompactionORM) -> ContextCompactionLog:
+    return ContextCompactionLog(
+        compaction_id=o.compaction_id,
+        access_id=o.access_id,
+        run_id=o.run_id,
+        step_id=o.step_id,
+        workspace_id=o.workspace_id,
+        kind=o.kind,
+        provider=o.provider,
+        pre_tokens=o.pre_tokens,
+        post_tokens=o.post_tokens,
+        dropped_block_count=o.dropped_block_count,
+        compression_ratio=o.compression_ratio,
+        summary_text=o.summary_text,
+        retained_facts=o.retained_facts or [],
+        source_memory_ids=o.source_memory_ids or [],
+        source_event_ids=o.source_event_ids or [],
+        source_state_node_ids=o.source_state_node_ids or [],
+        warnings=o.warnings or [],
+        created_at=o.created_at,
     )
 
 
@@ -557,6 +604,31 @@ class SqlRepository:
             stmt = stmt.order_by(orm.ProfileEventORM.created_at)
             rows = (await s.execute(stmt)).scalars().all()
             return [_profile_from_orm(o) for o in rows]
+
+    async def add_compaction_log(self, log: ContextCompactionLog) -> ContextCompactionLog:
+        async with self._sf() as s:
+            await s.merge(_compaction_to_orm(log))
+            await s.commit()
+        return log
+
+    async def list_compaction_logs(
+        self,
+        *,
+        access_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> list[ContextCompactionLog]:
+        async with self._sf() as s:
+            stmt = select(orm.ContextCompactionORM)
+            if access_id is not None:
+                stmt = stmt.where(orm.ContextCompactionORM.access_id == access_id)
+            if run_id is not None:
+                stmt = stmt.where(orm.ContextCompactionORM.run_id == run_id)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.ContextCompactionORM.workspace_id == workspace_id)
+            stmt = stmt.order_by(orm.ContextCompactionORM.created_at, orm.ContextCompactionORM.compaction_id)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_compaction_from_orm(o) for o in rows]
 
     # benchmark / dashboard tables
     async def add_benchmark_case(self, case: BenchmarkCaseRecord) -> BenchmarkCaseRecord:

@@ -6,6 +6,9 @@ import pytest
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     BranchStatus,
+    CompactionKind,
+    CompactionProvider,
+    ContextCompactionLog,
     FinishStepRequest,
     MemoryItem,
     MemoryStatus,
@@ -138,6 +141,7 @@ async def test_replay_does_not_increment_access_count_or_write_logs():
     access_id = await _retrieve_once(runtime, run_id, step_id)
     before_access_logs = len(await repo.list_access_logs())
     before_gate_logs = len(await repo.list_gate_logs(access_id))
+    before_compaction_logs = len(await repo.list_compaction_logs(access_id=access_id))
     before_profile_events = len(await repo.list_profile_events())
     before_memory = await repo.get_memory(memory_id)
     assert before_memory is not None
@@ -150,9 +154,113 @@ async def test_replay_does_not_increment_access_count_or_write_logs():
     assert after_memory is not None
     assert len(await repo.list_access_logs()) == before_access_logs
     assert len(await repo.list_gate_logs(access_id)) == before_gate_logs
+    assert len(await repo.list_compaction_logs(access_id=access_id)) == before_compaction_logs
     assert len(await repo.list_profile_events()) == before_profile_events
     assert after_memory.access_count == before_access_count
 
+
+@pytest.mark.asyncio
+async def test_replay_detects_compaction_drift_when_dropped_count_changes():
+    runtime, repo, run_id, step_id, _ = await _seed_runtime()
+    access_id = await _retrieve_once(runtime, run_id, step_id, top_k=5)
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=access_id,
+            run_id=run_id,
+            step_id=step_id,
+            workspace_id="ws_replay",
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            pre_tokens=100,
+            post_tokens=10,
+            dropped_block_count=99,
+            compression_ratio=0.1,
+        )
+    )
+
+    replay = await runtime.replay_access(access_id)
+
+    assert replay is not None
+    assert replay.compaction_logs
+    assert any(
+        diff.kind == "compaction_drift"
+        and diff.field == "dropped_block_count"
+        and diff.original == 99
+        and diff.replayed == 0
+        and diff.severity == "warning"
+        for diff in replay.diffs
+    )
+
+
+@pytest.mark.asyncio
+async def test_replay_detects_compaction_drift_from_persisted_over_budget_access():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_compact")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_replay_compact", task="choose stack", workspace_id="ws_replay_compact")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="choose stack"))
+    mutable_memory_ids: list[str] = []
+    for key, value in [
+        ("project.runtime", "bun"),
+        ("project.database", "postgres"),
+        ("endpoint.current", "/v2/users"),
+    ]:
+        memory = await repo.add_memory(
+            MemoryItem(
+                workspace_id="ws_replay_compact",
+                run_id=run.run_id,
+                memory_type=MemoryType.project,
+                key=key,
+                value=value,
+                content=f"{key}={value}",
+                summary=f"{key}={value}",
+                branch_status=BranchStatus.completed,
+            )
+        )
+        if key != "project.runtime":
+            mutable_memory_ids.append(memory.memory_id)
+    for i in range(6):
+        memory = await repo.add_memory(
+            MemoryItem(
+                workspace_id="ws_replay_compact",
+                run_id=run.run_id,
+                memory_type=MemoryType.episodic,
+                content=f"verbose benign users API investigation note {i} that can be compacted away",
+                branch_status=BranchStatus.completed,
+            )
+        )
+        mutable_memory_ids.append(memory.memory_id)
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="which DB/runtime/endpoint should I use?",
+            strategy=RetrievalStrategy.variant_2,
+            token_budget=18,
+            top_k=10,
+        )
+    )
+    persisted = await repo.list_compaction_logs(access_id=ctx.access_id)
+    assert persisted and persisted[0].dropped_block_count > 0
+
+    for memory_id in mutable_memory_ids:
+        memory = await repo.get_memory(memory_id)
+        assert memory is not None
+        memory.status = MemoryStatus.superseded
+        await repo.update_memory(memory)
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    assert any(
+        diff.kind == "compaction_drift"
+        and diff.field == "dropped_block_count"
+        and diff.original == persisted[0].dropped_block_count
+        and diff.replayed == 0
+        and diff.severity == "warning"
+        for diff in replay.diffs
+    )
 
 @pytest.mark.asyncio
 async def test_replay_run_replays_all_accesses_for_run():

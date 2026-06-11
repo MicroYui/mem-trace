@@ -219,6 +219,28 @@ class ProfileEventORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ContextCompactionORM(Base):
+    __tablename__ = "context_compaction_logs"
+    compaction_id: Mapped[str] = mapped_column(String, primary_key=True)
+    access_id: Mapped[str] = mapped_column(String, index=True)
+    run_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    step_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    kind: Mapped[str] = mapped_column(String)
+    provider: Mapped[str] = mapped_column(String)
+    pre_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    post_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    dropped_block_count: Mapped[int] = mapped_column(Integer, default=0)
+    compression_ratio: Mapped[float] = mapped_column(Float, default=1.0)
+    summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retained_facts: Mapped[list] = mapped_column(JSONB, default=list)
+    source_memory_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    source_event_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    source_state_node_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    warnings: Mapped[list] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class BenchmarkCaseORM(Base):
     __tablename__ = "benchmark_cases"
     case_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -285,6 +307,7 @@ __all__ = [
     "AccessLogORM",
     "GateLogORM",
     "ProfileEventORM",
+    "ContextCompactionORM",
     "BenchmarkCaseORM",
     "BenchmarkResultORM",
     "EvalCaseORM",

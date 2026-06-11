@@ -9,13 +9,18 @@ constraints are merged into one stable sentence so prompts stay consistent.
 """
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Mapping, Optional
 
 from app.runtime.models import (
     ContextBlock,
+    CompactionKind,
+    CompactionProvider,
     MemoryItem,
     MemoryType,
+    PendingCompactionLog,
     Provenance,
+    RetainedFact,
     StateNode,
     StateNodeStatus,
     StateNodeType,
@@ -31,16 +36,54 @@ def estimate_tokens(text: str | None) -> int:
 _TYPE_ORDER = {
     "active_state": 0,
     "active_path": 1,
-    "tool_evidence": 2,
-    "project_memory": 3,
-    "profile": 4,
-    "procedural": 5,
-    "episodic": 6,
+    "history_summary": 2,
+    "tool_evidence": 3,
+    "project_memory": 4,
+    "profile": 5,
+    "procedural": 6,
+    "episodic": 7,
 }
+
+_PROTECTED_ORDER = {
+    "active_state": 0,
+    "history_summary": 1,
+    "active_path": 2,
+    "project_constraints": 3,
+    "compacted_constraints": 4,
+    "compaction_notice": 5,
+}
+
+_RETAINED_FACT_PREFIXES = ("project.", "endpoint.", "profile.", "procedure.")
+
+
+@dataclass(frozen=True, slots=True)
+class PackResult:
+    """Structured result from context packing.
+
+    C0 keeps existing packing behavior unchanged while exposing the extra fields
+    needed by later context-compaction issues. ``dropped_blocks``, ``notice`` and
+    ``retained_constraints`` remain empty/None until C1 introduces compaction
+    compensation.
+    """
+
+    blocks: list[ContextBlock]
+    used: int
+    pre_compaction_tokens: int
+    dropped_blocks: list[ContextBlock] = field(default_factory=list)
+    notice: ContextBlock | None = None
+    retained_constraints: list[RetainedFact] = field(default_factory=list)
+    pending_compaction_logs: list[PendingCompactionLog] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 def _block_order(block: ContextBlock) -> int:
     return _TYPE_ORDER.get(block.type, 99)
+
+
+def _protected_order(block: ContextBlock) -> int:
+    if block.source == "project_constraints":
+        return _PROTECTED_ORDER["project_constraints"]
+    return _PROTECTED_ORDER.get(block.type, 99)
 
 
 def _provenance(mem: MemoryItem) -> Provenance:
@@ -49,6 +92,166 @@ def _provenance(mem: MemoryItem) -> Provenance:
         step_id=None,
         event_id=mem.source_event_id,
         state_node_id=mem.source_state_node_id,
+    )
+
+
+def _copy_block(block: ContextBlock, *, content: str, reason_suffix: str) -> ContextBlock:
+    reason = block.reason or ""
+    reason = f"{reason}; {reason_suffix}" if reason else reason_suffix
+    return block.model_copy(update={"content": content, "tokens": estimate_tokens(content), "reason": reason})
+
+
+def _truncate_text(text: str, max_tokens: int, *, suffix: str = " … (truncated)") -> str:
+    """Deterministically truncate text to fit the approximate token budget."""
+    if max_tokens <= 0:
+        return ""
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    words = text.split()
+    if not words:
+        return text[: max(1, max_tokens)]
+    # Leave room for the suffix tokens where possible. Re-check because the
+    # project tokenizer is approximate and strips common stopwords.
+    keep = max(1, min(len(words), max_tokens))
+    while keep > 0:
+        candidate = " ".join(words[:keep]) + suffix
+        if estimate_tokens(candidate) <= max_tokens:
+            return candidate
+        keep -= 1
+    while suffix and estimate_tokens(suffix) > max_tokens:
+        suffix = suffix.rsplit(" ", 1)[0]
+    return suffix if suffix else words[0]
+
+
+def fit_block(block: ContextBlock, max_tokens: int) -> ContextBlock:
+    """Fit a protected block into its slice by truncating, never dropping."""
+    if block.tokens <= max_tokens:
+        return block
+    content = _truncate_text(block.content, max_tokens)
+    return _copy_block(block, content=content, reason_suffix="protected block truncated to fit budget")
+
+
+def _reserve_for_compaction(token_budget: int, reserve_tokens: int = 64) -> int:
+    if token_budget <= 0:
+        return 0
+    configured = max(0, reserve_tokens)
+    if token_budget < 32:
+        return min(configured, max(1, token_budget - 2))
+    return min(configured, max(16, token_budget // 8))
+
+
+def _is_protected(block: ContextBlock) -> bool:
+    return block.type in {"active_state", "active_path", "history_summary", "compacted_constraints", "compaction_notice"} or block.source == "project_constraints"
+
+
+def _ordered_blocks(blocks: list[ContextBlock]) -> list[ContextBlock]:
+    protected = sorted([block for block in blocks if _is_protected(block)], key=_protected_order)
+    ordinary = sorted([block for block in blocks if not _is_protected(block)], key=_block_order)
+    return [*protected, *ordinary]
+
+
+def extract_retained_facts(
+    dropped_blocks: list[ContextBlock],
+    memory_by_id: Mapping[str, MemoryItem],
+) -> list[RetainedFact]:
+    """Extract retained facts from dropped blocks using MemoryItem key/value.
+
+    The rendered block text is intentionally ignored so C1 preserves structured
+    key=value facts without parsing prompt strings.
+    """
+    facts: list[RetainedFact] = []
+    for block in dropped_blocks:
+        if not block.memory_id:
+            continue
+        mem = memory_by_id.get(block.memory_id)
+        if mem is None or not mem.key or mem.value is None:
+            continue
+        if not mem.key.startswith(_RETAINED_FACT_PREFIXES):
+            continue
+        facts.append(
+            RetainedFact(
+                key=mem.key,
+                value=str(mem.value),
+                source_memory_id=mem.memory_id,
+                provenance=_provenance(mem),
+            )
+        )
+    facts.sort(key=lambda f: (f.key, f.value, f.source_memory_id or ""))
+    return facts
+
+
+def build_compacted_constraints_block(facts: list[RetainedFact], *, max_tokens: int | None = None) -> ContextBlock | None:
+    if not facts:
+        return None
+    content = "Compacted: " + "; ".join(f"{f.key}={f.value}" for f in facts) + "."
+    if max_tokens is not None:
+        content = _truncate_text(content, max_tokens)
+    return ContextBlock(
+        type="compacted_constraints",
+        content=content,
+        source="context_compaction",
+        reason="retained key=value constraints from dropped blocks",
+        tokens=estimate_tokens(content),
+    )
+
+
+def build_compaction_notice(dropped: list[ContextBlock], *, kind: str = "budget_notice", max_tokens: int | None = None) -> ContextBlock:
+    content = f"dropped {len(dropped)} blocks; kind={kind}."
+    if max_tokens is not None:
+        content = _truncate_text(content, max_tokens)
+    return ContextBlock(
+        type="compaction_notice",
+        content=content,
+        source="context_compaction",
+        reason=f"kind={kind}",
+        tokens=estimate_tokens(content),
+    )
+
+
+def _unique_nonempty(values) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _build_pending_budget_notice_log(
+    *,
+    dropped: list[ContextBlock],
+    reserved_blocks: list[ContextBlock],
+    retained_facts: list[RetainedFact],
+    memory_by_id: Mapping[str, MemoryItem],
+) -> PendingCompactionLog:
+    pre_tokens = sum(block.tokens for block in dropped)
+    post_tokens = sum(block.tokens for block in reserved_blocks)
+    dropped_memories = [memory_by_id[block.memory_id] for block in dropped if block.memory_id in memory_by_id]
+    return PendingCompactionLog(
+        kind=CompactionKind.budget_notice,
+        provider=CompactionProvider.rule,
+        pre_tokens=pre_tokens,
+        post_tokens=post_tokens,
+        dropped_block_count=len(dropped),
+        compression_ratio=round(post_tokens / max(1, pre_tokens), 6),
+        summary_text="\n".join(block.content for block in reserved_blocks) if reserved_blocks else None,
+        retained_facts=list(retained_facts),
+        source_memory_ids=_unique_nonempty(block.memory_id for block in dropped),
+        source_event_ids=_unique_nonempty(
+            [
+                *(block.provenance.event_id for block in dropped if block.provenance is not None),
+                *(memory.source_event_id for memory in dropped_memories),
+                *(event_id for memory in dropped_memories for event_id in (memory.source_event_ids or [])),
+            ]
+        ),
+        source_state_node_ids=_unique_nonempty(
+            [
+                *(block.provenance.state_node_id for block in dropped if block.provenance is not None),
+                *(memory.source_state_node_id for memory in dropped_memories),
+            ]
+        ),
+        warnings=[],
     )
 
 
@@ -124,10 +327,12 @@ def pack_context(
     accepted: list[MemoryItem],
     token_budget: int,
     active_path: Optional[list[StateNode]] = None,
-) -> tuple[list[ContextBlock], int]:
+    prelude_blocks: Optional[list[ContextBlock]] = None,
+    compaction_notice_reserve_tokens: int = 64,
+) -> PackResult:
     """Build ordered, budget-bounded context blocks.
 
-    Returns (blocks, actual_tokens). Project memories are merged; other accepted
+    Returns a :class:`PackResult`. Project memories are merged; other accepted
     memories are emitted as their own typed blocks. When `active_path` is given,
     an `active_path` progress block is inserted after the active_state block.
     """
@@ -155,6 +360,9 @@ def pack_context(
         path_block = build_active_path_block(active_path)
         if path_block is not None:
             blocks.append(path_block)
+
+    if prelude_blocks:
+        blocks.extend(prelude_blocks)
 
     # Merged project constraints (runtime + excluded keys only).
     proj_block = build_project_constraint_block(accepted)
@@ -194,17 +402,122 @@ def pack_context(
     if proj_block is not None:
         blocks.append(proj_block)
 
-    blocks.sort(key=_block_order)
+    if any(block.type == "history_summary" for block in blocks):
+        blocks = _ordered_blocks(blocks)
+    else:
+        blocks.sort(key=_block_order)
+    pre_compaction_tokens = sum(b.tokens for b in blocks)
+    memory_by_id = {m.memory_id: m for m in accepted}
 
-    # Enforce token budget greedily in packing order.
+    if pre_compaction_tokens <= token_budget:
+        return PackResult(blocks=blocks, used=pre_compaction_tokens, pre_compaction_tokens=pre_compaction_tokens)
+
+    reserve = _reserve_for_compaction(token_budget, compaction_notice_reserve_tokens)
+
+    warnings: list[str] = []
+    protected_blocks = sorted([b for b in blocks if _is_protected(b)], key=_protected_order)
+    ordinary_blocks = [b for b in blocks if not _is_protected(b)]
+    protected_floor = min(token_budget, sum(b.tokens for b in protected_blocks))
+    effective_budget = max(0, token_budget - reserve, protected_floor)
+
     packed: list[ContextBlock] = []
     used = 0
-    for b in blocks:
-        if used + b.tokens > token_budget and packed:
-            break
-        packed.append(b)
-        used += b.tokens
-    return packed, used
+    for block in protected_blocks:
+        remaining = max(0, effective_budget - used)
+        fitted = fit_block(block, remaining) if block.tokens > remaining else block
+        if fitted.tokens < block.tokens:
+            warnings.append(f"protected block {block.type} truncated to fit budget")
+        packed.append(fitted)
+        used += fitted.tokens
+
+    dropped: list[ContextBlock] = []
+    for block in ordinary_blocks:
+        if used + block.tokens <= effective_budget:
+            packed.append(block)
+            used += block.tokens
+        else:
+            dropped.append(block)
+
+    notice: ContextBlock | None = None
+    retained_facts: list[RetainedFact] = []
+    pending_logs: list[PendingCompactionLog] = []
+    if dropped and reserve > 0:
+        retained_facts = extract_retained_facts(dropped, memory_by_id)
+        notice_budget = min(6, reserve)
+        constraints_budget = max(0, reserve - notice_budget)
+        constraints_block = build_compacted_constraints_block(retained_facts, max_tokens=constraints_budget) if constraints_budget else None
+        notice = build_compaction_notice(dropped, max_tokens=notice_budget)
+        reserved_blocks = [b for b in (constraints_block, notice) if b is not None and b.tokens > 0]
+        reserved_tokens = sum(b.tokens for b in reserved_blocks)
+        while reserved_blocks and used + reserved_tokens > token_budget and packed:
+            overflow = used + reserved_tokens - token_budget
+            shrink_index = next((i for i in range(len(packed) - 1, -1, -1) if packed[i].tokens > 0), None)
+            if shrink_index is None:
+                break
+            candidate = packed[shrink_index]
+            if not _is_protected(candidate):
+                used -= candidate.tokens
+                dropped.append(packed.pop(shrink_index))
+                retained_facts = extract_retained_facts(dropped, memory_by_id)
+                constraints_block = build_compacted_constraints_block(retained_facts, max_tokens=constraints_budget) if constraints_budget else None
+                reserved_blocks = [b for b in (constraints_block, notice) if b is not None and b.tokens > 0]
+                reserved_tokens = sum(b.tokens for b in reserved_blocks)
+                continue
+            new_budget = max(0, candidate.tokens - overflow)
+            fitted_candidate = fit_block(candidate, new_budget)
+            if fitted_candidate.tokens < candidate.tokens:
+                warnings.append(f"protected block {candidate.type} truncated to fit budget")
+            used += fitted_candidate.tokens - candidate.tokens
+            packed[shrink_index] = fitted_candidate
+            reserved_tokens = sum(b.tokens for b in reserved_blocks)
+        for block in reserved_blocks:
+            if used + block.tokens <= token_budget:
+                packed.append(block)
+                used += block.tokens
+            else:
+                remaining = token_budget - used
+                if remaining <= 0:
+                    continue
+                fitted = fit_block(block, remaining)
+                if fitted.tokens < block.tokens:
+                    warnings.append(f"protected block {block.type} truncated to fit budget")
+                if fitted.tokens > 0:
+                    packed.append(fitted)
+                    used += fitted.tokens
+                if block.type == "compaction_notice":
+                    notice = fitted
+        final_reserved_blocks = [block for block in packed if block.type in {"compacted_constraints", "compaction_notice"}]
+        if final_reserved_blocks:
+            pending_logs.append(
+                _build_pending_budget_notice_log(
+                    dropped=dropped,
+                    reserved_blocks=final_reserved_blocks,
+                    retained_facts=retained_facts,
+                    memory_by_id=memory_by_id,
+                )
+            )
+
+    packed.sort(key=_protected_order)
+    return PackResult(
+        blocks=packed,
+        used=used,
+        pre_compaction_tokens=pre_compaction_tokens,
+        dropped_blocks=dropped,
+        notice=notice,
+        retained_constraints=retained_facts,
+        pending_compaction_logs=pending_logs,
+        warnings=warnings,
+    )
 
 
-__all__ = ["pack_context", "build_project_constraint_block", "build_active_path_block", "estimate_tokens"]
+__all__ = [
+    "PackResult",
+    "pack_context",
+    "build_project_constraint_block",
+    "build_active_path_block",
+    "build_compacted_constraints_block",
+    "build_compaction_notice",
+    "extract_retained_facts",
+    "fit_block",
+    "estimate_tokens",
+]

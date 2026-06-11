@@ -12,6 +12,7 @@ from app.observability.metrics import build_access_observability_metrics, build_
 from app.observability.replay import RetrievalReplayService
 from app.retrieval.controller import RetrievalController
 from app.runtime.models import (
+    ContextCompactionLog,
     MemoryAccessLog,
     MemoryGateLog,
     MemoryItem,
@@ -46,11 +47,18 @@ async def write_observability_report(
 
     access_rows: list[dict[str, Any]] = []
     replays: list[ReplayRetrievalResult] = []
+    compaction_rows: list[dict[str, Any]] = []
     for access in accesses:
         gate_logs = await repo.list_gate_logs(access.access_id)
+        compaction_logs = [
+            log
+            for log in await repo.list_compaction_logs(access_id=access.access_id, workspace_id=access.workspace_id)
+            if log.run_id == access.run_id
+        ]
+        compaction_rows.extend(_compaction_rows(access, compaction_logs))
         candidate_memories = await _candidate_memories(repo, gate_logs)
         accepted_memories = await _accepted_memories(repo, gate_logs)
-        metrics = build_access_observability_metrics(access, gate_logs, candidate_memories, accepted_memories)
+        metrics = build_access_observability_metrics(access, gate_logs, candidate_memories, accepted_memories, compaction_logs)
         replay = await replay_service.replay_access(access.access_id) if request.include_replay else None
         if replay is not None:
             replays.append(replay)
@@ -69,6 +77,7 @@ async def write_observability_report(
     payload: dict[str, Any] = {
         "summary": summary.model_dump(mode="json"),
         "accesses": access_rows,
+        "compactions": compaction_rows,
         "replays": [replay.model_dump(mode="json") for replay in replays],
     }
 
@@ -145,6 +154,13 @@ def _sorted_metrics(metrics: dict[str, float]) -> dict[str, float]:
     return {key: metrics[key] for key in sorted(metrics)}
 
 
+def _md_text(value: Any) -> str:
+    text = html.escape(str(value or ""), quote=False)
+    for char in ("\\", "`", "*", "{", "}", "[", "]", "(", ")", "#", "+", "-", "!", "|"):
+        text = text.replace(char, f"\\{char}")
+    return text.replace("\r", "").replace("\n", "<br>")
+
+
 def _critical_drift_count(replay: ReplayRetrievalResult | None) -> int:
     if replay is None:
         return 0
@@ -155,6 +171,29 @@ def _context_block_count(replay: ReplayRetrievalResult | None, access: MemoryAcc
     if replay is not None:
         return len(replay.replayed_context_blocks)
     return int(access.accepted_count)
+
+
+def _compaction_rows(access: MemoryAccessLog, logs: list[ContextCompactionLog]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for log in sorted(logs, key=lambda item: (item.created_at, item.compaction_id)):
+        rows.append(
+            {
+                "compaction_id": log.compaction_id,
+                "access_id": access.access_id,
+                "run_id": log.run_id,
+                "kind": log.kind.value,
+                "provider": log.provider.value,
+                "pre_tokens": log.pre_tokens,
+                "post_tokens": log.post_tokens,
+                "dropped_block_count": log.dropped_block_count,
+                "compression_ratio": log.compression_ratio,
+                "summary_text": log.summary_text,
+                "retained_facts": [fact.model_dump(mode="json") for fact in log.retained_facts],
+                "source_memory_ids": list(log.source_memory_ids),
+                "warnings": list(log.warnings),
+            }
+        )
+    return rows
 
 
 def _render_markdown(
@@ -199,6 +238,29 @@ def _render_markdown(
     lines.extend(
         [
             "",
+            "## Compaction",
+            "",
+            f"- Trigger rate: {summary.compaction_trigger_rate}",
+            f"- Avg compression ratio: {summary.avg_compression_ratio}",
+            f"- Total dropped blocks: {summary.total_dropped_blocks}",
+            f"- History summaries: {summary.history_summary_count}",
+            "",
+            "| Access | Kind | Provider | Pre/Post Tokens | Dropped | Retained Facts |",
+            "|---|---|---|---:|---:|---|",
+        ]
+    )
+    for row in payload.get("compactions", []):
+        facts = "; ".join(_md_text(f"{fact['key']}={fact['value']}") for fact in row.get("retained_facts", []))
+        lines.append(
+            f"| `{_md_text(row['access_id'])}` | {_md_text(row['kind'])} | {_md_text(row['provider'])} | "
+            f"{row['pre_tokens']}/{row['post_tokens']} | {row['dropped_block_count']} | {facts} |"
+        )
+    if not payload.get("compactions"):
+        lines.append("| none | - | - | 0/0 | 0 |  |")
+
+    lines.extend(
+        [
+            "",
             "## Quality Signals",
             "",
             f"- Failed branch rejected: {summary.failed_branch_rejected}",
@@ -228,8 +290,8 @@ def _render_markdown(
     )[:5]
     for row in slowest:
         lines.append(
-            f"| `{row['access_id']}` | {row['strategy']} | {row['metrics'].get('latency_ms', 0.0)} | "
-            f"{row['metrics'].get('actual_tokens', 0.0)} | {row.get('query') or ''} |"
+            f"| `{_md_text(row['access_id'])}` | {_md_text(row['strategy'])} | {row['metrics'].get('latency_ms', 0.0)} | "
+            f"{row['metrics'].get('actual_tokens', 0.0)} | {_md_text(row.get('query') or '')} |"
         )
 
     lines.extend(
@@ -247,21 +309,21 @@ def _render_markdown(
         diff_count = len(replay.diffs) if replay else 0
         critical = _critical_drift_count(replay)
         lines.append(
-            f"| `{row['access_id']}` | {diff_count} | {critical} | "
-            f"`curl http://localhost:8000/v1/replay/access/{row['access_id']}` |"
+            f"| `{_md_text(row['access_id'])}` | {diff_count} | {critical} | "
+            f"`curl http://localhost:8000/v1/replay/access/{_md_text(row['access_id'])}` |"
         )
 
     lines.extend(["", "## Access Details", ""])
     for row in payload["accesses"]:
         lines.extend(
             [
-                f"### `{row['access_id']}`",
+                f"### `{_md_text(row['access_id'])}`",
                 "",
-                f"- Run: `{row.get('run_id') or 'none'}`",
-                f"- Strategy: `{row['strategy']}`",
-                f"- Query: {row.get('query') or ''}",
+                f"- Run: `{_md_text(row.get('run_id') or 'none')}`",
+                f"- Strategy: `{_md_text(row['strategy'])}`",
+                f"- Query: {_md_text(row.get('query') or '')}",
                 f"- Context blocks: {row['context_block_count']}",
-                f"- Replay: `curl http://localhost:8000/v1/replay/access/{row['access_id']}`",
+                f"- Replay: `curl http://localhost:8000/v1/replay/access/{_md_text(row['access_id'])}`",
                 "",
             ]
         )
@@ -312,6 +374,29 @@ h1,h2{color:#111827}.cards{display:grid;grid-template-columns:repeat(auto-fit,mi
             f"<td>{values.get('workspace_leakage_rate', 0.0)}</td>"
             "</tr>"
         )
+    parts.extend(
+        [
+            "</table>",
+            "<h2>Compaction</h2>",
+            "<table><tr><th>Access</th><th>Kind</th><th>Provider</th><th>Pre/Post Tokens</th><th>Dropped</th><th>Retained Facts</th></tr>",
+        ]
+    )
+    compactions = payload.get("compactions", [])
+    if compactions:
+        for row in compactions:
+            facts = "; ".join(f"{fact['key']}={fact['value']}" for fact in row.get("retained_facts", []))
+            parts.append(
+                "<tr>"
+                f"<td><code>{html.escape(row['access_id'])}</code></td>"
+                f"<td>{html.escape(row['kind'])}</td>"
+                f"<td>{html.escape(row['provider'])}</td>"
+                f"<td>{row['pre_tokens']}/{row['post_tokens']}</td>"
+                f"<td>{row['dropped_block_count']}</td>"
+                f"<td>{html.escape(facts)}</td>"
+                "</tr>"
+            )
+    else:
+        parts.append("<tr><td>none</td><td>-</td><td>-</td><td>0/0</td><td>0</td><td></td></tr>")
     parts.extend(
         [
             "</table>",

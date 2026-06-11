@@ -96,7 +96,7 @@ Strategies:
 - `variant_1`: state-aware retrieval.
 - `variant_2`: state-aware retrieval plus admission gate.
 
-The benchmark covers project preference, failed-branch isolation, workspace isolation, tool-call safety, explicit correction, completed-run reuse, stale rejection, and no-memory failure recovery.
+The benchmark covers project preference, failed-branch isolation, workspace isolation, tool-call safety, explicit correction, completed-run reuse, stale rejection, no-memory failure recovery, and over-budget context compaction retention.
 
 ## Observability and replay
 
@@ -116,6 +116,10 @@ The runtime also exposes observability APIs when served through FastAPI:
 - `GET /v1/observability/summary`
 - `POST /v1/observability/reports`
 - `GET /v1/dashboard/tables`
+
+## Context compaction
+
+When retrieval exceeds the token budget, MemTrace does not silently discard low-priority context. It emits protected `compacted_constraints` / `compaction_notice` blocks, persists each `ContextCompactionLog`, includes compaction metrics in observability summaries, surfaces retained facts in JSON/Markdown/HTML reports, and lets replay flag `compaction_drift` if a later rerun would compact differently. The deterministic benchmark includes `case_9_over_budget_compaction`, which checks constraint retention and unsafe-compaction leakage rather than relying on compression ratio alone.
 
 ## Optional PostgreSQL + API mode
 
@@ -166,4 +170,4 @@ uv run python -m app.benchmark.runner --output-dir reports
 
 ## Roadmap
 
-The completed MVP, Phase 3-A observability work, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are context compaction, SDK/LangGraph integration, and expanded strategy benchmarks.
+The completed MVP, Phase 3-A observability work, Context Compaction C0-C5, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are SDK/LangGraph integration and expanded strategy benchmarks.

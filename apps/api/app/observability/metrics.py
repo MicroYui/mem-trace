@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 from app.runtime.models import (
     BranchStatus,
+    CompactionKind,
+    ContextCompactionLog,
     GateDecisionType,
     MemoryAccessLog,
     MemoryGateLog,
@@ -35,9 +37,16 @@ async def build_observability_summary(
 
     for access in accesses:
         gate_logs = await repo.list_gate_logs(access.access_id)
+        compaction_logs = [
+            log
+            for log in await repo.list_compaction_logs(access_id=access.access_id, workspace_id=access.workspace_id)
+            if log.run_id == access.run_id
+        ]
         candidate_memories = await _candidate_memories(repo, gate_logs)
         accepted_memories = await _accepted_memories(repo, gate_logs)
-        metrics = build_access_observability_metrics(access, gate_logs, candidate_memories, accepted_memories)
+        metrics = build_access_observability_metrics(
+            access, gate_logs, candidate_memories, accepted_memories, compaction_logs
+        )
         _add_totals(totals, metrics)
         _add_totals(by_strategy_totals[access.retrieval_strategy.value], metrics)
 
@@ -60,6 +69,10 @@ async def build_observability_summary(
         superseded_injected=int(totals["superseded_injected"]),
         avg_latency_ms=_avg(totals, "latency_ms"),
         avg_actual_tokens=_avg(totals, "actual_tokens"),
+        compaction_trigger_rate=_rate(totals, "compaction_triggered"),
+        avg_compression_ratio=_avg_present(totals, "compression_ratio_sum", "compression_ratio_present"),
+        total_dropped_blocks=int(totals["dropped_block_count"]),
+        history_summary_count=int(totals["history_summary_count"]),
         by_strategy={strategy: _strategy_summary(values) for strategy, values in sorted(by_strategy_totals.items())},
     )
 
@@ -89,6 +102,7 @@ def build_access_observability_metrics(
     gate_logs: list[MemoryGateLog],
     candidate_memories: list[MemoryItem],
     accepted_memories: list[MemoryItem],
+    compaction_logs: list[ContextCompactionLog] | None = None,
 ) -> dict[str, float]:
     """Compute deterministic quality/safety metrics for one retrieval access.
 
@@ -97,6 +111,7 @@ def build_access_observability_metrics(
     the subset of accepted memories. It never reads or writes repository state.
     """
     now = datetime.now(timezone.utc)
+    compaction_logs = compaction_logs or []
     return {
         "access_count": 1.0,
         "candidate_count": float(access.candidate_count),
@@ -116,8 +131,15 @@ def build_access_observability_metrics(
         "destructive_command_blocked": float(sum(g.reject_reason == "destructive_command" for g in gate_logs)),
         "risk_blocked": float(sum(g.reject_reason in {"tool_sensitive", "destructive_command"} for g in gate_logs)),
         "workspace_mismatch_rejected": float(sum(g.reject_reason == "workspace_mismatch" for g in gate_logs)),
-        "workspace_leakage": float(sum(m.workspace_id != access.workspace_id for m in candidate_memories)),
+        "workspace_leakage": float(sum(m.workspace_id != access.workspace_id for m in accepted_memories)),
         "superseded_injected": float(sum(m.status == MemoryStatus.superseded for m in accepted_memories)),
+        "compaction_triggered": float(bool(compaction_logs)),
+        "dropped_block_count": float(sum(log.dropped_block_count for log in compaction_logs)),
+        "pre_compaction_tokens": float(sum(log.pre_tokens for log in compaction_logs)),
+        "post_compaction_tokens": float(sum(log.post_tokens for log in compaction_logs)),
+        "compression_ratio_sum": float(sum(log.compression_ratio for log in compaction_logs)),
+        "compression_ratio_present": float(len(compaction_logs)),
+        "history_summary_count": float(sum(log.kind == CompactionKind.history_summary for log in compaction_logs)),
     }
 
 
@@ -139,6 +161,13 @@ def _empty_totals() -> dict[str, float]:
         "workspace_mismatch_rejected": 0.0,
         "workspace_leakage": 0.0,
         "superseded_injected": 0.0,
+        "compaction_triggered": 0.0,
+        "dropped_block_count": 0.0,
+        "pre_compaction_tokens": 0.0,
+        "post_compaction_tokens": 0.0,
+        "compression_ratio_sum": 0.0,
+        "compression_ratio_present": 0.0,
+        "history_summary_count": 0.0,
     }
 
 
@@ -161,6 +190,13 @@ def _rate(totals: dict[str, float], numerator: str) -> float:
     return round(totals.get(numerator, 0.0) / access_count, 6)
 
 
+def _avg_present(totals: dict[str, float], numerator: str, present: str) -> float:
+    count = totals.get(present, 0.0)
+    if count == 0:
+        return 0.0
+    return round(totals.get(numerator, 0.0) / count, 6)
+
+
 def _strategy_summary(totals: dict[str, float]) -> dict[str, float]:
     access_count = totals.get("access_count", 0.0)
     return {
@@ -175,6 +211,10 @@ def _strategy_summary(totals: dict[str, float]) -> dict[str, float]:
         "risk_block_rate": _rate(totals, "risk_blocked"),
         "workspace_leakage_rate": _rate(totals, "workspace_leakage"),
         "superseded_injection_rate": _rate(totals, "superseded_injected"),
+        "compaction_trigger_rate": _rate(totals, "compaction_triggered"),
+        "avg_compression_ratio": _avg_present(totals, "compression_ratio_sum", "compression_ratio_present"),
+        "avg_dropped_block_count": _avg(totals, "dropped_block_count"),
+        "history_summary_rate": _rate(totals, "history_summary_count"),
         "avg_latency_ms": _avg(totals, "latency_ms"),
         "avg_actual_tokens": _avg(totals, "actual_tokens"),
     }

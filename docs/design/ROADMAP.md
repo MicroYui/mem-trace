@@ -27,7 +27,7 @@
 - [ ] **LLM key 不稳定性**：模型对同一概念可能分配不同 key，破坏 key-based 冲突解析。已用受控 key 词表系统提示缓解，但仍是真实 LLM 路径脆弱点。**根治方向见 §11 Controlled Memory Key Ontology（schema registry，比「语义去重」更早更实用）**。出处：PROJECT_STATE / llm_extractor `_SYSTEM_PROMPT`。
 - [ ] **PG15 数据卷与 pg16 镜像不兼容**：切换需 `docker-compose down -v`（破坏性）。运维注意。
 - [ ] **profiler 亚毫秒阶段读为 0ms**：四舍五入所致，属预期非 bug（真实负载下非 0）。
-- [ ] **检索超预算是丢弃式截断、无压缩补偿**：`packer.pack_context` 超出 `token_budget` 时整块 `break` 丢弃低优先级 block，被丢内容没有任何二次摘要/折叠，可能静默丢失约束。根治方案见 §9 Context Compaction。出处：`packer.py:pack_context`。
+- [x] **检索超预算是丢弃式截断、无压缩补偿**：C1 已完成默认开启的 packer 超预算补偿：普通块被丢弃时会生成 `compacted_constraints` + `compaction_notice`，并保留结构化 key=value 事实；C2 已完成 durable `ContextCompactionLog`、observability summary 指标、replay payload 与 `compaction_drift`。出处：`packer.py:pack_context` / §9 Context Compaction。
 
 ---
 
@@ -152,18 +152,20 @@ architecture §15 / draft §7 / MVP_SCOPE：
 
 ## 9. Context Compaction（上下文压缩 / 历史折叠）★ 与系统定位强相关
 
-mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而长程 agent 的核心痛点正是 **context window 撑爆**。当前系统对「上下文超限」只做**丢弃式截断**（见 §1 技术债），缺少 LLM-agent 式的 context compaction——即「当上下文/历史超出预算时，把待丢弃或冗长的内容压缩成摘要再注入」。这是一个独立于 §3.2（生命周期衰减）与 §5（状态树压缩）的检索/打包层能力，三者协同但不重叠。
+> **实施计划（2026-06-11）**：本节已细化为 Issue-by-Issue 计划 `docs/design/CONTEXT_COMPACTION_PLAN.md`。**状态：C0 `PackResult` + callsite behavior-preserving refactor、C1 packer 超预算压缩补偿、C2 durable `ContextCompactionLog` + observability/replay wiring、C3 可配置 rule/LLM `SummarizerProvider`、C4 config-gated 运行中 rolling history summary、C5 压缩质量指标 + benchmark/report/replay/project-memory sync 均已完成并通过回归。**
+
+mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而长程 agent 的核心痛点正是 **context window 撑爆**。C0-C5 之前，系统对「上下文超限」只做**丢弃式截断**（见 §1 技术债）；现在已完成 trace-aware context compaction 闭环：预算超限时保留关键约束和审计 notice，运行中长历史可 config-gated 折叠为 `history_summary`，并通过 durable `ContextCompactionLog` 支撑 observability / replay / benchmark。它独立于 §3.2（生命周期衰减）与 §5（状态树压缩），三者协同但不重叠。
 
 现状盘点：
 - ✅ **run 结束摘要**（`summarizer.build_run_summary`，冷路径）：把已结束 run 的 trace 蒸馏成 episodic + procedural memory。压缩的是「已结束轨迹→长期记忆」，**不解决运行中长历史超窗**。
 - ✅ **active path 进度块**（`packer.build_active_path_block`）：把 completed 节点 label 串成一句，是拼接展示**非压缩**。
-- ❌ **运行时 context compaction**：完全缺失。
+- ✅ **运行时 context compaction（C4 rolling history summary）**：config-gated `compaction_enabled` 路径已能把超阈值 active-path 历史折叠为 protected `history_summary` block，并持久化 `ContextCompactionLog(kind=history_summary)`；replay 读取持久化快照，不 rerun summarizer。
 
-待办：
-- [ ] **packer 超预算压缩补偿（替代纯丢弃）**：`pack_context` 超 `token_budget` 时，对被丢弃的低优先级块做「合并摘要 / 块内裁剪」而非整块丢弃，至少保留一条「已省略 N 条记忆（含约束 X/Y）」的占位摘要，避免约束静默丢失。出处：§1 技术债 / `packer.py`。
-- [ ] **运行中长历史折叠**：当一个 run 的事件流 / 对话历史超过窗口时，对早期历史做增量摘要（rolling summary）再注入上下文，类似 LLM agent 的 conversation compaction。可复用 `summarizer` 的 LLM 化版本。
-- [ ] **可配置 summarizer（规则 / LLM 双路）**：compaction 的摘要器需 config-gate（默认规则保 benchmark 可复现；启用 LLM 走 `LLMExtractionProvider` 同款注入 + 失败降级），与 extraction 管线对齐。
-- [ ] **压缩质量指标**：在 profiler/benchmark 中加 `compression_ratio` / 压缩前后任务成功率，量化「压缩是否丢了关键信息」。出处：architecture §6.8 `compression_gain`。
+已完成项 / 剩余协同项：
+- [x] **packer 超预算压缩补偿（替代纯丢弃）**：`pack_context` 超 `token_budget` 时，对被丢弃的低优先级块做「合并摘要 / 块内裁剪」而非整块丢弃，至少保留一条「已省略 N 条记忆（含约束 X/Y）」的占位摘要，避免约束静默丢失。C1 已实现 `compacted_constraints` / `compaction_notice` / protected-block deterministic truncation；C2 已实现 durable `ContextCompactionLog`、observability summary compaction metrics、replay payload 与 `compaction_drift`。出处：§1 技术债 / `packer.py`。
+- [x] **运行中长历史折叠**：当一个 run 的 active-path 事件历史超过阈值时，对安全过滤后的早期历史做 rolling summary，再以 protected `history_summary` block 注入上下文；持久化 `ContextCompactionLog(kind=history_summary)`，timeout/error 降级为 no-fold + warning，replay 读取持久化快照不 rerun summarizer。
+- [x] **可配置 summarizer（规则 / LLM 双路）**：compaction 的摘要器需 config-gate（默认规则保 benchmark 可复现；启用 LLM 走 `LLMExtractionProvider` 同款注入 + 失败降级），与 extraction 管线对齐。C3 已实现 `SummarizerProvider` Protocol、deterministic `RuleSummarizerProvider`、OpenAI-compatible `LLMSummarizerProvider`、保守 retained-fact validation、DI wiring 与 runtime fallback。
+- [x] **压缩质量指标**：benchmark 新增 `case_9_over_budget_compaction`，runner 输出 `compaction_trigger_rate` / `constraint_retention_hit_rate` / `unsafe_compaction_leakage_rate` / `avg_compression_ratio`，acceptance 检查 `variant_2_retains_constraints_under_compaction`；observability report 新增 Compaction section，replay 端到端覆盖 `compaction_drift`。出处：architecture §6.8 `compression_gain`。
 - [ ] **协同项（交叉引用）**：state tree 的 completed subgoal → summary node（§5）、生命周期 decay/archive 把旧记忆降级压缩（§3.2）。这三处共同构成完整的「记忆/上下文压缩」体系，建议一并设计。
 
 ---
@@ -201,8 +203,8 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 1. ~~**清立即决策**（§0）~~ ✅ **已完成 (2026-06-10)**：embedding 保留确定性 default + 真实作可选 provider（ADR-015）；auth 走轻量 Hosted-Demo Safety Mode（ADR-016）；secret 默认不存原文（ADR-017）。
 2. ~~**Phase 3-A 后端可观测性**（§2）~~ ✅ **已完成 (2026-06-10)**：Retrieval Replay + eval 表 + Quality/Safety profiler + 最小 JSON/MD/HTML 报告，Issues 1-8 全部完成并端到端验证。
 3. ~~**展示资产 + 可复现基线**（§12 + §7 部分）~~ ✅ **已完成 (2026-06-10)**：README + Mermaid 架构图 + deterministic Quickstart + `scripts/reproduce.sh` / `scripts/smoke.sh` + demo/benchmark/observability 可再生成报告 + optional LLM bench 指引 + 技术博客 + integration reproducibility tests。
-4. **Context Compaction**（§9 + §5/§10 协同子集）：packer 超预算摘要补偿先做（不依赖重型基建）；再做 rolling summary；**协同最小子集**：§5「completed subgoal → summary node」、§10 `SummarizerProvider` 雏形（规则/LLM 双路 config-gate）。**← 当前推荐下一步。**
-5. **Phase 3.5 SDK / Adapter / CLI**（§6 前段）：Python SDK + LangGraph Adapter + custom-loop 示例，证明「可插拔 runtime」；**CLI 入口**（三入口之一）随后。
+4. ~~**Context Compaction**（§9 + §5/§10 协同子集）~~ ✅ **核心闭环已完成 (2026-06-11)**：C0-C5 完成 packer 超预算补偿、durable compaction log、observability/replay、SummarizerProvider、rolling history summary、压缩质量 benchmark/report/replay 同步；剩余协同项为 §5「completed subgoal → summary node」与 §10 Provider 抽象族。
+5. **Phase 3.5 SDK / Adapter / CLI**（§6 前段）：Python SDK + LangGraph Adapter + custom-loop 示例，证明「可插拔 runtime」；**CLI 入口**（三入口之一）随后。**← 当前推荐下一步。**
 6. **完整 6 策略对比 + benchmark 落库**（§7 主线）：no memory / long-context / vector / state-aware / +gate / +reflection 逐层量化（+reflection 依赖 §3.2）；配合 §2 eval 表把 benchmark report 落库。
 7. **Provider Registry + Key Ontology**（§10 + §11）：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移）。可与步骤 5/6 交织。
 8. **Phase 4 异步基建 + 生命周期 + 多租户治理**（§3 全段）：§3.1 Redis buffer/Celery（替换 §1 进程内 buffer）→ §3.2 Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志 → §3.3 memory_versions/conflicts 版本与冲突管理 → §3.4 API Key/JWT/quota/redaction 完整多租户治理。（托管 demo 所需的轻量 Hosted-Demo Safety Mode 可在此之前按需单独落地。）

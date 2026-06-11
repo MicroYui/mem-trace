@@ -19,6 +19,7 @@ from app.runtime.models import (
     MemoryAccessLog,
     BenchmarkCaseRecord,
     BenchmarkResultRecord,
+    ContextCompactionLog,
     EvalCaseRecord,
     EvalResultRecord,
     EvalRunRecord,
@@ -103,6 +104,14 @@ class Repository(Protocol):
     async def list_profile_events(
         self, *, run_id: Optional[str] = None, access_id: Optional[str] = None
     ) -> list[ProfileEvent]: ...
+    async def add_compaction_log(self, log: ContextCompactionLog) -> ContextCompactionLog: ...
+    async def list_compaction_logs(
+        self,
+        *,
+        access_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> list[ContextCompactionLog]: ...
 
     # benchmark / dashboard tables
     async def add_benchmark_case(self, case: BenchmarkCaseRecord) -> BenchmarkCaseRecord: ...
@@ -134,6 +143,7 @@ class InMemoryRepository:
         self._access_logs: dict[str, MemoryAccessLog] = {}
         self._gate_logs: list[MemoryGateLog] = []
         self._profile_events: list[ProfileEvent] = []
+        self._compaction_logs: dict[str, ContextCompactionLog] = {}
         self._benchmark_cases: dict[str, BenchmarkCaseRecord] = {}
         self._benchmark_results: dict[str, BenchmarkResultRecord] = {}
         self._eval_cases: dict[str, EvalCaseRecord] = {}
@@ -306,6 +316,29 @@ class InMemoryRepository:
                 continue
             out.append(p.model_copy(deep=True))
         return out
+
+    async def add_compaction_log(self, log: ContextCompactionLog) -> ContextCompactionLog:
+        self._compaction_logs[log.compaction_id] = log.model_copy(deep=True)
+        return log
+
+    async def list_compaction_logs(
+        self,
+        *,
+        access_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> list[ContextCompactionLog]:
+        rows = []
+        for log in self._compaction_logs.values():
+            if access_id is not None and log.access_id != access_id:
+                continue
+            if run_id is not None and log.run_id != run_id:
+                continue
+            if workspace_id is not None and log.workspace_id != workspace_id:
+                continue
+            rows.append(log)
+        rows.sort(key=lambda log: (log.created_at, log.compaction_id))
+        return [row.model_copy(deep=True) for row in rows]
 
     # benchmark / dashboard tables
     async def add_benchmark_case(self, case: BenchmarkCaseRecord) -> BenchmarkCaseRecord:
