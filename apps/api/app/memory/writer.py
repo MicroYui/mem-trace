@@ -159,6 +159,18 @@ def write_from_user_message(event: AgentEvent) -> list[MemoryWriteResult]:
                 )
                 break
 
+    # Negation guard (mvp.md §5.2): phrases like "should not use X" / "不想用 X"
+    # can match BOTH a positive pattern ("use X") and a negative pattern, yielding
+    # a self-contradictory project.runtime=X plus project.runtime.excluded=X. When
+    # the same runtime is excluded, the positive constraint is spurious — drop it.
+    excluded = {r.memory.value for r in results if r.memory.key == "project.runtime.excluded"}
+    if excluded:
+        results = [
+            r
+            for r in results
+            if not (r.memory.key == "project.runtime" and r.memory.value in excluded)
+        ]
+
     return results
 
 

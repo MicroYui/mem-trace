@@ -14,7 +14,14 @@ _SECRET_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"),  # OpenAI-style key
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id
     re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),  # GitHub PAT
+    re.compile(r"\bAIza[A-Za-z0-9_\-]{20,}\b"),  # Google API key
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"),  # Slack token
+    re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b"),  # JWT
+    re.compile(
+        r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"
+    ),  # PEM private key block
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*\S+"),
+    re.compile(r"(?i)\b(?:password|passwd)\s+is\s+\S+"),  # "my password is hunter2"
     re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}"),
 ]
 

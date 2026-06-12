@@ -100,3 +100,24 @@ def test_secret_detection_and_redaction():
 
 def test_non_secret_passes_through():
     assert secrets.contains_secret("just run bun test") is False
+
+
+def test_secret_detection_covers_common_credential_formats():
+    samples = [
+        "token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        "google AIzaSyA1234567890abcdefghijklmnopqrstu",
+        "slack " + "xox" + "b-1234567890-abcdefghijklmnop",
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIBderaw\n-----END RSA PRIVATE KEY-----",
+        "my password is hunter2",
+    ]
+    for text in samples:
+        assert secrets.contains_secret(text) is True, text
+        assert "[REDACTED]" in secrets.redact(text), text
+
+
+def test_negated_english_use_does_not_create_positive_runtime():
+    """"should not use X" must not also produce a positive project.runtime=X."""
+    results = writer.write_from_user_message(_user_event("This project should not use Node.js"))
+    keys = {r.memory.key: r.memory.value for r in results}
+    assert keys.get("project.runtime.excluded") == "nodejs"
+    assert "project.runtime" not in keys

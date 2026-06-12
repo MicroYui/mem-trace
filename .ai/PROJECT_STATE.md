@@ -881,6 +881,31 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 - Lifecycle filtering of superseded/archived memory lives only in the retrieval candidate stage (see PITFALLS); the new vector path reuses the same `list_memories` lifecycle filter, so it stays in sync.
 - Generated reports live under ignored `reports/`; regenerate them with the benchmark runner rather than treating them as source artifacts.
 
+## Implemented (全量代码审查 + 安全/一致性修复 — 2026-06-13)
+
+- **审查范围:** 并行逐行审查 runtime / retrieval / memory / observability+storage / SDK+benchmark+api 六大模块，产出带文件:行号、严重度、修复建议的结构化清单。
+- **已修复（含测试，未触动确定性 benchmark）:**
+  1. `app/memory/secrets.py` 脱敏覆盖面扩展：新增 JWT / PEM 私钥块 / Slack `xox*` / Google `AIza*` / 自然语「password is X」模式。整个抽取分支由 `contains_secret` 把关，漏检即密钥落库。
+  2. `app/memory/writer.py` 否定短语去矛盾：`"should not use X"` / `"不想用 X"` 曾同时产出 `project.runtime=X` + `project.runtime.excluded=X`；新增后置过滤，被排除的 runtime 不得作为正向约束。
+  3. `app/memory/resolver.py` `_SINGLE_VALUED_KEYS` 扩展到 LLM 受控 key 契约（language/database/test_framework/test_command/formatting/package_manager），使后到冲突值无 `supersede=true` 也能被正确 supersede。
+  4. `app/observability/reports.py` `_accepted_memories` 把 `degrade` 错计为 accepted，与 metrics/replay 权威 `{accept,warn}` 冲突、导致 per-access 行与 summary 自相矛盾；已对齐为 `{accept,warn}`。
+- **新增测试:** `test_writer.py`（secret 多格式覆盖 + 否定短语不产正向 runtime）、`test_resolver.py`（受控单值 key 冲突 supersede）。
+- **未修复但已登记（需更大设计决策/触及并发模型，写入 ROADMAP §1.1 + §13）:** 正向打包路径无脱敏纵深防御 [High]、`variant_1` 过度关闭 hard/risk policy [High]、in-process/HTTP isomorphism（StateTreeError 未映射、replay_access run 检查只在 HTTP）[High]、`next_sequence_no` 并发重复 [High]、检索超时 split-brain [High]、token 估算复用剔停用词分词器 + CJK 无法截断 [Medium]、服务端无鉴权但 SDK 发 Bearer [Medium]、benchmark 公平性恢复仅覆盖 access_count [Medium]、LLM provider 每次新建 AsyncClient [Medium]、ORM/迁移 compaction 索引漂移 [Medium]、gate log 排序非确定性 [Medium]、summarizer LLM provenance 校验可能恒失败 [Medium]、状态机边界（rolled_back/幽灵节点/退化 rollback）[Medium]、负向证据非受保护块 [Medium]，以及若干 Low。
+- **ROADMAP 丰富:** 新增 §1.1（审查发现清单，已修复/未修复分区）、§13 安全与一致性加固（13.1 安全闭环 / 13.2 一致性并发 / 13.3 精度健壮性）、§11 新增「本体作为单一真相源」消除三处单值语义漂移、推荐推进顺序新增第 8 步「安全与一致性加固」置于 Provider Registry 之前。
+
+## Latest Verification (2026-06-13 全量审查 + 修复)
+
+- 编译：`uv run --extra dev python -m compileall -q apps/api/app` -> 通过。
+- 目标测试：`uv run --extra dev pytest apps/api/tests/memory/test_writer.py apps/api/tests/memory/test_resolver.py apps/api/tests/observability/test_reports.py -q` -> **30 passed**。
+- 全量回归：`uv run --extra dev pytest -q` -> **308 passed**（原 305 + 3 新测试）。
+- 确定性 benchmark + 可复现：`uv run python -m app.benchmark.runner --output-dir reports && bash scripts/reproduce.sh` -> `acceptance.passed=true (12/12 checks true)`。
+
 ## Next Recommended Action
+
+全量审查已完成并修复 4 项安全/一致性缺陷（详见上节）；其余已登记到 ROADMAP §1.1/§13。**推荐下一步：先做 ROADMAP §13.1 安全闭环（正向打包脱敏 + `variant_1` gate 收敛 + 鉴权去装饰化）与 §13.2 两条 High（`next_sequence_no` 原子化、检索超时 split-brain、后端 isomorphism），再进入 §10/§11 Provider Registry / Key Ontology。** 安全相关两条（正向脱敏、variant_1）触及检索热路径但不改 benchmark 语义，应优先。Heavy infra（Redis/Celery）、高级存储（ES/Neo4j）、多租户治理、React dashboard 仍后置。
+
+---
+
+## (历史) 旧 Next Recommended Action
 
 The MVP (P0+P1+P2), Phase 3-A backend observability, showcase/reproducibility baseline, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, Phase 3.5 SDK/LangGraph adapter/CLI S1-S6, and ROADMAP §7 `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` are complete. **Recommended next slice: choose between ROADMAP §10 Provider Registry and §11 Controlled Memory Key Ontology.** Provider Registry would formalize deterministic/default providers plus optional real embedding/LLM-style provider seams; Controlled Key Ontology would stabilize memory key taxonomy before more provider-driven extraction/ranking work. I7 compaction negative retained remains deferred as an independent cross-feature design. Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.

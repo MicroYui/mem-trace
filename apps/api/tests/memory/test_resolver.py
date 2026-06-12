@@ -114,3 +114,16 @@ def test_different_value_multi_valued_key_coexists():
     assert result.add is incoming
     # the existing excluded value is left untouched (no supersede)
     assert all(u.memory_id != "mem_x" for u in result.updates)
+
+
+def test_controlled_single_valued_key_conflict_supersedes_old_value():
+    """A later value for a controlled single-valued key (e.g. project.language)
+    must supersede the old one even without an explicit supersede flag."""
+    existing = _mem("python", key="project.language", trust=0.6, mid="mem_py")
+    incoming = _mem("go", key="project.language", trust=0.9, mid="mem_go")
+    result = resolver.resolve(incoming, [existing])
+
+    assert result.add is incoming
+    old = next(u for u in result.updates if u.memory_id == "mem_py")
+    assert old.status == MemoryStatus.superseded
+    assert old.superseded_by == "mem_go"

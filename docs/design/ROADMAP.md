@@ -29,6 +29,35 @@
 - [ ] **profiler 亚毫秒阶段读为 0ms**：四舍五入所致，属预期非 bug（真实负载下非 0）。
 - [x] **检索超预算是丢弃式截断、无压缩补偿**：C1 已完成默认开启的 packer 超预算补偿：普通块被丢弃时会生成 `compacted_constraints` + `compaction_notice`，并保留结构化 key=value 事实；C2 已完成 durable `ContextCompactionLog`、observability summary 指标、replay payload 与 `compaction_drift`。出处：`packer.py:pack_context` / §9 Context Compaction。
 
+### 1.1 全量代码审查发现（2026-06-13）
+
+一次覆盖 runtime / retrieval / memory / observability / storage / SDK 六大模块的逐行审查。下列**已修复**项已在本次提交内含测试与回归（308 passed，benchmark 12/12）：
+
+- [x] **secrets 脱敏覆盖面过窄**：新增 JWT / PEM 私钥块 / Slack `xox*` / Google `AIza*` / 自然语「password is X」模式。因为整个抽取分支由 `contains_secret` 把关，漏检即等于密钥落库且进入可检索记忆。出处：`memory/secrets.py`。
+- [x] **writer 否定短语产生矛盾记忆**：`"should not use X"` / `"不想用 X"` 会同时命中 positive 与 negative 规则，产出自相矛盾的 `project.runtime=X` + `project.runtime.excluded=X`。已加后置去矛盾过滤（被排除的 runtime 不得作为正向约束）。出处：`memory/writer.py`。
+- [x] **resolver 单值 key 集合落后于 LLM 受控 key 契约**：`_SINGLE_VALUED_KEYS` 仅含 `project.runtime`，而 LLM 系统提示已约定 language/database/test_framework/formatting/package_manager 等单值概念。已扩展该集合，使后到的冲突值即使没有 `supersede=true` 也能被正确 supersede。出处：`memory/resolver.py`。
+- [x] **observability 报告 degrade 计入「已接受」**：`reports.py:_accepted_memories` 把 `degrade` 当成 accepted，与 `metrics.py`/`replay.py` 的权威 `{accept,warn}` 定义冲突，导致 per-access 行指标与 summary 聚合自相矛盾。已对齐为 `{accept,warn}`。出处：`observability/reports.py`。
+
+下列为**已确认但未在本次修复**（需更大设计决策或触及确定性 benchmark/并发模型，单列为后续待办）：
+
+- [ ] **[High] 正向打包路径无脱敏纵深防御**：`packer.py` 直接使用 `mem.content`，不做 `redact()`；而 `baseline_1` / `long_context` / `variant_1` 关闭 gate 后，一旦存在 secret/risk 记忆其**原文会进入正向上下文**。负向证据路径已有完善脱敏，正向路径缺失对称防护。建议：packer 对正向块统一过 `redact()`，或在候选选择阶段按 `sensitivity==secret`/`contains_secret` 兜底过滤。出处：`retrieval/packer.py` / `retrieval/controller.py`。
+- [ ] **[High] `variant_1` 为「失败分支降权」过度关闭整条 hard/risk policy**：失败分支放行实际由 `allow_failed_branch`/`allow_rolled_back` 单独控制，无需关闭 `enable_hard_policy`/`enable_risk_policy`。当前实现连带放过 secret/destructive/quarantined。建议改为仅置 allow 标志，保留硬/风险兜底。出处：`retrieval/gate.py:62-70`。
+- [ ] **[High] in-process 与 HTTP 后端 isomorphism 仍有缺口**：`StateTreeError` 未被任一后端/路由映射 —— in-process 抛裸内部异常、HTTP 退化为 500→泛化 `MemTraceError`；`replay_access` 的 run-existence 检查只在 HTTP 侧。建议把 `StateTreeError` 在 runtime 层映射为客户端可纠正错误（400/`BadRequestError`），并把 run 存在性检查下沉到 `MemoryRuntime`。出处：`packages/python-sdk/.../backends.py` / `api/routes.py` / `runtime/memory_runtime.py`。
+- [ ] **[High] 并发下 `next_sequence_no` 可能重复**：advisory 锁的事务在 `SELECT max+1` 后即 commit，event 插入在另一事务，锁未覆盖插入 → 并发同 run 可拿到重复 `sequence_no`，破坏事件定序。建议在同一加锁事务内完成分配+插入，或用 `UPDATE ... RETURNING` 计数行。出处：`storage/sql_repository.py:449-464`。
+- [ ] **[High] 检索超时路径 split-brain**：非 prelude 超时分支只 new 一个 `access_id` 不落库（与 prelude 分支不一致），且 `wait_for` 取消可能已部分持久化另一 id 的日志、`_bump_access_counts` 未执行。建议两条超时分支都落库同一 access，并把 `_persist_trace`+计数纳入抗取消单元。出处：`retrieval/controller.py:119-170`。
+- [ ] **[Medium] token 估算复用剔停用词的 `tokenize`**：`estimate_tokens` 复用检索分词器会系统性低估 token（停用词/CJK），使预算闭合在双语场景不可靠；叠加 `_truncate_text` 对无空格 CJK 无法截断，受保护块仍可能超预算。建议独立、不剔停用词、CJK 感知的计数与截断。出处：`retrieval/packer.py:32-34,106-125` / `retrieval/similarity.py`。
+- [ ] **[Medium] 服务端无鉴权但 SDK/CLI 发送 Bearer**：鉴权是装饰性的，任何可达 `/v1` 的对端可读写全部 workspace。需对齐 ADR-016 Hosted-Demo Safety Mode：要么实现 token 校验，要么文档明确「当前无鉴权，api_key 仅预留」。出处：`api/routes.py`/`deps.py` 无 auth 依赖。
+- [ ] **[Medium] benchmark 公平性恢复仅覆盖 `access_count`**：依赖「retrieval 只改 access_count」的隐式不变量。一旦 §3.2 Reflection 调度器开始更新 freshness/updated_at/trust，公平性会静默失效。建议改为对受测 workspace 做整体 memory 快照/恢复，或恢复后断言无其他字段差异。出处：`benchmark/runner.py:128-152`。
+- [ ] **[Medium] LLM provider 每次调用新建 `AsyncClient`**：无连接复用，高频抽取下端口/性能压力。建议 provider 持有长生命周期 client，app shutdown 时 `aclose`。出处：`memory/llm_extractor.py:176-182` / `api/deps.py`。
+- [ ] **[Medium] ORM 与迁移在 `context_compaction_logs` 索引上漂移**：ORM 声明单列 `workspace_id` 索引，迁移 0005 建的是复合 `(workspace_id, created_at)`，导致 `create_all` 与迁移 schema 不一致、autogenerate 噪音。建议二者对齐。出处：`storage/orm.py:228` / `migrations/0005`。
+- [ ] **[Medium] gate log 排序非确定性**：`list_gate_logs` 仅 `ORDER BY created_at`，同访问多条时间戳可能相同 → SQL 顺序未定义、与 InMemory 不一致，replay 产生虚假 order-changed diff。建议加次级排序键（`created_at, gate_id`）并在 replay accepted 排序加确定性 tiebreak。出处：`storage/sql_repository.py:585` / `observability/replay.py`。
+- [ ] **[Medium] summarizer LLM 路径 provenance 校验可能恒失败**：`_validate_source_ids` 未把 `must_retain_facts` 自身 provenance 纳入 allow-set，导致合法 LLM 输出被判「invented」恒回退 rule provider，使 LLM seam 形同虚设。建议先用 `must_retain_facts` 的 provenance 播种 allow-set。出处：`memory/summarizer_provider.py:271-304`。
+- [ ] **[Medium] 多处状态机/隔离边界小缺陷**：`state_tree.apply_finish` 忽略 `rolled_back` 状态（节点滞留 active 可能泄漏到 active path）；`finish_step` 节点缺失时返回幽灵未持久化 `StateNode`；rollback 退化分支翻转记忆却报告 0 个 rolled-back 节点。建议统一为 `StateTreeError` 或正确映射状态。出处：`runtime/state_tree.py:91-100` / `runtime/memory_runtime.py:312-371`。
+- [ ] **[Medium] 负向证据（avoided_attempts）非受保护块**：预算紧张时「请勿重复某危险操作」的安全提示可能被丢弃。建议将 `sanitized_risk_notice` 模式负向证据纳入受保护集合或提高保留优先级。出处：`retrieval/packer.py:145-146`。
+- [ ] **[Low] 其余**：`access_count`/`raw_event_ids` 的 read-modify-write 竞态、`last_accessed_at` 从未写入（`retention_score` 的 recency 信号为死字段）、summarizer episodic 内容未过 risk/secret 屏蔽、CLI 与 evaluator 判定逻辑重复、报告路径 TOCTOU、`stale_injected` 对 naive datetime 不健壮、`tool_sensitive_present` 子串启发式可能误判。详见审查记录。
+
+> **修复优先级建议**：正向脱敏 + variant_1 gate（安全闭环）≈ isomorphism/StateTreeError ＞ sequence_no 并发 + 超时 split-brain（数据一致性）＞ token 预算精度 ＞ 鉴权 ＞ 其余。安全相关的两条（正向脱敏、variant_1）与一致性两条建议优先排期。
+
 ---
 
 ## 2. Phase 3 — 可观测性与可视化（★ 最高性价比，优先做）
@@ -210,6 +239,7 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 
 - [ ] **受控 key 本体表**：如 `project.runtime` / `project.package_manager` / `project.test_command` / `project.database` / `tool.command.failed` / `endpoint.current` / `endpoint.deprecated` / `user.preference.*`，定义单值/多值语义与 supersede 规则。
 - [ ] **抽取侧校验/归一**：LLM 候选的 key 必须映射到本体（或显式标记为 free-form），不在本体内的同义概念归一到规范 key，根治 key 漂移。
+- [ ] **本体作为单一真相源**：当前单值语义分散在三处（`writer` supersede、`resolver._SINGLE_VALUED_KEYS`、`llm_extractor._SYSTEM_PROMPT`），靠人工保持同步。2026-06-13 审查已发现 `resolver._SINGLE_VALUED_KEYS` 落后于 LLM 受控 key 契约并临时补齐（见 §1.1）；本体落地后应让三处都从同一注册表派生，消除漂移根因。
 - [ ] 关联：§1 LLM key 风险、resolver 冲突解析、§10 ExtractionProvider。
 
 ## 12. Documentation & Showcase（展示资产）
@@ -222,9 +252,44 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 
 ---
 
+## 13. 安全与一致性加固（Security & Consistency Hardening）★ 2026-06-13 审查产出
+
+源自一次覆盖六大模块的全量代码审查（详细清单见 §1.1）。这些不是新功能，而是把现有承诺（脱敏纵深、后端等价、确定性、数据一致）补全到生产级。建议在 §10/§11 之前先做安全/一致性两条 High 子集。
+
+### 13.1 安全闭环（优先）
+- [ ] **正向打包路径脱敏**：packer 对所有正向块 content 统一 `redact()`，或在候选选择阶段按 `sensitivity==secret`/`contains_secret` 兜底过滤，使正向路径与负向证据路径具备对称的纵深防御。
+- [ ] **`variant_1` gate 收敛**：改为仅置 `allow_failed_branch`/`allow_rolled_back`，保留 `enable_hard_policy`/`enable_risk_policy`，避免连带放过 secret/destructive/quarantined。
+- [ ] **鉴权去装饰化**：对齐 ADR-016，实现轻量 token 校验依赖，或文档明确「当前无鉴权、api_key 仅预留」，消除安全假象。
+
+### 13.2 一致性 / 并发
+- [ ] **`next_sequence_no` 原子化**：分配 + 插入在同一加锁事务内，或改用计数行 `UPDATE ... RETURNING`。
+- [ ] **检索超时路径统一**：两条超时分支都落库同一 access，`_persist_trace`+`_bump_access_counts` 纳入抗取消单元，消除 split-brain。
+- [ ] **后端 isomorphism 补全**：`StateTreeError` 在 runtime 层映射为客户端可纠正错误；`replay_access` run 存在性检查下沉到 `MemoryRuntime`，使两后端错误语义严格等价。
+- [ ] **gate log 确定性排序**：`list_gate_logs` 加次级排序键（`created_at, gate_id`），replay accepted 排序加确定性 tiebreak，消除虚假 order-changed diff 与 InMemory/SQL 行为差异。
+- [ ] **ORM/迁移索引对齐**：统一 `context_compaction_logs` 的 workspace 索引声明，避免 `create_all` 与迁移 schema 漂移。
+
+### 13.3 精度 / 健壮性
+- [ ] **token 估算独立化**：不复用剔停用词的检索分词器；提供 CJK 感知的计数与 `_truncate_text` 截断，保证预算闭合在双语场景可靠。
+- [ ] **summarizer LLM provenance 校验放宽**：用 `must_retain_facts` 自身 provenance 播种 allow-set，避免合法 LLM 输出被恒判 invented 而 LLM seam 形同虚设。
+- [ ] **状态机边界**：`apply_finish` 处理 `rolled_back`；`finish_step`/rollback 退化分支以 `StateTreeError` 取代幽灵节点/不一致结果。
+- [ ] **benchmark 公平性快照整体化**：对受测 workspace 做整体 memory 快照/恢复（而非仅 `access_count`），防止 §3.2 Reflection 调度器落地后公平性静默失效。
+- [ ] **其余 Low 项**：见 §1.1 末条（read-modify-write 竞态、`last_accessed_at` 死字段、episodic 内容未过 risk 屏蔽、CLI/evaluator 判定重复、报告路径 TOCTOU、naive datetime 健壮性、`tool_sensitive_present` 误判等）。
+
+### 13.4 横切运行时保障（Cross-cutting Runtime Hardening）
+
+外部审查（2026-06-13）补充的横切层：不是新核心机制，而是让 mem-trace 像一个严肃的「trace-first / replayable」Agent Memory Runtime。已核对源码现状，标注真缺口 vs 已部分存在需聚合。其中 **Policy Contract + Conformance Suite 价值最高**，与本轮 replay/repeatability/一致性加固最契合，应优先于 §10/§11。
+
+- [ ] **(A) Retrieval Policy Contract / policy snapshot ★最高价值**：现状 `MemoryAccessLog.retrieval_strategy` 只存了 strategy enum，gate 权重 / packer budget / compaction reserve / failure-learning / provider 确定性路径等散在代码里，**未随 access 持久化**。一旦改 gate/retention/budget 逻辑，replay drift 与 benchmark 对比无法区分「memory 变了(data drift)」还是「policy 变了(policy drift)」。建议：`RetrievalPolicySnapshot`（`policy_version` + gate/packer/provider config hash + strategy 语义文档），随 access_log 持久化，replay 显式区分 data drift / policy drift。承接本轮 `variant_3` 把 rerank score 持久化以稳定 replay 的思路。
+- [ ] **(B) Runtime Invariant & Conformance Suite ★最高价值**：现状 invariant 测试**已分散存在但未聚合**（lifecycle 排除见 `test_retrieval_flow.py::test_long_context_preserves_scope_lifecycle...`、backend isomorphism 见 SDK `test_backend_isomorphism.py`、access_count 隔离见 benchmark 测试）。建议升级为显式 conformance 套件，把 §1 贯穿性约束「任何新检索路径必须重新应用生命周期过滤」固化为机器校验：① strategy conformance（六策略 × lifecycle/workspace/secret/failed-branch 不变量）② backend conformance（in-memory / SQL / HTTP 等价）③ adapter conformance（SDK / LangGraph / CLI / 未来 MCP）④ replay 不变量（不重跑 summarizer/extractor、无副作用）。**后续每加一个入口（Provider/Ontology/Scheduler/MCP）都必须过此套件，防止绕过 gate/lifecycle/redaction。**
+- [ ] **(C) Trace Bundle / Debug Export**：现状仅有 `reports/` 静态 JSON/MD/HTML 与 replay API，**无可分享的脱敏 debug bundle**。建议 `memtrace export-run/export-access --redacted` + `import-bundle`，打包 run/steps/events/state-tree/memories/access/gate/profile/compaction logs + policy snapshot(A) + redaction metadata。面向开源 issue 复现与开发者协作，复用 §13.1 正向脱敏与 §13.4-A snapshot。
+- [ ] **(D) Schema Compatibility & Migration Policy**：现状 `test_migrations.py` 只校验 migration **声明**的 schema 操作，**无 upgrade/downgrade 实跑 + 旧数据兼容回归**；与 §13.2「ORM/迁移 compaction 索引漂移」同源。建议横切策略：每个 migration 必须有 upgrade 回归 fixture；downgrade 支持与否需显式声明；enum/status 扩展不得让旧 access/eval 记录解析失败；`MemoryItem` 新字段默认值策略；seeded fixture DB 做 migration regression。后续加 key ontology / versions / conflicts / provider registry 表前先立此策略。
+- [ ] **(E) Dogfood Agent Scenarios**：现状有 `examples/simple_agent` + `examples/langgraph_adapter`（机制演示），benchmark 为确定性量化，**缺贴近真实工作流的端到端脚本**。建议 2-3 个 dogfood harness：coding-agent loop（failed npm → recover bun → 后续复用）、multi-session 项目约束延续、destructive failure 仅 sanitized 不重试、long-horizon（history_summary + project constraints + replay）。把项目从「测试很完整」推到「一眼看懂能接到 agent 上」。
+
+---
+
 ## 附：推荐推进顺序（建议）
 
-> 原则：先补「展示/可观测/可复现」与「贴合定位的 compaction」，把「重型基建/高级存储/生态入口」后置并设触发条件，**严防范围膨胀**。下列顺序覆盖 §1–§12 的全部待办；§8 为明确不做、不参与排期。
+> 原则：先补「展示/可观测/可复现」与「贴合定位的 compaction」，把「重型基建/高级存储/生态入口」后置并设触发条件，**严防范围膨胀**。下列顺序覆盖 §1–§13 的全部待办；§8 为明确不做、不参与排期。
 
 1. ~~**清立即决策**（§0）~~ ✅ **已完成 (2026-06-10)**：embedding 保留确定性 default + 真实作可选 provider（ADR-015）；auth 走轻量 Hosted-Demo Safety Mode（ADR-016）；secret 默认不存原文（ADR-017）。
 2. ~~**Phase 3-A 后端可观测性**（§2）~~ ✅ **已完成 (2026-06-10)**：Retrieval Replay + eval 表 + Quality/Safety profiler + 最小 JSON/MD/HTML 报告，Issues 1-8 全部完成并端到端验证。
@@ -233,10 +298,15 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 5. ~~**Failure-aware Negative Memory Injection**（§9.1）~~ ✅ **首批已完成 (2026-06-12)**：I1 gate 三路 `accept/degrade/reject`、I2 `NegativeEvidence` DTO + shared builder + packer `avoided_attempts`、I3 controller hot-path wiring、I4 replay/metrics/inspect sync、I5 benchmark/evaluator 扩展、I6 文档/项目记忆同步均已完成。benchmark 已含 `case_10` safe failure learning / `case_11` sanitized destructive failure（44 runs）并通过新增 acceptance；I7 compaction negative retained 仍 deferred。
 6. ~~**Phase 3.5 SDK / Adapter / CLI**（§6 前段）~~ ✅ **已完成 (2026-06-12)**：Python SDK + in-process/HTTP backends + LangGraph Adapter + custom-loop / LangGraph 示例 + CLI 入口 + README 三入口说明 + S6 项目记忆同步均已完成，证明「可插拔 runtime」。S6 复审还修复了 `flush_session` 对含 `/` 的 arbitrary `session_id` 的 HTTP/in-process 等价性缺口；TS SDK / OTel / MCP / IDE 插件继续后置。
 7. ~~**完整 6 策略对比 + benchmark 落库**（§7 主线）~~ ✅ **已完成 (2026-06-12)**：6 策略（含 `long_context` / `variant_3` reflection-lite）逐层量化；新增 `case_12_reflection_retention` 与 acceptance `variant_3_retains_high_value_memory_under_budget` + `long_context_shows_token_bloat`；benchmark 现额外落 `eval_*` 表，并已加固同一 repo 重复落库运行的 workspace 隔离；Task 11 已完成 full regression / reproducibility / report-shape / project-memory sync，当前 acceptance 为 12/12。**+reflection 为确定性占位，待 §3.2 调度器落地后取代**（见 §3.2）。下一候选转向 §10/§11 Provider Registry / Key Ontology。
-8. **Provider Registry + Key Ontology**（§10 + §11，推荐下一步候选）：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移）。
-9. **Phase 4 异步基建 + 生命周期 + 多租户治理**（§3 全段）：§3.1 Redis buffer/Celery（替换 §1 进程内 buffer）→ §3.2 Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志 → §3.3 memory_versions/conflicts 版本与冲突管理 → §3.4 API Key/JWT/quota/redaction 完整多租户治理。（托管 demo 所需的轻量 Hosted-Demo Safety Mode 可在此之前按需单独落地。）
-10. **Phase 3-B 前端可视化**（§2）：Timeline → State Tree Viewer → Gate Analysis → Sankey。
-11. **Phase 5 高级存储**（§4）：ES/Neo4j 混合检索 + 图谱 provenance + 多路融合 + Query Planner + 多跳检索，**仅在触发条件满足时启动**。
-12. **远期 / scale-only**：§5 状态树其余能力（subgoal 自动推断 / 完整 node_type / MAGE 四操作）、§6 TS SDK / OTel exporter / MCP Server / IDE 插件 / Go-Rust 组件、§7 小规模 LoCoMo/MemoryArena。**均设触发条件，不主动排期。**
+8. **安全与一致性加固**（§13，★ 推荐下一步，优先于新功能；源自 2026-06-13 全量审查 §1.1 + 外部审查横切补充）。分四批，**完整覆盖 §13.1/§13.2/§13.3/§13.4**：
+   - **8a 安全闭环（§13.1，最优先）**：正向打包脱敏 + `variant_1` gate 收敛 + 鉴权去装饰化。
+   - **8b 一致性/并发（§13.2）**：先做三条 High（`next_sequence_no` 原子化、检索超时 split-brain、后端 isomorphism `StateTreeError`/`replay_access`），再做两条 Medium（gate log 确定性排序、ORM/迁移 compaction 索引对齐）。
+   - **8c 横切运行时保障 High（§13.4-A/B，★最高价值，可与 8b 并行）**：Retrieval Policy Contract / policy snapshot（区分 data drift vs policy drift）+ Runtime Invariant & Conformance Suite（把分散的 lifecycle/workspace/secret/isomorphism 不变量聚成机器校验套件，后续每个新入口必过）。
+   - **8d 精度/健壮性 + 其余横切（§13.3 + §13.4-C/D/E）**：token 估算独立化、summarizer provenance 放宽、状态机边界、benchmark 公平性快照整体化；Trace Bundle/Debug Export、Migration 兼容回归策略、Dogfood agent 场景，以及 §1.1 末条 Low 项随手清理。
+9. **Provider Registry + Key Ontology**（§10 + §11）：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移，并消除 §11「本体作为单一真相源」记录的三处单值语义漂移）。
+10. **Phase 4 异步基建 + 生命周期 + 多租户治理**（§3 全段）：§3.1 Redis buffer/Celery（替换 §1 进程内 buffer）→ §3.2 Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志 → §3.3 memory_versions/conflicts 版本与冲突管理 → §3.4 API Key/JWT/quota/redaction 完整多租户治理。（托管 demo 所需的轻量 Hosted-Demo Safety Mode 可在此之前按需单独落地。）
+11. **Phase 3-B 前端可视化**（§2）：Timeline → State Tree Viewer → Gate Analysis → Sankey。
+12. **Phase 5 高级存储**（§4）：ES/Neo4j 混合检索 + 图谱 provenance + 多路融合 + Query Planner + 多跳检索，**仅在触发条件满足时启动**。
+13. **远期 / scale-only**：§5 状态树其余能力（subgoal 自动推断 / 完整 node_type / MAGE 四操作）、§6 TS SDK / OTel exporter / MCP Server / IDE 插件 / Go-Rust 组件、§7 小规模 LoCoMo/MemoryArena。**均设触发条件，不主动排期。**
 
 > **贯穿性约束（非排期项，但每一步都要遵守，来自 §1）**：① 任何新检索路径必须重新应用生命周期过滤（`_RETRIEVABLE_STATUSES`），否则泄漏退役记忆；② 切 pg16 镜像需 `docker-compose down -v`（破坏性，运维注意）；③ profiler 亚毫秒阶段读 0ms 属预期非 bug。

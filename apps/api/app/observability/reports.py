@@ -142,7 +142,12 @@ async def _candidate_memories(repo: Repository, gate_logs: list[MemoryGateLog]) 
 async def _accepted_memories(repo: Repository, gate_logs: list[MemoryGateLog]) -> list[MemoryItem]:
     memories: list[MemoryItem] = []
     for gate_log in gate_logs:
-        if gate_log.decision.value not in {"accept", "degrade", "warn"}:
+        # Positive context is accept/warn only. ``degrade`` produces negative
+        # evidence, not an injected positive memory, so it must NOT count as
+        # accepted — this matches the authoritative definition in metrics.py /
+        # replay.py and the controller's accepted_outcomes set. Counting degrade
+        # here made per-access report rows contradict the summary aggregates.
+        if gate_log.decision.value not in {"accept", "warn"}:
             continue
         memory = await repo.get_memory(gate_log.memory_id)
         if memory is not None:

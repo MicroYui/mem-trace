@@ -32,8 +32,21 @@ from app.runtime.models import MemoryItem, MemoryStatus
 
 # Keys whose value is single-valued (mutually exclusive). A different value for
 # such a key is a conflict. Everything else (e.g. project.runtime.excluded) has
-# set semantics where distinct values coexist.
-_SINGLE_VALUED_KEYS = frozenset({"project.runtime"})
+# set semantics where distinct values coexist. This set mirrors the controlled
+# single-valued concepts in the LLM extractor system prompt
+# (llm_extractor._SYSTEM_PROMPT); keep them in sync so the resolver can detect a
+# conflicting later value even when the model forgets to set supersede=true.
+_SINGLE_VALUED_KEYS = frozenset(
+    {
+        "project.runtime",
+        "project.package_manager",
+        "project.language",
+        "project.database",
+        "project.test_framework",
+        "project.test_command",
+        "project.formatting",
+    }
+)
 
 
 def _now() -> datetime:
