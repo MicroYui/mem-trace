@@ -121,6 +121,77 @@ The runtime also exposes observability APIs when served through FastAPI:
 
 When retrieval exceeds the token budget, MemTrace does not silently discard low-priority context. It emits protected `compacted_constraints` / `compaction_notice` blocks, persists each `ContextCompactionLog`, includes compaction metrics in observability summaries, surfaces retained facts in JSON/Markdown/HTML reports, and lets replay flag `compaction_drift` if a later rerun would compact differently. The deterministic benchmark includes `case_9_over_budget_compaction`, which checks constraint retention and unsafe-compaction leakage rather than relying on compression ratio alone.
 
+## Three entrypoints: Python SDK / HTTP / CLI
+
+Phase 3.5 adds an installable Python SDK and proves the same runtime behavior is reachable from three entrypoints: an embedded in-process backend, the FastAPI `/v1` HTTP API, and the `memtrace` CLI. All paths go through `MemoryRuntime`, so state-aware retrieval, admission gating, context compaction, negative evidence, profiler logs, and replay semantics stay shared.
+
+### Python SDK quickstart
+
+```python
+from memtrace_sdk import MemTrace
+from memtrace_sdk.types import EventRole, EventType, StartRunRequest, StartStepRequest, WriteEventRequest
+
+client = MemTrace.in_memory(default_workspace_id="ws_demo")
+run = await client.start_run(StartRunRequest(session_id="demo-session", task="remember project facts"))
+step = await client.start_step(StartStepRequest(run_id=run.run_id, intent="record preference"))
+await client.write_event(
+    WriteEventRequest(
+        run_id=run.run_id,
+        step_id=step.step_id,
+        role=EventRole.user,
+        event_type=EventType.message,
+        content="This project uses Bun, not Node.js",
+    )
+)
+```
+
+Use `MemTrace.in_memory(...)` for deterministic local demos/tests, or wrap an existing runtime with `MemTrace.in_process(runtime)`.
+
+### HTTP backend
+
+Start the API server as shown below, then point the same SDK facade at it:
+
+```python
+from memtrace_sdk import MemTrace
+
+client = MemTrace.http("http://localhost:8000", api_key="optional-future-token")
+```
+
+The HTTP backend mirrors the `/v1` surface and maps HTTP `404`/`400` responses to SDK `NotFoundError` / `BadRequestError`. It also preserves backend isomorphism for list-shaped reads such as timeline, state tree, steps, profile, and memories.
+
+### LangGraph adapter
+
+`MemTraceLangGraphAdapter` provides framework-light lifecycle hooks without requiring `langgraph` at SDK import time:
+
+```python
+from memtrace_sdk import MemTrace, MemTraceLangGraphAdapter
+
+client = MemTrace.in_memory(default_workspace_id="ws_graph")
+adapter = MemTraceLangGraphAdapter(client, run_id=run.run_id)
+
+step, context = await adapter.before_node("planner", "How should I run tests?")
+write_result, finish_result = await adapter.after_node(step.step_id, content="Use bun test")
+```
+
+See [`examples/langgraph_adapter`](examples/langgraph_adapter) for a minimal graph that runs when LangGraph is installed and skips cleanly otherwise.
+
+### CLI
+
+Run the one-shot deterministic CLI demo:
+
+```bash
+uv run --package memtrace-sdk memtrace demo --in-process
+```
+
+Operational CLI commands require `--http` because each shell invocation is a new process and cannot share throwaway in-memory state:
+
+```bash
+uv run --package memtrace-sdk memtrace --http http://localhost:8000 start-run --session-id demo --task "trace my agent"
+uv run --package memtrace-sdk memtrace --http http://localhost:8000 retrieve --run-id <run_id> --query "How do I run tests?" --json
+```
+
+For runnable end-to-end examples, start with [`examples/README.md`](examples/README.md), [`examples/simple_agent`](examples/simple_agent), and [`examples/langgraph_adapter`](examples/langgraph_adapter).
+
 ## Optional PostgreSQL + API mode
 
 The deterministic quickstart above does not require Docker. To explore the SQL-backed runtime, start pgvector PostgreSQL with `docker-compose.yml`:
@@ -170,4 +241,4 @@ uv run python -m app.benchmark.runner --output-dir reports
 
 ## Roadmap
 
-The completed MVP, Phase 3-A observability work, Context Compaction C0-C5, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are SDK/LangGraph integration and expanded strategy benchmarks.
+The completed MVP, Phase 3-A observability work, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, Phase 3.5 SDK/LangGraph adapter/CLI work, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are expanded 6-strategy benchmarks and provider/key-ontology work.

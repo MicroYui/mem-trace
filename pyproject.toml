@@ -35,8 +35,15 @@ allow-direct-references = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["apps/api/tests"]
-pythonpath = ["apps/api"]
+addopts = ["--import-mode=importlib"]
+testpaths = ["apps/api/tests", "packages/python-sdk/tests"]
+pythonpath = ["apps/api", "packages/python-sdk/src"]
 
 [tool.uv]
 package = true
+
+[tool.uv.workspace]
+members = ["packages/python-sdk"]
+
+[tool.uv.sources]
+memtrace = { workspace = true }

@@ -724,6 +724,7 @@ class WriteEventRequest(_Base):
     # §12.1 sync_flush: explicit correction / key preference). ``None`` uses the
     # runtime default.
     extraction_mode: Optional[ExtractionMode] = None
+    event_source: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

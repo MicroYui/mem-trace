@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import httpx
+import pytest
+
+from app.api.deps import get_runtime
+from app.main import app
+from app.runtime.memory_runtime import MemoryRuntime
+from app.runtime.repository import InMemoryRepository
+from memtrace_sdk import BadRequestError, MemTrace, NotFoundError
+from memtrace_sdk.backends import HttpBackend
+from memtrace_sdk.types import (
+    EventRole,
+    EventType,
+    FinishStepRequest,
+    ObservabilityReportRequest,
+    RetrievalRequest,
+    StartRunRequest,
+    StartStepRequest,
+    StepStatus,
+    WriteEventRequest,
+)
+
+
+def _override_runtime(runtime: MemoryRuntime) -> None:
+    app.dependency_overrides[get_runtime] = lambda: runtime
+
+
+@pytest.fixture(autouse=True)
+def _clear_overrides():
+    yield
+    app.dependency_overrides.clear()
+
+
+async def _http_client_for(runtime: MemoryRuntime) -> MemTrace:
+    _override_runtime(runtime)
+    transport = httpx.ASGITransport(app=app)
+    http_client = httpx.AsyncClient(transport=transport, base_url="http://test")
+    return MemTrace.http("http://test", client=http_client)
+
+
+async def test_http_backend_runs_golden_path_over_asgi_transport() -> None:
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_http")
+    client = await _http_client_for(runtime)
+
+    try:
+        run = await client.start_run(StartRunRequest(session_id="http-s1", task="remember runtime"))
+        step = await client.start_step(StartStepRequest(run_id=run.run_id, intent="record constraint"))
+        write = await client.write_event(
+            WriteEventRequest(
+                run_id=run.run_id,
+                step_id=step.step_id,
+                role=EventRole.user,
+                event_type=EventType.message,
+                content="这个项目使用 Bun",
+            )
+        )
+        finish = await client.finish_step(
+            FinishStepRequest(
+                run_id=run.run_id,
+                step_id=step.step_id,
+                status=StepStatus.completed,
+                summary="recorded Bun runtime constraint",
+            )
+        )
+        context = await client.retrieve_context(
+            RetrievalRequest(run_id=run.run_id, step_id=step.step_id, query="Bun runtime project")
+        )
+        inspection = await client.inspect_access(context.access_id)
+        fetched_step = await client.get_step(step.step_id)
+        steps = await client.get_steps(run.run_id)
+        timeline = await client.get_timeline(run.run_id)
+
+        assert write.event.event_source == "sdk"
+        assert timeline[0].event_source == "sdk"
+        assert fetched_step.step_id == step.step_id
+        assert finish.step.status == StepStatus.completed
+        assert steps == [finish.step]
+        assert any(block.type == "project_memory" and "uses Bun" in block.content for block in context.context_blocks)
+        assert inspection.access_id == context.access_id
+    finally:
+        await client.aclose()
+
+
+async def test_http_backend_maps_404_and_400_to_sdk_errors(tmp_path: Path) -> None:
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_http")
+    client = await _http_client_for(runtime)
+
+    try:
+        with pytest.raises(NotFoundError):
+            await client.inspect_access("acc_missing")
+
+        with pytest.raises(NotFoundError):
+            await client.get_step("step_missing")
+
+        outside = tmp_path / ".." / "outside"
+        with pytest.raises(BadRequestError):
+            await client.write_observability_report(ObservabilityReportRequest(output_dir=str(outside)))
+    finally:
+        await client.aclose()
+
+
+async def test_http_backend_closes_only_owned_clients() -> None:
+    owned_backend = HttpBackend("http://test")
+    owned_client = owned_backend._client  # noqa: SLF001 - lifecycle contract assertion
+
+    await owned_backend.aclose()
+
+    assert owned_client.is_closed
+
+    injected = httpx.AsyncClient(base_url="http://test")
+    injected_backend = HttpBackend("http://test", client=injected)
+
+    await injected_backend.aclose()
+
+    assert not injected.is_closed
+    await injected.aclose()
+
+
+async def test_http_backend_flush_session_accepts_path_sensitive_session_ids() -> None:
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_http")
+    client = await _http_client_for(runtime)
+
+    try:
+        result = await client.flush_session("tenant/session")
+    finally:
+        await client.aclose()
+
+    assert result.session_id == "tenant/session"

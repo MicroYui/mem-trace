@@ -81,6 +81,37 @@ async def test_write_event_binds_event_to_step_and_state_node(runtime):
     assert r.event.state_node_id == step.state_node_id
 
 
+async def test_write_event_stamps_event_source(runtime):
+    run = await _start(runtime)
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id))
+
+    r = await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            content="hi from sdk",
+            event_source="sdk",
+        )
+    )
+
+    assert r.event.event_source == "sdk"
+    timeline = await runtime.get_timeline(run.run_id)
+    assert timeline[0].event_source == "sdk"
+
+
+async def test_write_event_event_source_defaults_none(runtime):
+    run = await _start(runtime)
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id))
+
+    r = await runtime.write_event(
+        WriteEventRequest(run_id=run.run_id, step_id=step.step_id, content="hi")
+    )
+
+    assert r.event.event_source is None
+    timeline = await runtime.get_timeline(run.run_id)
+    assert timeline[0].event_source is None
+
+
 async def test_finish_step_success_marks_step_and_state_node_completed(runtime):
     run = await _start(runtime)
     step = await runtime.start_step(StartStepRequest(run_id=run.run_id))

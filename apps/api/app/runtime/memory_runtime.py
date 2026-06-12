@@ -240,6 +240,7 @@ class MemoryRuntime:
             step_id=step.step_id,
             state_node_id=step.state_node_id,
             sequence_no=seq,
+            event_source=request.event_source,
             role=request.role,
             event_type=request.event_type,
             content=content,

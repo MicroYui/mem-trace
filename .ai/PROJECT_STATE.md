@@ -1,7 +1,7 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**: access-log fidelity/eval persistence schema are implemented, retrieval has a side-effect-free trace pipeline used by the hot path, replay service + deterministic diff semantics are implemented, replay/observability HTTP APIs are wired, quality/safety metrics + profiler phase expansion are implemented, dashboard tables include eval rows plus a workspace-scoped observability summary, static JSON/Markdown/HTML observability reports are generated through the runtime/API/CLI entrypoint, and full regression + deterministic benchmark pass. **Showcase assets + reproducibility baseline are complete**. **Context Compaction C0+C1+C2+C3+C4+C5 are complete**. **Failure-aware Negative Memory Injection I1-I6 are complete**: I1 added gate three-way `accept / degrade / reject` with failure learning enabled only for variant_2; I2 added runtime `NegativeEvidence`, shared `retrieval/negative_evidence.py` builder, and packer `avoided_attempts`; I3 wired controller hot path; I4 wired inspect_access/replay/metrics and hardened safe observability rendering; I5 added benchmark `case_10` safe failure learning + `case_11` sanitized destructive failure, evaluator positive/negative block split, new metrics/rates, dashboard benchmark summary sync, and acceptance checks `variant_2_learns_from_failure_without_repeating` + `variant_2_sanitizes_destructive_failure_without_leakage` (runs 36→44); I6 finalized ROADMAP / CONTEXT_COMPACTION_PLAN / failure-aware plan / `.ai` memory sync and documented I7 as deferred. The next recommended work is **Phase 3.5 SDK/LangGraph adapter (§6)** or **6-strategy benchmark expansion (§7)**; I7 compaction negative retained remains deferred.
-- **Last updated:** 2026-06-12 (Failure-aware Negative Memory Injection I6 doc sync/finalization complete and reviewed. Updated `docs/design/FAILURE_AWARE_NEGATIVE_MEMORY_PLAN.md` to mark I6 complete, updated `docs/design/ROADMAP.md` §9.1 and recommended sequencing to mark the Failure-aware first batch complete, added a deferred C6/I7 cross-feature note to `docs/design/CONTEXT_COMPACTION_PLAN.md`, refreshed `AGENTS.md` and `.ai` project memory so the next priority is Phase 3.5 SDK/LangGraph adapter or 6-strategy benchmark expansion while I7 remains deferred. Review found one stale memory/design-doc detail: `.ai/OPEN_QUESTIONS.md` Post-P2 order did not mention Failure-aware I1-I6, and `CONTEXT_COMPACTION_PLAN.md` verification still quoted the C5-era `8/8` global acceptance count without noting the current `10/10`; both are fixed, and `.ai/PITFALLS.md` now records the acceptance-count drift trap. Follow-up full implementation review found and fixed three security gaps: `risk_flags.contains_secret` on completed/active memories now hard-rejects as `secret`; inspect/replay observability rendering now honors explicit secret metadata even when regex redaction misses; replay candidate key/value metadata is hidden for sanitized/unsafe/secret candidates so raw failed commands or secrets cannot leak outside `content`. Post-fix verification: `uv run python -m compileall -q apps/api/app && uv run pytest apps/api/tests/retrieval/test_gate.py apps/api/tests/retrieval/test_packer_negative.py apps/api/tests/retrieval/test_retrieval_flow.py apps/api/tests/observability/test_replay.py apps/api/tests/observability/test_metrics.py apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py -q` -> 103 passed; `uv run pytest -q` -> 254 passed; `uv run python -m app.benchmark.runner --output-dir reports && bash scripts/reproduce.sh` -> `acceptance.passed=true (10/10 checks true)`. A bits-code-guard-style review report was generated at `/tmp/mem-trace_failure_aware_review/report.html`.)
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**. **Showcase assets + reproducibility baseline are complete**. **Context Compaction C0-C5 are complete**. **Failure-aware Negative Memory Injection I1-I6 are complete** and I7 compaction negative retained remains deferred. **Phase 3.5 SDK/LangGraph adapter/CLI is complete through S6** per `docs/design/SDK_ADAPTER_PLAN.md`: **S1 Core `event_source` passthrough**, **S0 Packaging & workspace skeleton**, **S2a Shared SDK contract + in-process backend**, **S2b HTTP backend + `/v1/runs/{run_id}/steps` route + backend isomorphism**, **S3 LangGraph adapter**, **S4 examples**, **S5 CLI**, and **S6 README/project-memory finalization** are complete. Next implementation slice should be selected from **ROADMAP §7 6-strategy benchmark expansion** or **§10/§11 Provider Registry / Key Ontology**.
+- **Last updated:** 2026-06-12 (Phase 3.5 SDK/LangGraph Adapter S6 complete after detailed review. README now documents the Python SDK / HTTP / CLI three-entrypoint story and links examples; `docs/design/SDK_ADAPTER_PLAN.md` and `docs/design/ROADMAP.md` mark Phase 3.5 complete; `.ai` memory and `AGENTS.md` no longer point next work at S6. Review found and fixed one P2 HTTP/in-process isomorphism gap: `HttpBackend.flush_session(...)` now uses body JSON via `POST /v1/sessions/flush`, preserving arbitrary string `session_id` values such as `tenant/session` while the legacy path route remains.)
 
 ## Doc Reorg (2026-06-10)
 
@@ -12,9 +12,149 @@
 
 ## Current Goal
 
-Post-P3A **Context Compaction (ROADMAP §9)** is complete through C5. Its Issue-by-Issue plan is `docs/design/CONTEXT_COMPACTION_PLAN.md`. C0-C5 now cover structured pack results, over-budget retained constraints + audit notice, durable compaction logs, observability/replay wiring, rule/LLM summarizer provider seam, config-gated rolling history summary, and an end-to-end benchmark/report/replay quality loop.
+Post-P3A **Context Compaction (ROADMAP §9)** is complete through C5 and **Failure-aware Negative Memory Injection** is complete through I6. I7 (compaction negative retained) remains deferred.
 
-**Failure-aware Negative Memory Injection first batch is complete through I6** — Issue-by-Issue plan `docs/design/FAILURE_AWARE_NEGATIVE_MEMORY_PLAN.md`. I5 added benchmark `case_10` / `case_11`, explicit evaluator split between positive context and `avoided_attempts` negative evidence, new present-gated rates (`positive_contamination_rate`, `negative_lesson_retained_rate`, `correct_action_rate`, `unsafe_negative_leakage_rate`, `sanitized_notice_rate`), runner/report/dashboard summary plumbing, and acceptance `variant_2_learns_from_failure_without_repeating` + `variant_2_sanitizes_destructive_failure_without_leakage`. I6 finalized docs/project-memory sync; I7 (compaction negative retained) remains deferred. Next choose Phase 3.5 SDK/LangGraph adapter (§6) or 6-strategy benchmark expansion (§7).
+**Completed slice:** Phase 3.5 **Python SDK + LangGraph Adapter + CLI** (`docs/design/SDK_ADAPTER_PLAN.md`) is complete through S6. S1 lets callers stamp event entrypoint origin via `WriteEventRequest.event_source`, preserving `None` by default for existing callers. S0 makes `packages/python-sdk` an importable uv workspace package with pytest discovery. S2a/S2b provide isomorphic in-process and HTTP SDK backends over `MemoryRuntime` / `/v1`, including `/v1/runs/{run_id}/steps` and body-based `/v1/sessions/flush` for arbitrary session ids. S3 provides LangGraph-style lifecycle hooks and wrapper without hard-depending on langgraph. S4 adds runnable custom-loop and LangGraph-adapter examples. S5 provides the `memtrace` CLI with safe HTTP-default operational semantics. S6 finalizes README, ROADMAP, this plan, and `.ai` project memory.
+
+## Implemented (Phase 3.5 SDK/LangGraph Adapter S6 — docs/project-memory sync + review hardening — 2026-06-12)
+
+- **README three-entrypoint docs:** `README.md` now has a “Three entrypoints: Python SDK / HTTP / CLI” section with SDK quickstart, HTTP backend constructor, LangGraph adapter snippet, CLI usage, and links to `examples/README.md`, `examples/simple_agent`, and `examples/langgraph_adapter`.
+- **Plan/roadmap finalization:** `docs/design/SDK_ADAPTER_PLAN.md` marks S6 complete and records the review hardening; `docs/design/ROADMAP.md` appendix step 6 now marks Phase 3.5 complete and points next candidates to §7 / §10 / §11 while keeping TS SDK, OTel, MCP, IDE plugins, Go/Rust collectors deferred.
+- **Project-memory sync:** `AGENTS.md`, `.ai/REQUIREMENTS.md`, `.ai/IMPLEMENTATION_PLAN.md`, `.ai/OPEN_QUESTIONS.md`, `.ai/DECISIONS.md`, and `.ai/PITFALLS.md` are updated so new sessions no longer treat S6 as pending. ADR-019 records the durable SDK/HTTP/adapter/CLI entrypoint decision.
+- **Review hardening:** Detailed code review found one P2 backend-isomorphism defect: `flush_session("tenant/session")` worked in-process but HTTP path interpolation would 404. `apps/api/app/api/routes.py` now exposes body-based `POST /v1/sessions/flush` with `FlushRequest`; `HttpBackend.flush_session(...)` uses that endpoint; tests cover path-sensitive session ids and shared-runtime backend isomorphism.
+
+## Latest Verification (2026-06-12 Phase 3.5 S6)
+
+- Detailed S6 code review: checked `event_source`, HTTP/in-process isomorphism, CLI `--http` policy, LangGraph optional dependency, and steps-route missing-run `[]`. Found and fixed the single P2 `flush_session` path-sensitive session-id issue described above.
+- Documentation consistency review: found stale S6-next references in `SDK_ADAPTER_PLAN`, `ROADMAP`, `README`, `AGENTS.md`, `.ai/PROJECT_STATE.md`, `.ai/REQUIREMENTS.md`, `.ai/IMPLEMENTATION_PLAN.md`, and `.ai/OPEN_QUESTIONS.md`; all were updated.
+- Targeted post-fix verification: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests/test_http_backend.py packages/python-sdk/tests/test_backend_isomorphism.py apps/api/tests/api/test_steps_route.py -q` -> **7 passed**.
+- SDK package regression: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests -q` -> **27 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app packages/python-sdk/src examples` -> passed.
+- Full regression: `uv run --extra dev pytest -q` -> **285 passed**.
+- Deterministic benchmark + reproducibility: `uv run python -m app.benchmark.runner --output-dir reports && bash scripts/reproduce.sh` -> **acceptance.passed=true (10/10 checks true)**.
+
+## Implemented (Phase 3.5 SDK/LangGraph Adapter S5 — CLI — 2026-06-12)
+
+- **CLI entrypoint:** `packages/python-sdk/src/memtrace_sdk/cli.py` now implements the declared `memtrace` console script with `argparse` and `main(argv=None) -> int`.
+- **Backend policy:** operational commands (`start-run`, `start-step`, `write-event`, `retrieve`, `timeline`, `state-tree`, `inspect-access`, `report`) require `--http URL` so separate CLI invocations do not silently use a fresh in-memory runtime and lose state. `demo` is explicitly one-shot and supports `--in-process` or `--http`.
+- **Command surface:** global `--http`, `--workspace-id`, `--api-key`, and `--json` are supported. Command results are serialized through the SDK/core Pydantic DTOs via `model_dump(mode="json")` where applicable.
+- **Entrypoint stamping:** CLI-generated events from `write-event` and demo seeding pass `event_source="cli"` explicitly rather than inheriting the SDK facade's default `"sdk"` label.
+- **Error handling:** `NotFoundError`, `BadRequestError`, and generic `MemTraceError` map to non-zero exit codes and actionable stderr messages.
+- **Coverage:** `packages/python-sdk/tests/test_cli.py` covers in-process demo, HTTP-backed demo over a persistent ASGITransport runtime, operational command `--http` enforcement, ASGITransport-backed JSON retrieve, missing access 404/non-zero exit, and CLI `event_source` stamping.
+
+## Latest Verification (2026-06-12 Phase 3.5 S5)
+
+- RED: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests/test_cli.py -q` -> **4 failed** on the S0 not-implemented CLI stub.
+- GREEN targeted S5: same command after implementation + event-source / HTTP-demo coverage -> **6 passed**.
+- Manual CLI smoke: `uv run --package memtrace-sdk memtrace demo --in-process` -> printed `baseline_1 action: npm test`, `variant_2 action: bun test`, `contamination eliminated: true`.
+- SDK package tests: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests -q` -> **26 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app packages/python-sdk/src examples` -> passed.
+- Full regression: `uv run --extra dev pytest -q` -> **284 passed**.
+- Detailed S5 review: CLI implementation was checked against `docs/design/SDK_ADAPTER_PLAN.md` S5 requirements and the bits-code-guard review dimensions (logic, business semantics, security, robustness, performance, quality). No P0/P1/P2 implementation defects were found. One stale `.ai/PROJECT_STATE.md` tail recommendation still saying to implement S5 was corrected to S6 docs/project-memory finalization.
+
+## Implemented (Phase 3.5 SDK/LangGraph Adapter S4 — examples — 2026-06-12)
+
+- **Custom-loop example:** `examples/simple_agent/main.py` uses `MemTrace.in_memory(...)` only through the public SDK facade to seed the canonical Bun-vs-Node failed-branch isolation scenario, retrieve with `baseline_1` and `variant_2`, and print the contamination contrast (`npm test` vs `bun test`). Its local `decide_action(...)` deliberately excludes `avoided_attempts` / `source="negative_evidence"` blocks from positive action choice so I3 negative evidence does not make the agent retry the failed npm path.
+- **LangGraph example:** `examples/langgraph_adapter/main.py` builds a minimal graph around `MemTraceLangGraphAdapter.wrap_node(...)` when `langgraph` is installed, and otherwise prints an actionable `pip install memtrace-sdk[langgraph]` skip message and exits successfully.
+- **Example README:** `examples/README.md` documents both commands, expected output, backend choice, and the clean LangGraph skip behavior.
+- **Smoke coverage:** `packages/python-sdk/tests/test_examples_smoke.py` imports and awaits both example `main()` functions, asserting the simple-agent contrast and either LangGraph execution with `event_source="langgraph_adapter"` or a deterministic skip.
+
+## Latest Verification (2026-06-12 Phase 3.5 S4)
+
+- RED: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests/test_examples_smoke.py -q` -> **2 failed** on missing `examples/simple_agent/main.py` and `examples/langgraph_adapter/main.py`.
+- GREEN targeted S4: same command -> **2 passed**.
+- Manual examples smoke: `uv run --package memtrace-sdk python examples/simple_agent/main.py && uv run --package memtrace-sdk python examples/langgraph_adapter/main.py` -> printed `baseline_1 action: npm test`, `variant_2 action: bun test`, `contamination eliminated: true`, and the clean LangGraph-not-installed skip message.
+- SDK package tests: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests -q` -> **20 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app packages/python-sdk/src examples` -> passed.
+- Full regression: `uv run --extra dev pytest -q` -> **278 passed**.
+- Deterministic benchmark + reproducibility: `uv run python -m app.benchmark.runner --output-dir reports && bash scripts/reproduce.sh` -> **acceptance.passed=true (10/10 checks true)**.
+- Detailed S4 review: examples implementation and project-memory sync were rechecked against `docs/design/SDK_ADAPTER_PLAN.md` S4 requirements; no Critical / Important / Minor implementation defects were found. One stale `.ai/OPEN_QUESTIONS.md` reference still pointing to S4 as next was corrected to S5 CLI.
+
+## Implemented (Phase 3.5 SDK/LangGraph Adapter S3 — lifecycle hooks — 2026-06-12)
+
+- **Adapter hooks:** `memtrace_sdk.langgraph_adapter.MemTraceLangGraphAdapter` exposes `before_node(node_name, query, ...)`, `after_node(step_id, content=..., ...)`, and `on_error(step_id, error_message=...)` over the existing `MemTrace` facade, so it works with in-process and HTTP backends.
+- **Trace semantics:** `before_node` starts a runtime step and retrieves a `MemoryContext`; `after_node` writes node output with `event_source="langgraph_adapter"` and finishes the step as completed, returning both `WriteEventResult` and `FinishStepResult`; `on_error` writes an error event, finishes failed, then calls `rollback_branch(...)`.
+- **Optional wrapper:** `wrap_node(...)` composes before/after/on_error around an async callable and injects `memtrace_step` / `memtrace_context` into mutable dict state for prompt construction.
+- **No hard LangGraph dependency:** S3 hooks do not import langgraph, so `memtrace-sdk` remains usable without the optional extra until a future true graph-compilation helper needs it.
+- **Tests:** `packages/python-sdk/tests/test_langgraph_adapter.py` covers successful lifecycle tracing and event-source stamping, rollback behavior with positive-context isolation that allows only I3 `avoided_attempts` / `source="negative_evidence"` failure lessons, and wrapper success/failure behavior. `test_imports.py` now includes the public `MemTraceLangGraphAdapter` export.
+
+## Latest Verification (2026-06-12 Phase 3.5 S3)
+
+- RED: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests/test_langgraph_adapter.py -q` -> **3 failed** on missing `MemTraceLangGraphAdapter`.
+- GREEN targeted S3: same command -> **3 passed**.
+- SDK package tests: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests -q` -> **18 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app packages/python-sdk/src` -> passed.
+- Full regression: `uv run --extra dev pytest -q` -> **276 passed**.
+- Detailed S3 review: no P0/P1/P2 defects found in `MemTraceLangGraphAdapter`, public export, S3 tests, or memory sync; stale historical wording in `docs/design/SDK_ADAPTER_PLAN.md` §0/§1/§3 was corrected and the LangGraph adapter testing pitfall was recorded in `.ai/PITFALLS.md`.
+
+## Implemented (Phase 3.5 SDK/LangGraph Adapter S2b — HTTP backend + route/isomorphism — 2026-06-12)
+
+- **Missing HTTP read route:** `GET /v1/runs/{run_id}/steps` now returns `list[AgentStep]` via `MemoryRuntime.get_steps(run_id)`, matching existing run-level read endpoints by returning `[]` for missing runs instead of 404.
+- **HTTP backend:** `memtrace_sdk.backends.HttpBackend` mirrors the current `/v1` surface: run/step/event lifecycle, retrieval, flush, timeline/state/steps/profile/memories, single-step reads, inspect/replay, observability summary/report, and dashboard tables.
+- **HTTP contract details:** request bodies use `model_dump(mode="json")`; single responses parse with `Model.model_validate(...)`; list responses parse with `TypeAdapter(list[Model])`; HTTP 404 maps to SDK `NotFoundError`, 400 maps to `BadRequestError`, and other HTTP errors map to `MemTraceError`; optional `api_key` sends `Authorization: Bearer ...`.
+- **Lifecycle + facade:** `HttpBackend` supports owned vs injected `httpx.AsyncClient`; `aclose()` closes only owned clients; async context manager support is wired through both backend and `MemTrace`; `MemTrace.http(...)` constructs the HTTP client facade.
+- **Tests:** `packages/python-sdk/tests/test_http_backend.py` covers HTTP golden path, single-step reads, error mapping, and lifecycle; `packages/python-sdk/tests/test_backend_isomorphism.py` proves shared-runtime in-process vs HTTP shape equivalence, cross-backend read/write visibility, single-step 404 equivalence, all list-shaped read responses, and missing-run `get_steps == []`; `apps/api/tests/api/test_steps_route.py` covers the route directly.
+
+## Latest Verification (2026-06-12 Phase 3.5 S2b)
+
+- RED: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests/test_http_backend.py packages/python-sdk/tests/test_backend_isomorphism.py apps/api/tests/api/test_steps_route.py -q` -> **6 failed** on missing `MemTrace.http`, missing `HttpBackend` constructor, and missing `/v1/runs/{run_id}/steps` route.
+- GREEN targeted S2b: same command -> **6 passed**.
+- Review hardening: tightened `test_backend_isomorphism.py` to use one shared `MemoryRuntime` behind both `MemTrace.in_process(...)` and ASGITransport HTTP, to compare `timeline`, `state-tree`, `steps`, `profile`, and `memories` list parsing across backends, and to cover existing `/v1/steps/{step_id}` through SDK `get_step`.
+- SDK package tests: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests -q` -> **15 passed**.
+- API steps route: `uv run --extra dev pytest apps/api/tests/api/test_steps_route.py -q` -> **2 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app packages/python-sdk/src` -> passed.
+- Full regression: `uv run --extra dev pytest -q` -> **273 passed**.
+
+## Implemented (Phase 3.5 SDK/LangGraph Adapter S2a — Shared SDK contract + in-process backend — 2026-06-12)
+
+- **Shared SDK contract:** `packages/python-sdk/src/memtrace_sdk/types.py` re-exports the core runtime request/result/domain DTOs and enums from `app.runtime.models`, keeping SDK users off private `app.*` imports while preserving a single Pydantic schema vocabulary.
+- **Backend Protocol:** `memtrace_sdk.backends.Backend` now mirrors the runtime hot path plus read/observability methods: run/step/event lifecycle, retrieval, flush, timeline/state/steps/profile/memories, inspect/replay, observability summary/report, and dashboard tables.
+- **In-process backend:** `InProcessBackend(runtime)` directly wraps `MemoryRuntime`, adapts `flush_session(session_id: str)`, provides `InProcessBackend.in_memory(**runtime_kwargs)`, maps runtime missing-resource errors plus missing `inspect_access`/`replay_access`/`replay_run` to SDK `NotFoundError`, maps invalid observability report requests to `BadRequestError`, and preserves `[]` for empty-list reads such as missing-run `get_steps`.
+- **Unified client:** `MemTrace(backend)` forwards calls to any backend; `MemTrace.in_process(runtime)` and `MemTrace.in_memory(...)` provide convenient constructors; `write_event(...)` stamps `event_source="sdk"` only when the caller omitted an explicit source.
+- **Tests:** `packages/python-sdk/tests/test_inprocess_backend.py` covers SDK golden path, structured retrieved context, inspect access, default SDK event source, explicit source preservation, backend-direct source preservation, existing-runtime wrapping, backend in-memory construction, missing-resource `NotFoundError`, observability-report `BadRequestError`, and empty-list read preservation.
+
+## Latest Verification (2026-06-12 Phase 3.5 S2a)
+
+- RED: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests/test_inprocess_backend.py -q` -> failed during collection with `ImportError: cannot import name 'EventRole' from 'memtrace_sdk.types'`, proving the missing shared type contract.
+- GREEN after review hardening: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests/test_inprocess_backend.py -q` -> **10 passed**.
+- SDK package tests: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests -q` -> **11 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app packages/python-sdk/src` -> passed.
+- Full regression: `uv run --extra dev pytest -q` -> **267 passed**.
+
+## Implemented (Phase 3.5 SDK/LangGraph Adapter S0 — Packaging & workspace skeleton — 2026-06-12)
+
+- **Workspace wiring:** root `pyproject.toml` now declares `packages/python-sdk` as a uv workspace member and maps `memtrace` to the local workspace package for SDK dependency resolution.
+- **SDK package skeleton:** `packages/python-sdk/pyproject.toml` defines `memtrace-sdk` with `memtrace`, `pydantic`, and `httpx` dependencies, optional `langgraph` / `dev` extras, and the future `memtrace` console script.
+- **Importable public stubs:** `memtrace_sdk` exports real placeholder symbols (`MemTrace`, `Backend`, `InProcessBackend`, `HttpBackend`, `MemTraceError`, `NotFoundError`, `BadRequestError`) so S2 can replace behavior without changing import paths.
+- **CLI stub:** `memtrace_sdk.cli.main(...)` exists and raises a clear not-implemented message until S5 supplies the real CLI.
+- **Pytest discovery:** SDK tests are part of the root suite; pytest uses importlib import mode to avoid collision between `apps/api/tests` and `packages/python-sdk/tests` packages.
+
+## Latest Verification (2026-06-12 Phase 3.5 S0)
+
+- RED: `uv run pytest packages/python-sdk/tests/test_imports.py -q` -> failed with `ModuleNotFoundError: No module named 'memtrace_sdk'`.
+- GREEN: `uv run --package memtrace-sdk --extra dev pytest packages/python-sdk/tests/test_imports.py -q` -> **1 passed**.
+- Workspace resolution: `uv sync` -> resolved workspace successfully.
+- Import smoke: `uv run --package memtrace-sdk python -c "import memtrace_sdk; from memtrace_sdk import ..."` -> imported all public stubs.
+- CLI stub smoke: `uv run --package memtrace-sdk memtrace` -> prints `memtrace CLI is not implemented yet (see SDK_ADAPTER_PLAN.md S5)`.
+- Package build: `uv build --package memtrace-sdk` -> built `memtrace_sdk-0.1.0.tar.gz` and `memtrace_sdk-0.1.0-py3-none-any.whl` (local `dist/` artifacts removed after verification).
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app packages/python-sdk/src` -> passed.
+- Review: S0-focused review found no P0/P1/P2 defects; the only discovered pitfall was the already-fixed duplicate top-level `tests` package collection collision, now documented in `.ai/PITFALLS.md`.
+- Full regression: first run found pytest collection collision for duplicate top-level `tests` packages; after `--import-mode=importlib`, `uv run --extra dev pytest -q` -> **257 passed**.
+
+## Implemented (Phase 3.5 SDK/LangGraph Adapter S1 — event_source passthrough — 2026-06-12)
+
+- **Request contract:** `WriteEventRequest` now exposes optional `event_source`, matching the already-persisted `AgentEvent.event_source` / ORM / SQL mapping contract.
+- **Runtime passthrough:** `MemoryRuntime.write_event(...)` passes `request.event_source` into the created `AgentEvent`, so in-process and HTTP callers can stamp entrypoint origin without route changes.
+- **Compatibility:** omitting `event_source` keeps `AgentEvent.event_source is None`, preserving existing behavior for all current demos, benchmarks, tests, and API callers.
+- **S1 review:** diff-only review covered `apps/api/app/runtime/models.py` and `apps/api/app/runtime/memory_runtime.py`; no P0/P1/P2 defects found. Report: `/tmp/mem-trace_s1_review/report.html`.
+
+## Latest Verification (2026-06-12 Phase 3.5 S1)
+
+- RED: `uv run --extra dev pytest apps/api/tests/runtime/test_memory_runtime_trace.py::test_write_event_stamps_event_source apps/api/tests/runtime/test_memory_runtime_trace.py::test_write_event_event_source_defaults_none -q` -> **1 failed / 1 passed**, expected failure `None == "sdk"`.
+- GREEN: same targeted command -> **2 passed**.
+- Runtime trace regression: `uv run --extra dev pytest apps/api/tests/runtime/test_memory_runtime_trace.py -q` -> **13 passed**.
+- Compile check: `uv run python -m compileall -q apps/api/app` -> passed.
+- Full regression: `uv run --extra dev pytest -q` -> **256 passed**.
 
 ## Implemented (Failure-aware Negative Memory Injection I6 — doc sync/finalization — 2026-06-12)
 
@@ -545,4 +685,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2), Phase 3-A backend observability, showcase/reproducibility baseline, Context Compaction C0-C5, and Failure-aware Negative Memory Injection I1-I6 are complete. The §0 immediate decisions are resolved (2026-06-10, ADR-015/016/017): deterministic embedding stays the default with a real embedding as an optional config-gated provider; hosted demo gets a lightweight Hosted-Demo Safety Mode first; raw secrets are never stored by default. **Recommended next work:** choose either **Phase 3.5 SDK/LangGraph adapter (§6)** to prove MemTrace as a pluggable runtime for arbitrary agent loops, or **6-strategy benchmark expansion (§7)** to strengthen evaluation claims. I7 compaction negative retained remains deferred as an independent cross-feature design. Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.
+The MVP (P0+P1+P2), Phase 3-A backend observability, showcase/reproducibility baseline, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, and Phase 3.5 SDK/LangGraph adapter/CLI S1-S6 are complete. **Recommended next work:** choose the next backlog slice from `docs/design/ROADMAP.md`, preferably **§7 complete 6-strategy benchmark expansion** (no memory / long-context / vector / state-aware / +gate / +reflection, plus benchmark persistence) or **§10/§11 Provider Registry / Controlled Memory Key Ontology**. I7 compaction negative retained remains deferred as an independent cross-feature design. Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.

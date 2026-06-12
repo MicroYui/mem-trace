@@ -21,6 +21,7 @@ from app.runtime.models import (
     DashboardTables,
     FinishStepRequest,
     FinishStepResult,
+    FlushRequest,
     FlushResult,
     MemoryContext,
     MemoryItem,
@@ -109,6 +110,12 @@ async def flush_session(session_id: str, rt: MemoryRuntime = Depends(get_runtime
     return await rt.flush_session(session_id)
 
 
+@router.post("/sessions/flush", response_model=FlushResult)
+async def flush_session_by_body(req: FlushRequest, rt: MemoryRuntime = Depends(get_runtime)) -> FlushResult:
+    """Flush a session id supplied in JSON so arbitrary string ids remain HTTP-safe."""
+    return await rt.flush_session(req.session_id)
+
+
 # --------------------------------------------------------------------------- #
 # Read APIs
 # --------------------------------------------------------------------------- #
@@ -125,6 +132,11 @@ async def get_state_tree(run_id: str, rt: MemoryRuntime = Depends(get_runtime)) 
 @router.get("/runs/{run_id}/profile", response_model=list[ProfileEvent])
 async def get_profile(run_id: str, rt: MemoryRuntime = Depends(get_runtime)) -> list[ProfileEvent]:
     return await rt.get_profile(run_id)
+
+
+@router.get("/runs/{run_id}/steps", response_model=list[AgentStep])
+async def get_steps(run_id: str, rt: MemoryRuntime = Depends(get_runtime)) -> list[AgentStep]:
+    return await rt.get_steps(run_id)
 
 
 @router.get("/access/{access_id}", response_model=AccessInspection)
