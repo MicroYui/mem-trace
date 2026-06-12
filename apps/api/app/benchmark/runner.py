@@ -9,13 +9,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from app.benchmark.cases import ALL_STRATEGIES, CASES, BenchmarkCase
 from app.benchmark.evaluator import CaseMetrics, evaluate_case
 from app.runtime.memory_runtime import MemoryRuntime
-from app.runtime.models import BenchmarkCaseRecord, BenchmarkResultRecord, RetrievalRequest, RetrievalStrategy
+from app.runtime.models import (
+    BenchmarkCaseRecord,
+    BenchmarkResultRecord,
+    EvalCaseRecord,
+    EvalResultRecord,
+    EvalRunRecord,
+    RetrievalRequest,
+    RetrievalStrategy,
+)
 from app.runtime.repository import InMemoryRepository, Repository
 
 
@@ -37,6 +47,7 @@ _METRIC_FIELDS = [
     "correct_action",
     "unsafe_negative_leakage",
     "sanitized_notice_present",
+    "reflection_retention_hit",
     "retrieval_latency_ms",
     "gate_latency_ms",
 ]
@@ -98,6 +109,9 @@ def _summarize(results: list[CaseMetrics]) -> dict[str, dict[str, float]]:
             "sanitized_notice_rate": _average(
                 [r.sanitized_notice_present for r in rows if r.sanitized_notice_present_present]
             ),
+            "reflection_retention_hit_rate": _average(
+                [r.reflection_retention_hit for r in rows if r.reflection_retention_hit_present]
+            ),
             "avg_retrieval_latency_ms": _average([r.retrieval_latency_ms for r in rows]),
             "avg_gate_latency_ms": _average([r.gate_latency_ms for r in rows]),
             "avg_memory_token_overhead": _average([r.actual_tokens for r in rows]),
@@ -111,13 +125,31 @@ def _other_workspace_markers(case: BenchmarkCase) -> list[str]:
     return []
 
 
+async def _snapshot_access_counts(repo: Repository, *, workspace_id: str) -> dict[str, int]:
+    """Capture seed-time access counts so each strategy sees identical state."""
+    return {
+        mem.memory_id: mem.access_count
+        for mem in await repo.list_memories(workspace_id=workspace_id)
+    }
+
+
+async def _restore_access_counts(repo: Repository, snapshot: dict[str, int], *, workspace_id: str) -> None:
+    """Restore access counts mutated by a prior strategy's retrieval bump."""
+    for mem in await repo.list_memories(workspace_id=workspace_id):
+        if mem.memory_id in snapshot and mem.access_count != snapshot[mem.memory_id]:
+            mem.access_count = snapshot[mem.memory_id]
+            await repo.update_memory(mem)
+
+
 async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | None = None) -> list[CaseMetrics]:
     repo = repo or InMemoryRepository()
     runtime = MemoryRuntime(repo, default_workspace_id=workspace_id)
     seed = await case.seed(runtime, workspace_id)
+    access_count_snapshot = await _snapshot_access_counts(repo, workspace_id=seed.workspace_id)
 
     metrics: list[CaseMetrics] = []
     for strategy in ALL_STRATEGIES:
+        await _restore_access_counts(repo, access_count_snapshot, workspace_id=seed.workspace_id)
         ctx = await runtime.retrieve_context(
             RetrievalRequest(
                 run_id=seed.run_id,
@@ -153,6 +185,8 @@ async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | N
                 unsafe_negative_markers=seed.extra.get("unsafe_negative_markers"),
                 failure_learning_case=seed.extra.get("failure_learning_case", False),
                 sanitized_failure_case=seed.extra.get("sanitized_failure_case", False),
+                reflection_marker=seed.extra.get("reflection_marker"),
+                reflection_case=seed.extra.get("reflection_case", False),
             )
         )
     return metrics
@@ -178,6 +212,53 @@ async def _persist_results(repo: Repository, results: list[CaseMetrics]) -> None
         )
 
 
+async def _persist_eval_records(
+    repo: Repository,
+    results: list[CaseMetrics],
+    summary: dict[str, dict[str, float]],
+    acceptance: dict[str, Any],
+) -> None:
+    """Persist the benchmark run into the eval_* tables (ROADMAP §7 / §2).
+
+    ``passed=True`` records that the row executed; per-strategy task quality is
+    in ``metrics["task_success"]`` and the overall verdict is in the run config.
+    """
+    strategy_values = [s.value for s in ALL_STRATEGIES]
+    eval_run = await repo.add_eval_run(
+        EvalRunRecord(
+            name="deterministic_benchmark",
+            status="completed",
+            finished_at=datetime.now(timezone.utc),
+            config={
+                "strategies": strategy_values,
+                "summary": summary,
+                "acceptance": acceptance,
+            },
+        )
+    )
+    for case in CASES:
+        await repo.add_eval_case(
+            EvalCaseRecord(
+                eval_case_id=case.case_id,
+                name=case.name,
+                description=case.description,
+                tags=["benchmark"],
+                config={"strategies": strategy_values},
+            )
+        )
+    for row in results:
+        await repo.add_eval_result(
+            EvalResultRecord(
+                eval_run_id=eval_run.eval_run_id,
+                eval_case_id=row.case_id,
+                run_id=None,
+                strategy=row.strategy,
+                metrics=row.as_dict(),
+                passed=True,
+            )
+        )
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -186,12 +267,13 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     lines = [
         "# MemTrace P1 Benchmark Report",
         "",
-        "Deterministic benchmark for `baseline_0`, `baseline_1`, `variant_1`, and `variant_2`.",
+        "Deterministic benchmark for six retrieval strategies: "
+        "`baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, and `variant_3`.",
         "",
         "## Summary",
         "",
-        "| Strategy | task_success_rate | correct_active_path_hit_rate | failed_branch_contamination_rate | cross_workspace_leakage_rate | tool_sensitive_blocked_rate | procedural_reuse_hit_rate | compaction_trigger_rate | constraint_retention_hit_rate | unsafe_compaction_leakage_rate | negative_lesson_retained_rate | unsafe_negative_leakage_rate | sanitized_notice_rate | avg_compression_ratio | avg_memory_token_overhead |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Strategy | task_success_rate | correct_active_path_hit_rate | failed_branch_contamination_rate | cross_workspace_leakage_rate | tool_sensitive_blocked_rate | procedural_reuse_hit_rate | compaction_trigger_rate | constraint_retention_hit_rate | unsafe_compaction_leakage_rate | negative_lesson_retained_rate | unsafe_negative_leakage_rate | sanitized_notice_rate | reflection_retention_hit_rate | avg_compression_ratio | avg_memory_token_overhead |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for strategy, row in payload["summary"].items():
         lines.append(
@@ -200,7 +282,7 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
             "{tool_sensitive_blocked_rate} | {procedural_reuse_hit_rate} | {compaction_trigger_rate} | "
             "{constraint_retention_hit_rate} | {unsafe_compaction_leakage_rate} | "
             "{negative_lesson_retained_rate} | {unsafe_negative_leakage_rate} | {sanitized_notice_rate} | "
-            "{avg_compression_ratio} | {avg_memory_token_overhead} |".format(
+            "{reflection_retention_hit_rate} | {avg_compression_ratio} | {avg_memory_token_overhead} |".format(
                 strategy=strategy,
                 **row,
             )
@@ -262,6 +344,7 @@ def _acceptance(summary: dict[str, dict[str, float]], results: list[CaseMetrics]
     """
     b1 = summary.get("baseline_1", {})
     v2 = summary.get("variant_2", {})
+    v3 = summary.get("variant_3", {})
     case8_b0 = _case_success(results, "case_8_no_memory_baseline", "baseline_0")
     case8_v2 = _case_success(results, "case_8_no_memory_baseline", "variant_2")
     checks = {
@@ -330,6 +413,22 @@ def _acceptance(summary: dict[str, dict[str, float]], results: list[CaseMetrics]
             and _case_metric(results, "case_11_sanitized_failed_destructive_attempt", "variant_2", "unsafe_negative_leakage") == 0
             and _case_metric(results, "case_11_sanitized_failed_destructive_attempt", "variant_2", "sanitized_notice_present") == 1
         ),
+        "variant_3_retains_high_value_memory_under_budget": (
+            v3.get("reflection_retention_hit_rate", 0.0) == 1.0
+            and v2.get("reflection_retention_hit_rate", 1.0) == 0.0
+            and _case_present(results, "case_12_reflection_retention", "variant_3", "reflection_retention_hit_present")
+            and _case_present(results, "case_12_reflection_retention", "variant_2", "reflection_retention_hit_present")
+            and _case_metric(results, "case_12_reflection_retention", "variant_3", "reflection_retention_hit") == 1
+            and _case_metric(results, "case_12_reflection_retention", "variant_2", "reflection_retention_hit") == 0
+        ),
+        "long_context_shows_token_bloat": (
+            "long_context" in summary
+            and "variant_2" in summary
+            and summary["long_context"].get("avg_memory_token_overhead", 0.0)
+            == max(row.get("avg_memory_token_overhead", 0.0) for row in summary.values())
+            and summary["long_context"].get("avg_memory_token_overhead", 0.0)
+            > summary["variant_2"].get("avg_memory_token_overhead", 0.0)
+        ),
     }
     return {"passed": all(checks.values()), "checks": checks}
 
@@ -339,14 +438,17 @@ async def run_benchmark(output_dir: str | Path = "reports", repo: Repository | N
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    workspace_prefix = f"bench_{uuid4().hex}" if repo is not None else "bench"
     results: list[CaseMetrics] = []
     for index, case in enumerate(CASES, start=1):
-        results.extend(await _run_case(case, workspace_id=f"bench_ws_{index}", repo=repo))
-
-    if repo is not None:
-        await _persist_results(repo, results)
+        results.extend(await _run_case(case, workspace_id=f"{workspace_prefix}_ws_{index}", repo=repo))
 
     summary = _summarize(results)
+    acceptance = _acceptance(summary, results)
+    if repo is not None:
+        await _persist_results(repo, results)
+        await _persist_eval_records(repo, results, summary, acceptance)
+
     payload: dict[str, Any] = {
         "cases": [
             {"case_id": c.case_id, "name": c.name, "description": c.description}
@@ -356,7 +458,7 @@ async def run_benchmark(output_dir: str | Path = "reports", repo: Repository | N
         "summary": summary,
         "results": [r.as_dict() for r in results],
         "metric_fields": list(_METRIC_FIELDS),
-        "acceptance": _acceptance(summary, results),
+        "acceptance": acceptance,
     }
     _write_json(out / "benchmark_results.json", payload)
     _write_markdown(out / "benchmark_report.md", payload)

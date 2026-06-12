@@ -139,12 +139,18 @@ class GateDecisionType(str, Enum):
 
 
 class RetrievalStrategy(str, Enum):
-    """Strategy modes used by demo/benchmark to prove the differentiation."""
+    """Strategy modes used by demo/benchmark to prove the differentiation.
+
+    Ordered as the 6-strategy benchmark layers (ROADMAP §7):
+    no-memory -> long-context -> vector -> state-aware -> +gate -> +reflection.
+    """
 
     baseline_0 = "baseline_0"  # no memory
+    long_context = "long_context"  # all-context baseline: same gate/log path, policies disabled, include_all + unbounded budget
     baseline_1 = "baseline_1"  # vector/lexical memory only, ignores state + gate
     variant_1 = "variant_1"  # state-aware rerank, failed branch only downweighted
     variant_2 = "variant_2"  # state-aware + hard/risk admission gate
+    variant_3 = "variant_3"  # variant_2 + deterministic reflection-lite retention rerank
 
 
 class ProfilePhase(str, Enum):

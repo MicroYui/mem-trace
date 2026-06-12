@@ -992,6 +992,9 @@ def _benchmark_summary_from_records(results) -> dict[str, dict[str, float]]:
             "sanitized_notice_rate": _avg([
                 float(r.get("sanitized_notice_present", 0)) for r in rows if r.get("sanitized_notice_present_present")
             ]),
+            "reflection_retention_hit_rate": _avg([
+                float(r.get("reflection_retention_hit", 0)) for r in rows if r.get("reflection_retention_hit_present")
+            ]),
             "avg_retrieval_latency_ms": _avg([float(r.get("retrieval_latency_ms", 0)) for r in rows]),
             "avg_gate_latency_ms": _avg([float(r.get("gate_latency_ms", 0)) for r in rows]),
             "avg_memory_token_overhead": _avg([float(r.get("actual_tokens", 0)) for r in rows]),

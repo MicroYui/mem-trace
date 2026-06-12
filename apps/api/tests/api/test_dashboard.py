@@ -40,13 +40,13 @@ async def test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows(tmp_
 
     assert resp.status_code == 200
     payload = resp.json()
-    # Eleven benchmark cases: case 3 seeds a competing workspace run, case 6
+    # Twelve benchmark cases: case 3 seeds a competing workspace run, case 6
     # seeds a prior completed run plus a follow-up run, and each remaining case
-    # seeds one benchmark run, for 13 runs total.
-    assert len(payload["runs"]) == 13
-    assert len(payload["accesses"]) == 44
-    assert len(payload["benchmark_cases"]) == 11
-    assert len(payload["benchmark_results"]) == 44
+    # (including case 12) seeds one benchmark run, for 14 runs total.
+    assert len(payload["runs"]) == 14
+    assert len(payload["accesses"]) == 72
+    assert len(payload["benchmark_cases"]) == 12
+    assert len(payload["benchmark_results"]) == 72
     assert payload["benchmark_summary"]["variant_2"]["failed_branch_contamination_rate"] == 0
     assert payload["benchmark_summary"]["variant_2"]["constraint_retention_hit_rate"] == 1
     for field in [
@@ -61,10 +61,16 @@ async def test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows(tmp_
         "correct_action_rate",
         "unsafe_negative_leakage_rate",
         "sanitized_notice_rate",
+        "reflection_retention_hit_rate",
         "avg_compression_ratio",
         "avg_memory_token_overhead",
     ]:
         assert payload["benchmark_summary"]["variant_2"][field] == report["summary"]["variant_2"][field]
+    assert (
+        payload["benchmark_summary"]["variant_3"]["reflection_retention_hit_rate"]
+        == report["summary"]["variant_3"]["reflection_retention_hit_rate"]
+        == 1
+    )
 
 
 def test_dashboard_benchmark_summary_filters_cross_workspace_rate_by_present_flag():

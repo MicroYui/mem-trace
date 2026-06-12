@@ -50,6 +50,24 @@ _RETRIEVABLE_STATUSES = frozenset(
 )
 
 
+def retention_score(mem: MemoryItem) -> float:
+    """Deterministic reflection-lite retention priority.
+
+    Rewards trustworthy, fresh, and frequently-used memories. ``access_count``
+    is a usage-frequency signal the variant_2 soft-ranking does not use; it is
+    capped at 10 accesses to keep the score in [0, 1]. This is a placeholder for
+    the real ROADMAP §3.2 Reflection/Forgetting scheduler.
+    """
+    usage = _clamp01(mem.access_count / 10.0)
+    trust = _clamp01(mem.trust_score)
+    freshness = _clamp01(mem.freshness_score)
+    return round(0.4 * trust + 0.3 * freshness + 0.3 * usage, 6)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
 @dataclass(slots=True)
 class RetrievalCandidateTrace:
     """Candidate plus retrieval score components for trace/replay."""
@@ -190,6 +208,7 @@ class RetrievalController:
     ) -> RetrievalPipelineTrace:
         """Run selection -> gate -> pack without persistence or mutations."""
         budget = request.token_budget or self._default_budget
+        long_context = request.strategy == RetrievalStrategy.long_context
         access_kwargs: dict[str, Any] = {"access_id": access_id} if access_id is not None else {}
         access = MemoryAccessLog(
             **access_kwargs,
@@ -225,6 +244,7 @@ class RetrievalController:
             run_id=request.run_id,
             query=request.query,
             top_k=request.top_k,
+            include_all=long_context,
         )
         retrieval_ms = int((time.perf_counter() - t0) * 1000)
         phase_profile[ProfilePhase.retrieval.value] = {
@@ -271,8 +291,14 @@ class RetrievalController:
             },
         }
 
-        # rank accepted by final score desc
-        accepted_outcomes.sort(key=lambda o: o.final_score, reverse=True)
+        # rank accepted by final score desc; variant_3 reflection-lite blends a
+        # retention priority so high-retention memories survive tight budgets.
+        if config.enable_reflection_rerank:
+            for outcome in accepted_outcomes:
+                outcome.final_score = round(0.5 * outcome.final_score + 0.5 * retention_score(outcome.memory), 6)
+            accepted_outcomes.sort(key=lambda o: o.final_score, reverse=True)
+        else:
+            accepted_outcomes.sort(key=lambda o: o.final_score, reverse=True)
         accepted_memories = [o.memory for o in accepted_outcomes]
         memories_by_id = {candidate.memory.memory_id: candidate.memory for candidate in candidates}
         negative_evidence = build_negative_evidence(outcomes, memories_by_id, max_blocks=3)
@@ -289,6 +315,21 @@ class RetrievalController:
             negative_evidence=negative_evidence,
             compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
         )
+        if long_context and pack_result.pre_compaction_tokens > budget:
+            # Long-context is the intentional all-context baseline: keep the
+            # normal gate/logging path, but expand the effective budget to the
+            # exact pre-compaction size instead of relying on a fixed sentinel.
+            budget = max(budget, pack_result.pre_compaction_tokens)
+            access.token_budget = budget
+            pack_result = pack_context(
+                active_node=active_node,
+                accepted=accepted_memories,
+                token_budget=budget,
+                active_path=active_path,
+                prelude_blocks=prelude_blocks,
+                negative_evidence=negative_evidence,
+                compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
+            )
         blocks = pack_result.blocks
         actual_tokens = pack_result.used
         retained_negative_evidence_count = sum(
@@ -468,6 +509,7 @@ class RetrievalController:
         run_id: str,
         query: str,
         top_k: int,
+        include_all: bool = False,
     ) -> list[RetrievalCandidateTrace]:
         # Workspace-scoped retrieval is the permission filter: cross-workspace
         # memories never become candidates, so leakage is impossible by
@@ -499,7 +541,7 @@ class RetrievalController:
             # project constraints are always relevant to coding queries
             if m.memory_type.value == "project" and rel == 0.0:
                 rel = 0.2
-            if rel > 0.0:
+            if rel > 0.0 or include_all:
                 scored.append(
                     RetrievalCandidateTrace(
                         memory=m,
@@ -509,6 +551,8 @@ class RetrievalController:
                     )
                 )
         scored.sort(key=lambda c: c.relevance_score, reverse=True)
+        if include_all:
+            return scored
         return scored[:top_k]
 
     @staticmethod

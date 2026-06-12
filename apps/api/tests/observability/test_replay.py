@@ -130,6 +130,60 @@ async def test_replay_access_has_no_drift_when_repository_unchanged():
 
 
 @pytest.mark.asyncio
+async def test_variant_3_replay_reconstructs_reflection_reranked_context():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_reflection")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_replay_reflection", task="recall fact", workspace_id="ws_replay_reflection")
+    )
+    planning = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await runtime.finish_step(FinishStepRequest(run_id=run.run_id, step_id=planning.step_id, status=StepStatus.completed))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_replay_reflection",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="users service RETAIN-CRITICAL-FACT",
+            summary="users service retain-critical-fact",
+            branch_status=BranchStatus.completed,
+            access_count=10,
+        )
+    )
+    for i in range(6):
+        await repo.add_memory(
+            MemoryItem(
+                workspace_id="ws_replay_reflection",
+                run_id=run.run_id,
+                memory_type=MemoryType.episodic,
+                content="users service reference users service reference note",
+                summary=f"users service reference note {i}",
+                branch_status=BranchStatus.completed,
+                access_count=0,
+            )
+        )
+    recall = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="recall critical fact"))
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=recall.step_id,
+            query="users service reference",
+            strategy=RetrievalStrategy.variant_3,
+            token_budget=32,
+            top_k=20,
+        )
+    )
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    original_text = " ".join(block.content.lower() for block in replay.original_context_blocks_reconstructed)
+    replayed_text = " ".join(block.content.lower() for block in replay.replayed_context_blocks)
+    assert "retain-critical-fact" in original_text
+    assert "retain-critical-fact" in replayed_text
+    assert not [d for d in replay.diffs if d.kind.startswith("context_block_")]
+
+
+@pytest.mark.asyncio
 async def test_replay_detects_decision_drift_after_memory_branch_status_change():
     runtime, repo, run_id, step_id, memory_id = await _seed_runtime()
     access_id = await _retrieve_once(runtime, run_id, step_id)

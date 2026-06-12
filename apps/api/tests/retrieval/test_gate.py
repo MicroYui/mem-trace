@@ -165,6 +165,17 @@ def test_baseline_1_config_disables_hard_policy():
     assert out.accepted is True  # failed branch admitted by baseline
 
 
+def test_long_context_config_matches_baseline_1_all_policies_off():
+    cfg = GateConfig.for_strategy(RetrievalStrategy.long_context)
+    assert cfg.enable_hard_policy is False
+    assert cfg.enable_risk_policy is False
+    assert cfg.enable_state_match is False
+    assert cfg.allow_failed_branch is True
+    assert cfg.allow_rolled_back is True
+    assert cfg.enable_failure_learning is False
+    assert cfg.enable_reflection_rerank is False
+
+
 def test_variant_1_downweights_failed_branch_without_reject():
     cfg = GateConfig.for_strategy(RetrievalStrategy.variant_1)
     completed = _eval(_mem(branch_status=BranchStatus.completed), config=cfg)
@@ -177,13 +188,36 @@ def test_variant_1_downweights_failed_branch_without_reject():
     ("strategy", "expected"),
     [
         (RetrievalStrategy.baseline_0, False),
+        (RetrievalStrategy.long_context, False),
         (RetrievalStrategy.baseline_1, False),
         (RetrievalStrategy.variant_1, False),
         (RetrievalStrategy.variant_2, True),
+        (RetrievalStrategy.variant_3, True),
     ],
 )
-def test_failure_learning_enabled_only_for_variant_2(strategy, expected):
+def test_failure_learning_enabled_for_full_gate_strategies_only(strategy, expected):
     assert GateConfig.for_strategy(strategy).enable_failure_learning is expected
+
+
+def test_variant_3_config_is_variant_2_plus_reflection_rerank():
+    cfg = GateConfig.for_strategy(RetrievalStrategy.variant_3)
+    assert cfg.enable_hard_policy is True
+    assert cfg.enable_risk_policy is True
+    assert cfg.enable_state_match is True
+    assert cfg.enable_failure_learning is True
+    assert cfg.enable_reflection_rerank is True
+
+
+def test_reflection_rerank_enabled_only_for_variant_3():
+    for strategy in (
+        RetrievalStrategy.baseline_0,
+        RetrievalStrategy.long_context,
+        RetrievalStrategy.baseline_1,
+        RetrievalStrategy.variant_1,
+        RetrievalStrategy.variant_2,
+    ):
+        assert GateConfig.for_strategy(strategy).enable_reflection_rerank is False
+    assert GateConfig.for_strategy(RetrievalStrategy.variant_3).enable_reflection_rerank is True
 
 
 def test_variant_2_enables_failure_learning_for_safe_failed_branch():

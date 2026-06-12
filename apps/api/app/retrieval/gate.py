@@ -12,9 +12,12 @@ Three policy layers run in order (mvp.md section 7):
 
 Strategy modes tune which layers apply, so the demo/benchmark can prove the
 differentiation comes from state-awareness + gating, not from different data:
+  - long_context : no hard/risk policy, no state match; controller later stuffs
+                   all retrievable workspace memory into an unbounded budget
   - baseline_1 : no hard/risk policy, no state match (pure relevance top-k)
   - variant_1  : state-aware rerank; failed branch downweighted, not rejected
   - variant_2  : full hard + risk policy + state-aware ranking
+  - variant_3  : variant_2 + deterministic reflection-lite retention rerank
 """
 from __future__ import annotations
 
@@ -41,12 +44,13 @@ class GateConfig:
     enable_risk_policy: bool = True
     enable_state_match: bool = True
     enable_failure_learning: bool = False
+    enable_reflection_rerank: bool = False
     # failed-branch downweight factor for variant_1 (no hard reject)
     failed_branch_penalty: float = 0.5
 
     @classmethod
     def for_strategy(cls, strategy: RetrievalStrategy) -> "GateConfig":
-        if strategy == RetrievalStrategy.baseline_1:
+        if strategy in (RetrievalStrategy.baseline_1, RetrievalStrategy.long_context):
             return cls(
                 enable_hard_policy=False,
                 enable_risk_policy=False,
@@ -66,8 +70,10 @@ class GateConfig:
             )
         if strategy == RetrievalStrategy.variant_2:
             return cls(enable_failure_learning=True)
+        if strategy == RetrievalStrategy.variant_3:
+            return cls(enable_failure_learning=True, enable_reflection_rerank=True)
         # baseline_0 has no candidates, but keep its config contract explicit:
-        # failure learning is only enabled for variant_2.
+        # neither failure learning nor reflection rerank is enabled.
         return cls(enable_failure_learning=False)
 
 

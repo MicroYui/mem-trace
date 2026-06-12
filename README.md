@@ -92,11 +92,13 @@ uv run python -m app.benchmark.runner --output-dir reports
 Strategies:
 
 - `baseline_0`: no memory.
+- `long_context`: includes every retrievable workspace memory with hard/risk/state policies disabled and an effectively unbounded budget, exposing token bloat and failed-branch contamination while preserving the same trace/gate logging path.
 - `baseline_1`: vector/lexical memory without state-aware isolation or admission gate.
 - `variant_1`: state-aware retrieval.
 - `variant_2`: state-aware retrieval plus admission gate.
+- `variant_3`: state-aware + gate + deterministic reflection-lite / retention-rerank (placeholder for the ROADMAP §3.2 Reflection scheduler).
 
-The benchmark covers project preference, failed-branch isolation, workspace isolation, tool-call safety, explicit correction, completed-run reuse, stale rejection, no-memory failure recovery, and over-budget context compaction retention.
+The benchmark covers project preference, failed-branch isolation, workspace isolation, tool-call safety, explicit correction, completed-run reuse, stale rejection, no-memory failure recovery, over-budget context compaction retention, safe failure learning (`case_10`), sanitized destructive-failure handling (`case_11`), and reflection-retention under a tight budget (`case_12_reflection_retention`).
 
 ## Observability and replay
 
@@ -241,4 +243,4 @@ uv run python -m app.benchmark.runner --output-dir reports
 
 ## Roadmap
 
-The completed MVP, Phase 3-A observability work, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, Phase 3.5 SDK/LangGraph adapter/CLI work, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are expanded 6-strategy benchmarks and provider/key-ontology work.
+The completed MVP, Phase 3-A observability work, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, Phase 3.5 SDK/LangGraph adapter/CLI work, the completed 6-strategy benchmark/eval-table slice, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are Provider Registry and Controlled Memory Key Ontology.

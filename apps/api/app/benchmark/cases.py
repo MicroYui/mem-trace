@@ -16,6 +16,7 @@ Cases:
   7. stale_rejection      - expired legacy endpoint memory -> gate rejects as stale
   8. no_memory_baseline   - constraint only in memory -> no-memory baseline fails
   9. over_budget_compaction - tiny context budget -> retain key=value facts safely
+ 12. reflection_retention - +reflection keeps a high-retention memory under budget
 """
 from __future__ import annotations
 
@@ -441,6 +442,57 @@ async def _seed_sanitized_failed_destructive_attempt(rt: MemoryRuntime, ws: str)
             "sanitized_failure_case": True,
         },
     )
+
+
+# --------------------------------------------------------------------------- #
+# Case 12: reflection-lite retention (variant_3 keeps a high-retention memory
+# under a tight budget where variant_2 drops it).
+# --------------------------------------------------------------------------- #
+async def _seed_reflection_retention(rt: MemoryRuntime, ws: str) -> SeedResult:
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="recall critical fact", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id, status=StepStatus.completed))
+
+    # High-retention but lower-relevance memory (frequently used).
+    await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+        MemoryItem(
+            workspace_id=ws,
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="users service RETAIN-CRITICAL-FACT",
+            summary="users service retain-critical-fact",
+            branch_status=BranchStatus.completed,
+            access_count=10,
+        )
+    )
+    # Low-retention, higher-relevance noise (never used).
+    for i in range(6):
+        await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+            MemoryItem(
+                workspace_id=ws,
+                run_id=run.run_id,
+                memory_type=MemoryType.episodic,
+                content="users service reference users service reference note",
+                summary=f"users service reference note {i}",
+                branch_status=BranchStatus.completed,
+                access_count=0,
+            )
+        )
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="recall critical fact"))
+    return SeedResult(
+        run.run_id,
+        s2.step_id,
+        "users service reference",
+        ws,
+        extra={
+            "token_budget": 32,
+            "top_k": 20,
+            "reflection_marker": "retain-critical-fact",
+            "reflection_case": True,
+        },
+    )
+
+
 CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_1_project_preference", "Project preference persistence",
                   "User states Bun, not Node.js; later commands should use bun.",
@@ -475,13 +527,18 @@ CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_11_sanitized_failed_destructive_attempt", "Sanitized failed destructive attempt",
                   "A destructive rolled-back attempt should surface only as a sanitized negative-evidence notice.",
                   _seed_sanitized_failed_destructive_attempt),
+    BenchmarkCase("case_12_reflection_retention", "Reflection-lite retention",
+                  "A frequently-used high-retention memory is retained under a tight budget by +reflection where +gate drops it.",
+                  _seed_reflection_retention),
 ]
 
 ALL_STRATEGIES = [
     RetrievalStrategy.baseline_0,
+    RetrievalStrategy.long_context,
     RetrievalStrategy.baseline_1,
     RetrievalStrategy.variant_1,
     RetrievalStrategy.variant_2,
+    RetrievalStrategy.variant_3,
 ]
 
 

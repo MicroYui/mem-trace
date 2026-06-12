@@ -1,7 +1,7 @@
 # Project State
 
-- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**. **Showcase assets + reproducibility baseline are complete**. **Context Compaction C0-C5 are complete**. **Failure-aware Negative Memory Injection I1-I6 are complete** and I7 compaction negative retained remains deferred. **Phase 3.5 SDK/LangGraph adapter/CLI is complete through S6** per `docs/design/SDK_ADAPTER_PLAN.md`: **S1 Core `event_source` passthrough**, **S0 Packaging & workspace skeleton**, **S2a Shared SDK contract + in-process backend**, **S2b HTTP backend + `/v1/runs/{run_id}/steps` route + backend isomorphism**, **S3 LangGraph adapter**, **S4 examples**, **S5 CLI**, and **S6 README/project-memory finalization** are complete. Next implementation slice should be selected from **ROADMAP §7 6-strategy benchmark expansion** or **§10/§11 Provider Registry / Key Ontology**.
-- **Last updated:** 2026-06-12 (Phase 3.5 SDK/LangGraph Adapter S6 complete after detailed review. README now documents the Python SDK / HTTP / CLI three-entrypoint story and links examples; `docs/design/SDK_ADAPTER_PLAN.md` and `docs/design/ROADMAP.md` mark Phase 3.5 complete; `.ai` memory and `AGENTS.md` no longer point next work at S6. Review found and fixed one P2 HTTP/in-process isomorphism gap: `HttpBackend.flush_session(...)` now uses body JSON via `POST /v1/sessions/flush`, preserving arbitrary string `session_id` values such as `tenant/session` while the legacy path route remains.)
+- **Current state:** P0 + P1 complete; **P2 complete (6/6)** and committed. **Phase 3-A is complete (Issues 1-8)**. **Showcase assets + reproducibility baseline are complete**. **Context Compaction C0-C5 are complete**. **Failure-aware Negative Memory Injection I1-I6 are complete** and I7 compaction negative retained remains deferred. **Phase 3.5 SDK/LangGraph adapter/CLI is complete through S6** per `docs/design/SDK_ADAPTER_PLAN.md`. **ROADMAP §7 "完整 6 策略对比 + benchmark 落库" is complete through Task 11 full regression/reproducibility/project-memory sync.**
+- **Last updated:** 2026-06-12 (Completed detailed Task 11 review and hardening. The review found and fixed one P1 repeatability defect: persisted `run_benchmark(..., repo=same_repo)` invocations reused fixed `bench_ws_{index}` workspaces, so the second run could read prior-run memories and fail acceptance; `run_benchmark` now uses an isolated workspace prefix per persisted invocation. Final six-strategy review also fixed two P2 edge defects: `long_context` no longer relies on a fixed `1_000_000` token sentinel and instead expands to the exact pre-compaction budget only when needed, and replay original-view reconstruction now applies the same `variant_3` reflection-lite rerank as the hot path. The repeatability test now compares deterministic summary fields while excluding timing-only latency fields. Stale next-action references in `.ai/REQUIREMENTS.md`, `docs/design/ROADMAP.md`, `README.md`, and the plan background wording were refreshed; `.ai/PITFALLS.md` records the workspace-isolation, long-context sentinel, replay-rerank, and latency-summary traps. Verification after final fixes: `uv run --extra dev pytest apps/api/tests/retrieval/test_retrieval_flow.py::test_long_context_preserves_scope_lifecycle_logs_and_unbounded_budget apps/api/tests/observability/test_replay.py::test_variant_3_replay_reconstructs_reflection_reranked_context -q` -> **2 passed**; `uv run --extra dev pytest apps/api/tests/retrieval/ apps/api/tests/observability/test_replay.py -q` -> **100 passed**; `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py apps/api/tests/runtime/test_models_strategy.py -q` -> **24 passed**; `uv run --extra dev python -m compileall -q apps/api/app && uv run --extra dev pytest -q` -> **305 passed**; `uv run python -m app.benchmark.runner --output-dir reports && bash scripts/reproduce.sh` -> `acceptance.passed=true (12/12 checks true)`; six-strategy report-shape check printed `OK {'baseline_0': 0.0, 'long_context': 44.1667, 'baseline_1': 25.4167, 'variant_1': 25.4167, 'variant_2': 26.8333, 'variant_3': 26.5}`. Next candidates are ROADMAP §10/§11 Provider Registry / Controlled Memory Key Ontology; deterministic reflection-lite remains a placeholder to be superseded by the real §3.2 Reflection/Forgetting scheduler.)
 
 ## Doc Reorg (2026-06-10)
 
@@ -13,6 +13,204 @@
 ## Current Goal
 
 Post-P3A **Context Compaction (ROADMAP §9)** is complete through C5 and **Failure-aware Negative Memory Injection** is complete through I6. I7 (compaction negative retained) remains deferred.
+
+**Completed slice:** ROADMAP §7 **6-strategy benchmark expansion + eval-table persistence** (`docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md`) is complete through Task 11. `RetrievalStrategy` exposes `long_context` and `variant_3`; `GateConfig` exposes the strategy config contract; controller `long_context` performs include-all candidate stuffing with dynamically unbounded packing (expanding to exact pre-compaction tokens when needed, not a fixed sentinel); the benchmark runner restores seed-time `access_count` before each strategy for fairness; controller `variant_3` applies deterministic reflection-lite accepted-memory rerank and persists the rerank score in gate logs so replay reuses the original ordering; benchmark `ALL_STRATEGIES` runs in six-strategy order; `case_12_reflection_retention` expands the matrix to 12×6=72 with a real `variant_3` retention contrast; Task 7 surfaces reflection/token-bloat metrics in summary/Markdown/acceptance; Task 8 persists every benchmark run into `eval_cases` / `eval_runs` / `eval_results` when a repo is supplied; Task 9 surfaces `reflection_retention_hit_rate` through the dashboard benchmark summary; Task 10 updates ROADMAP/README/plan docs; Task 11 verifies full regression/reproducibility/report shape. **Next candidates:** ROADMAP §10/§11 Provider Registry / Controlled Memory Key Ontology.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 11 — full regression/reproducibility/project-memory sync — 2026-06-12)
+
+- **Full closeout:** ROADMAP §7 is now complete through Task 11. The deterministic six-strategy benchmark is locked at `baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3` with 12 cases × 6 strategies = 72 result/access rows and 14 seeded runs.
+- **Reflection-lite verification:** `variant_3`'s deterministic reflection-lite retention rerank remains a deliberate placeholder over accepted memories; `case_12_reflection_retention` proves it retains the high-retention marker where `variant_2` drops it, and ROADMAP §3.2 records that the real Reflection/Forgetting scheduler must later supersede this placeholder.
+- **Fairness, replay, and persistence:** the benchmark runner's seed-time `access_count` snapshot/restore keeps strategy comparisons order-independent. Task 11 review additionally hardened persisted benchmark repeatability: `run_benchmark(..., repo=repo)` now uses an isolated workspace prefix per invocation so prior benchmark memories in the same repository cannot pollute later candidate sets, while still persisting stable `eval_cases` plus one `eval_run` and 72 `eval_results` per invocation without a migration. Final review hardening also made `long_context` dynamically expand to the exact pre-compaction budget if a fixed request budget would drop blocks, and made `variant_3` persist its reflection-lite rerank score in `MemoryGateLog.final_score` so replay original-view reconstruction can reuse the original ordering without recomputing retention from later-mutated memory state.
+- **Acceptance and report shape:** benchmark acceptance now has 12/12 checks, including `variant_3_retains_high_value_memory_under_budget` and `long_context_shows_token_bloat`; `long_context` has the largest average memory-token overhead in the generated report.
+- **Project-memory sync:** current state and next-action guidance now point beyond §7 to ROADMAP §10/§11 Provider Registry / Controlled Memory Key Ontology. Detailed review refreshed stale README/ROADMAP/REQUIREMENTS wording and recorded the repeatability trap in `.ai/PITFALLS.md`. I7 compaction negative retained remains deferred independently.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 11)
+
+- Compile + full regression: `uv run --extra dev python -m compileall -q apps/api/app && uv run --extra dev pytest -q` -> **305 passed**.
+- Deterministic benchmark + reproducibility: `uv run python -m app.benchmark.runner --output-dir reports && bash scripts/reproduce.sh` -> passed; printed `acceptance.passed=true (12/12 checks true)`.
+- Report-shape check: `uv run python - <<'PY' ...` over `reports/benchmark_results.json` -> `OK {'baseline_0': 0.0, 'long_context': 44.1667, 'baseline_1': 25.4167, 'variant_1': 25.4167, 'variant_2': 26.8333, 'variant_3': 26.5}` with exact six-strategy order, 72 results, and both new acceptance checks true.
+- Review hardening RED/GREEN: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py::test_run_benchmark_eval_persistence_is_repeatable -q` failed before the isolated workspace-prefix fix (`second["acceptance"]["passed"] is False`), then passed after the fix; the test now compares deterministic summary fields while excluding timing-only latency fields. Additional RED/GREEN hardening covered `long_context` dynamic unbounded budget and `variant_3` replay rerank reconstruction: `uv run --extra dev pytest apps/api/tests/retrieval/test_retrieval_flow.py::test_long_context_preserves_scope_lifecycle_logs_and_unbounded_budget apps/api/tests/observability/test_replay.py::test_variant_3_replay_reconstructs_reflection_reranked_context -q` failed before the fixes, then passed after them. Benchmark/dashboard/strategy suite: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py apps/api/tests/runtime/test_models_strategy.py -q` -> **24 passed**; retrieval+replay suite -> **100 passed**.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 10 — docs/ROADMAP reflection-lite supersede note — 2026-06-12)
+
+- **ROADMAP §7 completion:** `docs/design/ROADMAP.md` now marks the full 6-strategy comparison and benchmark eval-table persistence items complete, recording the strategy mapping `baseline_0` / `long_context` / `baseline_1` / `variant_1` / `variant_2` / `variant_3` and the `eval_runs` / `eval_cases` / `eval_results` persistence reuse of the Phase 3-A eval schema.
+- **Reflection-lite supersede note:** ROADMAP §3.2 now explicitly states that `variant_3`'s deterministic reflection-lite `retention_score` is only a placeholder over accepted memories and must be replaced by the real Reflection/Forgetting scheduler's `retention_score / reflection_priority` once that slice lands.
+- **README strategy docs:** `README.md` now lists all six deterministic benchmark strategies and describes `long_context` as same trace/gate logging path with policies disabled + effectively unbounded budget, while `variant_3` is documented as state-aware + gate + deterministic reflection-lite.
+- **README benchmark coverage:** Task 10 review fixed the adjacent README coverage sentence so it no longer stops at compaction; it now includes safe failure learning (`case_10`), sanitized destructive-failure handling (`case_11`), and reflection-retention under a tight budget (`case_12_reflection_retention`).
+- **Appendix next-action accuracy:** Task 10 review fixed ROADMAP appendix wording so §7 is described as function/docs complete but still awaiting Task 11 reproducibility closeout before switching to §10/§11.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 10 Steps 1-5 complete with the observed README command-guard verification result.
+- **Review/memory refresh:** Detailed Task 10 review found no remaining P0/P1/P2 defects after the README coverage sentence and ROADMAP appendix next-action fixes. `.ai/PITFALLS.md` now records the doc-closeout trap that README strategy lists and benchmark coverage prose must be updated together.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 10)
+
+- README command guard: `uv run --extra dev pytest apps/api/tests/integration/test_reproducibility.py -q` -> **4 passed**.
+- Post-review README command guard: `uv run --extra dev pytest apps/api/tests/integration/test_reproducibility.py -q` -> **4 passed**.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 9 — dashboard reflection summary — 2026-06-12)
+
+- **Dashboard summary metric:** `apps/api/app/runtime/memory_runtime.py` now adds `reflection_retention_hit_rate` to `_benchmark_summary_from_records(...)`, using only rows with `reflection_retention_hit_present` so dashboard aggregation matches `apps/api/app/benchmark/runner.py`.
+- **Dashboard/API coverage:** `apps/api/tests/api/test_dashboard.py::test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows` now asserts dashboard/report parity for the new field and the concrete `variant_3` reflection-retention success value.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 9 Steps 1-3 complete.
+- **Final review:** Detailed Task 9 review found no P0/P1/P2 defects after checking dashboard/runner summary parity, present-flag-gated aggregation, response schema compatibility, test strength, and memory freshness. Report: `/tmp/mem-trace_task9_final_review/report.html` / `/tmp/mem-trace_task9_final_review/report.md`.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 9)
+
+- RED: `uv run --extra dev pytest apps/api/tests/api/test_dashboard.py::test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows -q` -> failed as expected with `KeyError: 'reflection_retention_hit_rate'`.
+- GREEN targeted: same command after dashboard summary implementation -> **1 passed**.
+- Dashboard suite: `uv run --extra dev pytest apps/api/tests/api/test_dashboard.py -q` -> **3 passed**.
+- Affected benchmark+dashboard suite: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py -q` -> **23 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app/runtime/memory_runtime.py` -> passed.
+- Final focused review: checked metric-name parity with runner summary, present-flag filtering, dashboard JSON shape, test coverage, plan status, and project-memory freshness; result **0 P0 / 0 P1 / 0 P2**. Report: `/tmp/mem-trace_task9_final_review/report.html` / `/tmp/mem-trace_task9_final_review/report.md`.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 8 — eval-table persistence — 2026-06-12)
+
+- **Eval run persistence:** `apps/api/app/benchmark/runner.py` adds `_persist_eval_records(...)` and calls it after computing summary/acceptance, so `run_benchmark(..., repo=repo)` writes one completed `EvalRunRecord` with `finished_at` and config containing strategy order, summary, and acceptance verdict.
+- **Eval cases/results:** The runner upserts one `EvalCaseRecord` per benchmark case (`tags=["benchmark"]`) and writes one `EvalResultRecord` per case/strategy row with `passed=True`; task-quality remains in `metrics["task_success"]`, and overall benchmark pass/fail remains in `EvalRunRecord.config["acceptance"]["passed"]`.
+- **Repeatability:** Case rows are stable across repeated benchmark runs, while each run appends a fresh eval run and 72 result rows.
+- **Coverage:** `apps/api/tests/benchmark/test_runner.py::test_run_benchmark_persists_eval_records` locks the eval run/case/result shape and `case_12` reflection metric persistence; `test_run_benchmark_eval_persistence_is_repeatable` locks stable cases plus appended runs/results.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 8 Steps 1-5 complete.
+- **Final review:** Detailed Task 8 review found no P0/P1/P2 defects after checking eval write shape, payload/config consistency, repeatability/upsert semantics, dashboard/schema compatibility, and stale memory references.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 8)
+
+- RED: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py::test_run_benchmark_persists_eval_records apps/api/tests/benchmark/test_runner.py::test_run_benchmark_eval_persistence_is_repeatable -q` -> **2 failed** as expected with `len(eval_cases) == 0`.
+- GREEN targeted: same command after `_persist_eval_records(...)` implementation -> **2 passed**.
+- Benchmark runner regression: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py -q` -> **20 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app/benchmark/runner.py` -> passed.
+- Affected suite: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py apps/api/tests/observability/test_eval_records.py -q` -> **27 passed**.
+- Benchmark sanity: `uv run python -m app.benchmark.runner --output-dir reports` -> passed.
+- Focused review report: `/tmp/mem-trace_task8_review/report.html` / `/tmp/mem-trace_task8_review/report.md`; result **0 P0 / 0 P1 / 0 P2**.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 7 — reflection/token-bloat acceptance — 2026-06-12)
+
+- **Summary metric:** `apps/api/app/benchmark/runner.py` now summarizes `reflection_retention_hit` as `reflection_retention_hit_rate`, gated by `reflection_retention_hit_present` so only `case_12` contributes.
+- **Report/JSON exposure:** `_METRIC_FIELDS` includes `reflection_retention_hit`, and the Markdown summary now describes all six strategies and includes a `reflection_retention_hit_rate` column alongside token overhead.
+- **Acceptance checks:** `_acceptance(...)` now verifies `variant_3_retains_high_value_memory_under_budget` using both summary rates and explicit `case_12` row metrics, and verifies `long_context_shows_token_bloat` by requiring `long_context` to have the maximum average memory-token overhead and exceed `variant_2`.
+- **Coverage:** `apps/api/tests/benchmark/test_runner.py::test_acceptance_includes_reflection_and_long_context_checks` locks both new acceptance checks, `variant_3`/`variant_2` reflection contrast, and the long-context overhead invariant. Review-hardening tests also require a real `variant_2` comparator and `case_12` present rows so partial summaries cannot make the new checks pass accidentally.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 7 Steps 1-7 complete.
+- **Final review:** Detailed review found no remaining P0/P1/P2 defects after updating the Task 7 plan snippet to match the hardened comparator-required acceptance logic.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 7)
+
+- RED: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py::test_acceptance_includes_reflection_and_long_context_checks -q` -> failed as expected with `KeyError: 'variant_3_retains_high_value_memory_under_budget'`.
+- GREEN targeted: same command after runner summary/report/acceptance implementation -> **1 passed**.
+- Review hardening RED/GREEN: targeted negative pair initially failed on `test_long_context_token_bloat_acceptance_requires_variant_2_comparator` (`True is False`) before requiring an explicit `variant_2` comparator, then passed -> **2 passed**.
+- Benchmark runner regression: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py -q` -> **18 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app/benchmark/runner.py` -> passed.
+- Affected suite: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py -q` -> **21 passed**.
+- Benchmark sanity: `uv run python -m app.benchmark.runner --output-dir reports && uv run python - <<'PY' ...` -> printed `OK {'baseline_0': 0.0, 'long_context': 44.1667, 'baseline_1': 25.4167, 'variant_1': 25.4167, 'variant_2': 26.8333, 'variant_3': 26.5}`.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 6 — `case_12_reflection_retention` — 2026-06-12)
+
+- **New benchmark case:** `apps/api/app/benchmark/cases.py` adds `case_12_reflection_retention`, seeding one frequently used high-retention episodic memory (`RETAIN-CRITICAL-FACT`, `access_count=10`) plus six higher-relevance low-retention noise memories.
+- **Reflection metric:** `apps/api/app/benchmark/evaluator.py` adds `reflection_retention_hit` and `reflection_retention_hit_present`, scored when `reflection_case=True` and the configured marker reaches context.
+- **Runner wiring:** `apps/api/app/benchmark/runner.py` passes `reflection_marker` and `reflection_case` from `SeedResult.extra` into `evaluate_case(...)`.
+- **Matrix counts:** benchmark/report persistence assertions now expect 12 cases × 6 strategies = 72 result/access rows; dashboard table assertions now expect 14 seeded runs, 12 benchmark cases, and 72 benchmark results/accesses.
+- **Fixture tuning:** `case_12` uses `token_budget=32` so protected active-state/path plus compaction notice still leave enough ordinary-budget room for exactly the intended contrast: `variant_2` drops the high-retention marker, while `variant_3` keeps it. Production rerank logic was not changed.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 6 Steps 1-9 complete.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 6)
+
+- RED: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py::test_evaluator_scores_reflection_retention_hit_from_marker_presence -q` -> failed as expected with `TypeError: evaluate_case() got an unexpected keyword argument 'reflection_marker'`.
+- GREEN targeted: same command after evaluator metric implementation -> **1 passed**.
+- Case persistence/contrast guard: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py::test_run_benchmark_persists_cases_and_results -q` -> **1 passed**.
+- Affected suite: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py -q` -> **18 passed**.
+- Benchmark sanity: `uv run python -m app.benchmark.runner --output-dir reports && uv run python - <<'PY' ...` -> printed `variant_2 0 variant_3 1` and `OK: reflection contrast holds`.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 5 — benchmark strategy expansion — 2026-06-12)
+
+- **Six-strategy runner order:** `apps/api/app/benchmark/cases.py` expands `ALL_STRATEGIES` to `baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`.
+- **Interim count updates:** Benchmark/report persistence assertions now expect 66 rows for 11 cases × 6 strategies. Dashboard table assertions now expect 66 access rows and 66 benchmark-result rows while retaining 13 runs and 11 cases until Task 6.
+- **Coverage:** `apps/api/tests/benchmark/test_runner.py::test_all_strategies_uses_six_strategy_benchmark_order` locks the benchmark-layer order so future report/acceptance code cannot silently drift.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 5 Steps 1-3 complete.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 5)
+
+- RED: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py::test_all_strategies_uses_six_strategy_benchmark_order -q` -> failed as expected because `ALL_STRATEGIES` was still `baseline_0`, `baseline_1`, `variant_1`, `variant_2`.
+- GREEN targeted: same command after expanding `ALL_STRATEGIES` -> **1 passed**.
+- Affected suite: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py -q` -> **17 passed**.
+- Detailed review: checked Task 5 code, tests, dashboard counts, existing acceptance, and project-memory consistency; result **0 P0 / 0 P1 / 0 P2** remaining defects. Reports: `/tmp/mem-trace_task5_review/report.html` / `/tmp/mem-trace_task5_review/report.md`.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 4b — `variant_3` reflection-lite accepted-memory rerank — 2026-06-12)
+
+- **Retention helper:** `apps/api/app/retrieval/controller.py` now exposes module-level `retention_score(mem)`, a deterministic placeholder for ROADMAP §3.2 Reflection/Forgetting that blends clamped trust, clamped freshness, and clamped usage frequency (`access_count / 10`).
+- **Reflection-aware accepted sort:** `RetrievalController.trace(...)` keeps the old `final_score` sort for all existing strategies, but when `GateConfig.enable_reflection_rerank=True` (`variant_3`) it sorts accepted positive memories by `0.5 * final_score + 0.5 * retention_score(memory)` before packing.
+- **Scope preserved:** the rerank only changes accepted-memory order before packing. The packer still owns protected/project/type ordering, so protected state and project constraints are not overridden by reflection-lite.
+- **Coverage:** `apps/api/tests/retrieval/test_retrieval_flow.py::test_variant_3_retains_high_retention_memory_where_variant_2_drops_it` uses fresh repos per strategy and a tight budget to prove `variant_2` drops a high-access-count marker while `variant_3` retains it.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 4b Steps 1-5 complete.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 4b)
+
+- RED: `uv run --extra dev pytest apps/api/tests/retrieval/test_retrieval_flow.py::test_variant_3_retains_high_retention_memory_where_variant_2_drops_it -q` -> failed as expected because `variant_3` sorted like `variant_2` and did not include `retain-critical-fact`.
+- GREEN targeted: same command after implementation and fixture budget tuning -> **1 passed**.
+- Review hardening RED/GREEN: `uv run --extra dev pytest apps/api/tests/retrieval/test_retrieval_flow.py::test_retention_score_clamps_out_of_range_memory_signals -q` failed before clamping (`1.55 != 1.0`), then passed after adding `_clamp01(...)`.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app/retrieval/controller.py` -> passed.
+- Retrieval regression: `uv run --extra dev pytest apps/api/tests/retrieval/ -q` -> **85 passed**.
+- Detailed review: checked `variant_3` gate/state parity with `variant_2`, accepted-only rerank, negative-evidence separation, `retention_score` bounds/determinism, packer protected/project ordering, benchmark/test order independence, and `.ai`/plan memory sync. Result: **0 P0 / 0 P1 / 0 P2** remaining defects. Report: `/tmp/mem-trace_task4b_review/report.html` / `/tmp/mem-trace_task4b_review/report.md`.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 4a — benchmark access-count isolation — 2026-06-12)
+
+- **Seed-time snapshot:** `apps/api/app/benchmark/runner.py` now captures every seeded memory's `access_count` for the case workspace immediately after `case.seed(...)`.
+- **Per-strategy restore:** `_run_case(...)` restores that snapshot before each strategy retrieval, isolating benchmark variants from `_bump_access_counts(...)` side effects produced by earlier strategies in the same case.
+- **Task-order invariant unlocked:** Task 4b can now implement `variant_3` reflection-lite using `access_count` without making its benchmark result order-dependent.
+- **Coverage:** `apps/api/tests/benchmark/test_runner.py::test_snapshot_restore_resets_access_counts` directly verifies snapshot/restore semantics over the repository boundary; `test_run_case_restores_access_counts_before_each_strategy` proves `_run_case(...)` invokes the restore before each strategy retrieval.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 4a Steps 1-5 complete.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 4a)
+
+- RED: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py::test_snapshot_restore_resets_access_counts -q` -> failed during collection with `ImportError: cannot import name '_restore_access_counts'`, as expected before helper implementation.
+- GREEN targeted: same command after implementation -> **1 passed**; review-hardening targeted pair -> **2 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app/benchmark/runner.py` -> passed.
+- Benchmark regression: `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py -q` -> **13 passed**.
+- Detailed Task 4a review: checked snapshot/restore placement, workspace scoping, repository copy/update semantics, retrieval `_bump_access_counts` side effect boundaries, cross-workspace case behavior, performance of per-strategy restore scans, and test coverage. Initial review found two P2 issues (restore should be workspace-scoped; helper-only coverage did not prove `_run_case` orchestration). Both were fixed, then issue-validator rechecked the final implementation and found **no remaining defects**. Report: `/tmp/mem-trace_task4a_final_review/report.html`.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 3 — long_context controller behavior — 2026-06-12)
+
+- **Include-all candidate selection:** `apps/api/app/retrieval/controller.py` now passes `include_all=True` for `RetrievalStrategy.long_context`, so `_select_candidates(...)` includes every retrievable workspace memory even when relevance is 0 and returns all scored candidates instead of truncating to `top_k`.
+- **Unbounded budget baseline:** `trace(...)` dynamically expands the effective token budget for `long_context` to the exact pre-compaction size when a requested budget would drop blocks, preserving the normal gate/packer/logging path while preventing budget drops so §7 can measure token bloat without relying on a fixed sentinel.
+- **Safety invariants preserved:** Workspace scoping and `_RETRIEVABLE_STATUSES` lifecycle filtering still apply before `long_context` stuffing; this is not a separate bypass path.
+- **Coverage:** `apps/api/tests/retrieval/test_retrieval_flow.py` asserts `top_k=1` still limits `baseline_1` to the most relevant block while `long_context` includes the off-topic pottery memory and reports higher accepted/actual-token counts. Review hardening also asserts `long_context` preserves workspace isolation, lifecycle filtering, access/gate/profile persistence, and no budget drops under `token_budget=1`.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 3 Steps 1-6 complete.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 3)
+
+- RED: `uv run --extra dev pytest apps/api/tests/retrieval/test_retrieval_flow.py::test_long_context_includes_all_memories_while_top_k_limits_baseline_1 -q` -> failed as expected because `long_context` was still `top_k=1` limited and omitted `pottery`.
+- GREEN targeted: same command after implementation -> **1 passed**.
+- Review hardening targeted: `uv run --extra dev pytest apps/api/tests/retrieval/test_retrieval_flow.py::test_long_context_preserves_scope_lifecycle_logs_and_unbounded_budget -q` -> **1 passed**.
+- Retrieval regression: `uv run --extra dev pytest apps/api/tests/retrieval/ -q` -> **83 passed**.
+- Strategy/gate/flow regression: `uv run --extra dev pytest apps/api/tests/runtime/test_models_strategy.py apps/api/tests/retrieval/test_gate.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> **67 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app/retrieval/controller.py` -> passed.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 2 — gate config — 2026-06-12)
+
+- **Long-context gate contract:** `apps/api/app/retrieval/gate.py` maps `RetrievalStrategy.long_context` to the baseline all-policies-off gate config: no hard/risk policy, no state match, failed/rolled_back admitted, failure learning disabled, and reflection rerank disabled. The actual include-all/unbounded-budget controller behavior is now implemented by Task 3 above.
+- **Variant-3 gate contract:** `RetrievalStrategy.variant_3` now keeps `variant_2`'s full gate/failure-learning behavior and sets `enable_reflection_rerank=True`, ready for Task 4b controller consumption after Task 4a fairness isolation lands.
+- **Coverage:** `apps/api/tests/retrieval/test_gate.py` asserts `long_context` matches the all-policies-off contract, `variant_3` is `variant_2` plus reflection rerank, and no other strategy enables `enable_reflection_rerank`.
+- **Plan tracking:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` marks Task 2 Steps 1-4 complete.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 2)
+
+- RED: `uv run --extra dev pytest apps/api/tests/retrieval/test_gate.py -k "long_context or variant_3 or reflection_rerank" -q` -> failed as expected because `long_context` fell through to the default hard-policy config, `variant_3` did not enable failure learning, and `enable_reflection_rerank` was missing.
+- GREEN targeted: same command after implementation -> **3 passed**.
+- Review hardening: generalized the existing failure-learning strategy matrix in `apps/api/tests/retrieval/test_gate.py` to include `long_context=False` and `variant_3=True`, replacing stale "variant_2-only" wording with "full gate strategies".
+- Detailed Task 2 review: checked plan conformance, strategy config semantics, forward compatibility of the unused `enable_reflection_rerank` flag, downstream controller impact, stale memory references, and test coverage. No P0/P1/P2 defects found.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app/retrieval/gate.py apps/api/app/runtime/models.py` -> passed.
+- Gate regression after review hardening: `uv run --extra dev pytest apps/api/tests/retrieval/test_gate.py -q` -> **34 passed**.
+- Task 1+2 + retrieval-flow regression: `uv run --extra dev pytest apps/api/tests/retrieval/test_gate.py apps/api/tests/runtime/test_models_strategy.py apps/api/tests/retrieval/test_retrieval_flow.py -q` -> **65 passed**.
+
+## Implemented (ROADMAP §7 Six-Strategy Benchmark Task 1 — strategy enum — 2026-06-12)
+
+- **Enum expansion:** `apps/api/app/runtime/models.py` now declares six benchmark strategy enum values in ROADMAP §7 order: `baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`.
+- **Intent documentation:** The enum docstring documents the layered comparison sequence: no-memory -> long-context -> vector -> state-aware -> +gate -> +reflection.
+- **Coverage:** `apps/api/tests/runtime/test_models_strategy.py` asserts both exact enum order and exact set membership so future drift is visible early.
+- **Plan hygiene:** `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` now marks Task 1 Steps 1-4 complete and no longer contains per-task add/commit instructions.
+
+## Latest Verification (2026-06-12 ROADMAP §7 Task 1)
+
+- RED: `uv run --extra dev pytest apps/api/tests/runtime/test_models_strategy.py -q` -> failed as expected because `long_context` / `variant_3` were missing.
+- GREEN: `uv run --extra dev pytest apps/api/tests/runtime/test_models_strategy.py -q` -> **1 passed**.
+- Compile check: `uv run --extra dev python -m compileall -q apps/api/app/runtime/models.py` -> passed.
+- Detailed Task 1 review: checked plan conformance, enum serialization values, ordering, downstream compatibility, and test coverage. No P0/P1/P2 defects found for Task 1 scope. Historical note: Task 1 only made `long_context` / `variant_3` parseable; `long_context` behavior is now implemented by Task 3, while `variant_3` reflection behavior remains pending Task 4b.
 
 **Completed slice:** Phase 3.5 **Python SDK + LangGraph Adapter + CLI** (`docs/design/SDK_ADAPTER_PLAN.md`) is complete through S6. S1 lets callers stamp event entrypoint origin via `WriteEventRequest.event_source`, preserving `None` by default for existing callers. S0 makes `packages/python-sdk` an importable uv workspace package with pytest discovery. S2a/S2b provide isomorphic in-process and HTTP SDK backends over `MemoryRuntime` / `/v1`, including `/v1/runs/{run_id}/steps` and body-based `/v1/sessions/flush` for arbitrary session ids. S3 provides LangGraph-style lifecycle hooks and wrapper without hard-depending on langgraph. S4 adds runnable custom-loop and LangGraph-adapter examples. S5 provides the `memtrace` CLI with safe HTTP-default operational semantics. S6 finalizes README, ROADMAP, this plan, and `.ai` project memory.
 
@@ -685,4 +883,4 @@ A full P0/P1 logic + mvp.md conformance audit was performed:
 
 ## Next Recommended Action
 
-The MVP (P0+P1+P2), Phase 3-A backend observability, showcase/reproducibility baseline, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, and Phase 3.5 SDK/LangGraph adapter/CLI S1-S6 are complete. **Recommended next work:** choose the next backlog slice from `docs/design/ROADMAP.md`, preferably **§7 complete 6-strategy benchmark expansion** (no memory / long-context / vector / state-aware / +gate / +reflection, plus benchmark persistence) or **§10/§11 Provider Registry / Controlled Memory Key Ontology**. I7 compaction negative retained remains deferred as an independent cross-feature design. Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.
+The MVP (P0+P1+P2), Phase 3-A backend observability, showcase/reproducibility baseline, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, Phase 3.5 SDK/LangGraph adapter/CLI S1-S6, and ROADMAP §7 `docs/design/SIX_STRATEGY_BENCHMARK_PLAN.md` are complete. **Recommended next slice: choose between ROADMAP §10 Provider Registry and §11 Controlled Memory Key Ontology.** Provider Registry would formalize deterministic/default providers plus optional real embedding/LLM-style provider seams; Controlled Key Ontology would stabilize memory key taxonomy before more provider-driven extraction/ranking work. I7 compaction negative retained remains deferred as an independent cross-feature design. Heavy infra (Redis/Celery), advanced storage (ES/Neo4j), multi-tenant governance, and the React dashboard (Phase 3-B) remain deferred until those priorities are stable.

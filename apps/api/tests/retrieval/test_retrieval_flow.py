@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.retrieval.controller import retention_score
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     BranchStatus,
@@ -19,6 +20,7 @@ from app.runtime.models import (
     FinishStepRequest,
     GateDecisionType,
     MemoryItem,
+    MemoryStatus,
     MemoryType,
     RetrievalRequest,
     RetrievalStrategy,
@@ -223,6 +225,219 @@ async def test_workspace_isolation_no_cross_workspace_candidates():
                          strategy=RetrievalStrategy.variant_2)
     )
     assert all("Deno" not in b.content for b in ctx.context_blocks)
+
+
+async def test_long_context_includes_all_memories_while_top_k_limits_baseline_1():
+    repo = InMemoryRepository()
+    rt = MemoryRuntime(repo, default_workspace_id="ws_lc")
+    run = await rt.start_run(StartRunRequest(session_id="s", task="run tests", workspace_id="ws_lc"))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await rt.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=s1.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="这个项目使用 Bun，不用 Node.js",
+        )
+    )
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id, status=StepStatus.completed))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_lc",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="bun test runner configuration notes for this project",
+            summary="bun test runner notes",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_lc",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="zzqqxx unrelated trivia about ancient pottery glazing techniques",
+            summary="unrelated trivia",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="choose runner"))
+
+    # top_k=1: long_context ignores top_k and includes all; baseline_1 keeps only
+    # the single most-relevant block, which is the on-topic memory, not pottery.
+    lc = await rt.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=s2.step_id,
+            query="bun test runner",
+            strategy=RetrievalStrategy.long_context,
+            top_k=1,
+        )
+    )
+    b1 = await rt.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=s2.step_id,
+            query="bun test runner",
+            strategy=RetrievalStrategy.baseline_1,
+            top_k=1,
+        )
+    )
+
+    lc_text = " ".join(b.content.lower() for b in lc.context_blocks)
+    b1_text = " ".join(b.content.lower() for b in b1.context_blocks)
+    assert "pottery" in lc_text
+    assert "pottery" not in b1_text
+    assert lc.profile["accepted_count"] > b1.profile["accepted_count"]
+    assert lc.profile["actual_tokens"] >= b1.profile["actual_tokens"]
+
+
+async def test_long_context_preserves_scope_lifecycle_logs_and_unbounded_budget():
+    repo = InMemoryRepository()
+    rt = MemoryRuntime(repo, default_workspace_id="ws_lc_contract")
+    run = await rt.start_run(StartRunRequest(session_id="s", task="contract", workspace_id="ws_lc_contract"))
+    step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="contract check"))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_lc_contract",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="zzzz lifecycle sentinel should be included despite unrelated query",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_lc_contract",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="archived lifecycle sentinel must stay excluded",
+            branch_status=BranchStatus.completed,
+            status=MemoryStatus.archived,
+        )
+    )
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_lc_other",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="other workspace sentinel must stay excluded",
+            branch_status=BranchStatus.completed,
+        )
+    )
+
+    ctx = await rt.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="completely unrelated query",
+            strategy=RetrievalStrategy.long_context,
+            top_k=1,
+            token_budget=1,
+        )
+    )
+
+    text = " ".join(b.content.lower() for b in ctx.context_blocks)
+    assert "lifecycle sentinel should be included" in text
+    assert "archived lifecycle sentinel" not in text
+    assert "other workspace sentinel" not in text
+    assert 1 < ctx.profile["token_budget"] < 1_000_000
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    assert access.token_budget == ctx.profile["token_budget"]
+    assert access.candidate_count == 1
+    assert access.accepted_count == 1
+    assert access.rejected_count == 0
+
+    gate_logs = await repo.list_gate_logs(ctx.access_id)
+    assert len(gate_logs) == access.candidate_count
+    packing = [p for p in await repo.list_profile_events(access_id=ctx.access_id) if p.phase.value == "context_packing"][-1]
+    assert packing.metadata["dropped_count"] == 0
+
+
+async def _seed_reflection_fixture(strategy: RetrievalStrategy):
+    """Fresh repo per strategy so retrieval access-count bumps cannot leak."""
+    repo = InMemoryRepository()
+    rt = MemoryRuntime(repo, default_workspace_id="ws_ref")
+    run = await rt.start_run(StartRunRequest(session_id="s", task="recall fact", workspace_id="ws_ref"))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id, status=StepStatus.completed))
+
+    # High-retention memory: frequently used (access_count high), distinctive
+    # marker, but lower query relevance than the noise memories.
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_ref",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="users service RETAIN-CRITICAL-FACT",
+            summary="users service retain-critical-fact",
+            branch_status=BranchStatus.completed,
+            access_count=10,
+        )
+    )
+    # Noise: higher query relevance (repeats query tokens), never used.
+    for i in range(6):
+        await repo.add_memory(
+            MemoryItem(
+                workspace_id="ws_ref",
+                run_id=run.run_id,
+                memory_type=MemoryType.episodic,
+                content="users service reference users service reference note",
+                summary=f"users service reference note {i}",
+                branch_status=BranchStatus.completed,
+                access_count=0,
+            )
+        )
+    s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging", goal="recall critical fact"))
+    return await rt.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=s2.step_id,
+            query="users service reference",
+            strategy=strategy,
+            token_budget=32,
+            top_k=20,
+        )
+    )
+
+
+async def test_variant_3_retains_high_retention_memory_where_variant_2_drops_it():
+    v2 = await _seed_reflection_fixture(RetrievalStrategy.variant_2)
+    v3 = await _seed_reflection_fixture(RetrievalStrategy.variant_3)
+
+    v2_text = " ".join(b.content.lower() for b in v2.context_blocks)
+    v3_text = " ".join(b.content.lower() for b in v3.context_blocks)
+    assert "retain-critical-fact" not in v2_text
+    assert "retain-critical-fact" in v3_text
+
+
+def test_retention_score_clamps_out_of_range_memory_signals():
+    high = retention_score(
+        MemoryItem(
+            workspace_id="ws_ref",
+            memory_type=MemoryType.episodic,
+            content="high",
+            trust_score=2.0,
+            freshness_score=1.5,
+            access_count=99,
+        )
+    )
+    low = retention_score(
+        MemoryItem(
+            workspace_id="ws_ref",
+            memory_type=MemoryType.episodic,
+            content="low",
+            trust_score=-1.0,
+            freshness_score=-0.5,
+            access_count=-3,
+        )
+    )
+
+    assert high == 1.0
+    assert low == 0.0
 
 
 async def test_secret_memory_is_never_created(runtime):

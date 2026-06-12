@@ -3,16 +3,32 @@ from __future__ import annotations
 
 import json
 
+import app.benchmark.runner as benchmark_runner
+from app.benchmark.cases import ALL_STRATEGIES, BenchmarkCase, SeedResult
 from app.benchmark.evaluator import CaseMetrics, contaminated, decide_action, evaluate_case
-from app.benchmark.runner import _acceptance, _summarize, run_benchmark
+from app.benchmark.runner import (
+    _acceptance,
+    _restore_access_counts,
+    _run_case,
+    _snapshot_access_counts,
+    _summarize,
+    run_benchmark,
+)
+from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
+    FinishStepRequest,
     CompactionKind,
     CompactionProvider,
     ContextBlock,
     ContextCompactionLog,
+    MemoryItem,
+    MemoryType,
     MemoryContext,
     RetainedFact,
+    StartRunRequest,
+    StartStepRequest,
     RetrievalStrategy,
+    StepStatus,
 )
 from app.runtime.repository import InMemoryRepository
 
@@ -20,7 +36,7 @@ from app.runtime.repository import InMemoryRepository
 async def test_run_benchmark_writes_markdown_and_json_reports(tmp_path):
     report = await run_benchmark(output_dir=tmp_path)
 
-    assert len(report["cases"]) == 11
+    assert len(report["cases"]) == 12
     assert {c["case_id"] for c in report["cases"]} == {
         "case_1_project_preference",
         "case_2_failed_branch",
@@ -33,8 +49,9 @@ async def test_run_benchmark_writes_markdown_and_json_reports(tmp_path):
         "case_9_over_budget_compaction",
         "case_10_avoid_repeating_failed_attempt",
         "case_11_sanitized_failed_destructive_attempt",
+        "case_12_reflection_retention",
     }
-    assert len(report["results"]) == 44  # 11 cases x 4 strategies
+    assert len(report["results"]) == 72  # 12 cases x 6 strategies
 
     json_path = tmp_path / "benchmark_results.json"
     md_path = tmp_path / "benchmark_report.md"
@@ -76,6 +93,49 @@ async def test_run_benchmark_meets_mvp_acceptance(tmp_path):
     assert acc["checks"]["variant_2_sanitizes_destructive_failure_without_leakage"] is True
 
 
+async def test_acceptance_includes_reflection_and_long_context_checks(tmp_path):
+    report = await run_benchmark(output_dir=tmp_path)
+    acc = report["acceptance"]
+    assert acc["checks"]["variant_3_retains_high_value_memory_under_budget"] is True
+    assert acc["checks"]["long_context_shows_token_bloat"] is True
+    assert acc["passed"] is True
+    assert report["summary"]["variant_3"]["reflection_retention_hit_rate"] == 1
+    assert report["summary"]["variant_2"]["reflection_retention_hit_rate"] == 0
+    overhead = {s: report["summary"][s]["avg_memory_token_overhead"] for s in report["strategies"]}
+    assert overhead["long_context"] == max(overhead.values())
+
+
+def test_long_context_token_bloat_acceptance_requires_variant_2_comparator():
+    acceptance = _acceptance(
+        {"long_context": {"avg_memory_token_overhead": 100.0}},
+        results=[],
+    )
+
+    assert acceptance["checks"]["long_context_shows_token_bloat"] is False
+
+
+def test_reflection_acceptance_requires_case_12_present_rows():
+    summary = {
+        "variant_2": {"reflection_retention_hit_rate": 0.0},
+        "variant_3": {"reflection_retention_hit_rate": 1.0},
+    }
+
+    acceptance = _acceptance(summary, results=[])
+
+    assert acceptance["checks"]["variant_3_retains_high_value_memory_under_budget"] is False
+
+
+def test_all_strategies_uses_six_strategy_benchmark_order():
+    assert [strategy.value for strategy in ALL_STRATEGIES] == [
+        "baseline_0",
+        "long_context",
+        "baseline_1",
+        "variant_1",
+        "variant_2",
+        "variant_3",
+    ]
+
+
 async def test_run_benchmark_persists_cases_and_results(tmp_path):
     repo = InMemoryRepository()
 
@@ -83,9 +143,16 @@ async def test_run_benchmark_persists_cases_and_results(tmp_path):
 
     cases = await repo.list_benchmark_cases()
     results = await repo.list_benchmark_results()
-    assert len(cases) == 11
-    assert len(results) == 44
-    assert {r.strategy for r in results} == {"baseline_0", "baseline_1", "variant_1", "variant_2"}
+    assert len(cases) == 12
+    assert len(results) == 72
+    assert {r.strategy for r in results} == {
+        "baseline_0",
+        "long_context",
+        "baseline_1",
+        "variant_1",
+        "variant_2",
+        "variant_3",
+    }
     assert any(
         r.case_id == "case_4_tool_safety" and r.strategy == "variant_2"
         and r.metrics["tool_sensitive_blocked"] == 1
@@ -115,6 +182,127 @@ async def test_run_benchmark_persists_cases_and_results(tmp_path):
         and r.metrics["sanitized_notice_present"] == 1
         for r in results
     )
+    assert any(
+        r.case_id == "case_12_reflection_retention" and r.strategy == "variant_3"
+        and r.metrics["reflection_retention_hit"] == 1
+        for r in results
+    )
+
+
+async def test_run_benchmark_persists_eval_records(tmp_path):
+    repo = InMemoryRepository()
+
+    await run_benchmark(output_dir=tmp_path, repo=repo)
+
+    eval_cases = await repo.list_eval_cases()
+    eval_runs = await repo.list_eval_runs()
+    assert len(eval_cases) == 12
+    assert len(eval_runs) == 1
+    eval_run = eval_runs[0]
+    assert eval_run.name == "deterministic_benchmark"
+    assert eval_run.status == "completed"
+    assert eval_run.config["strategies"] == [
+        "baseline_0",
+        "long_context",
+        "baseline_1",
+        "variant_1",
+        "variant_2",
+        "variant_3",
+    ]
+    assert eval_run.config["acceptance"]["passed"] is True
+    assert eval_run.finished_at is not None
+
+    results = await repo.list_eval_results(eval_run_id=eval_run.eval_run_id)
+    assert len(results) == 72  # 12 cases x 6 strategies
+    assert {r.eval_case_id for r in eval_cases} >= {"case_12_reflection_retention"}
+    assert all(r.passed is True for r in results)
+    assert any(
+        r.eval_case_id == "case_12_reflection_retention"
+        and str(r.strategy) in ("RetrievalStrategy.variant_3", "variant_3")
+        and r.metrics["reflection_retention_hit"] == 1
+        for r in results
+    )
+
+
+async def test_run_benchmark_eval_persistence_is_repeatable(tmp_path):
+    repo = InMemoryRepository()
+
+    first = await run_benchmark(output_dir=tmp_path / "a", repo=repo)
+    second = await run_benchmark(output_dir=tmp_path / "b", repo=repo)
+
+    # case_ids are stable -> upserted; each run appends a fresh run + its results.
+    assert first["acceptance"]["passed"] is True
+    assert second["acceptance"]["passed"] is True
+    deterministic_first = {
+        strategy: {
+            key: value for key, value in fields.items()
+            if key not in {"avg_retrieval_latency_ms", "avg_gate_latency_ms"}
+        }
+        for strategy, fields in first["summary"].items()
+    }
+    deterministic_second = {
+        strategy: {
+            key: value for key, value in fields.items()
+            if key not in {"avg_retrieval_latency_ms", "avg_gate_latency_ms"}
+        }
+        for strategy, fields in second["summary"].items()
+    }
+    assert deterministic_first == deterministic_second
+    assert len(await repo.list_eval_cases()) == 12
+    assert len(await repo.list_eval_runs()) == 2
+    assert len(await repo.list_eval_results()) == 144  # 2 runs x 72
+
+
+async def test_snapshot_restore_resets_access_counts():
+    repo = InMemoryRepository()
+    mem = await repo.add_memory(MemoryItem(
+        workspace_id="ws_snap", memory_type=MemoryType.episodic,
+        content="snapshot target", access_count=3))
+    snapshot = await _snapshot_access_counts(repo, workspace_id="ws_snap")
+    assert snapshot[mem.memory_id] == 3
+
+    # Simulate a strategy bumping the access count.
+    stored = (await repo.list_memories(workspace_id="ws_snap"))[0]
+    stored.access_count = 9
+    await repo.update_memory(stored)
+
+    await _restore_access_counts(repo, snapshot, workspace_id="ws_snap")
+    restored = (await repo.list_memories(workspace_id="ws_snap"))[0]
+    assert restored.access_count == 3
+
+
+async def test_run_case_restores_access_counts_before_each_strategy(monkeypatch):
+    repo = InMemoryRepository()
+    observed_counts: list[int] = []
+
+    async def seed(rt: MemoryRuntime, ws: str) -> SeedResult:
+        run = await rt.start_run(StartRunRequest(session_id="s", task="snapshot fairness", workspace_id=ws))
+        s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="seed"))
+        await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id, status=StepStatus.completed))
+        await repo.add_memory(MemoryItem(
+            workspace_id=ws,
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="snapshot target memory",
+            access_count=5,
+        ))
+        s2 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+        return SeedResult(run.run_id, s2.step_id, "snapshot target", ws)
+
+    original_retrieve = MemoryRuntime.retrieve_context
+
+    async def recording_retrieve(self: MemoryRuntime, request):
+        memories = await repo.list_memories(workspace_id="ws_case")
+        target = next(mem for mem in memories if mem.content == "snapshot target memory")
+        observed_counts.append(target.access_count)
+        return await original_retrieve(self, request)
+
+    monkeypatch.setattr(benchmark_runner, "ALL_STRATEGIES", [RetrievalStrategy.baseline_1, RetrievalStrategy.baseline_1])
+    monkeypatch.setattr(MemoryRuntime, "retrieve_context", recording_retrieve)
+
+    await _run_case(BenchmarkCase("case_access_restore", "Access restore", "Fairness isolation", seed), "ws_case", repo=repo)
+
+    assert observed_counts == [5, 5]
 
 
 def test_evaluator_keeps_negative_evidence_out_of_positive_contamination_and_action():
@@ -176,6 +364,44 @@ def test_evaluator_scores_sanitized_negative_notice_without_raw_marker_leakage()
 
     assert metrics.unsafe_negative_leakage == 0
     assert metrics.sanitized_notice_present == 1
+
+
+def test_evaluator_scores_reflection_retention_hit_from_marker_presence():
+    ctx_hit = MemoryContext(
+        access_id="acc_ref_hit",
+        context_blocks=[ContextBlock(type="episodic", content="users service RETAIN-CRITICAL-FACT")],
+        profile={},
+        warnings=[],
+    )
+    ctx_miss = MemoryContext(
+        access_id="acc_ref_miss",
+        context_blocks=[ContextBlock(type="episodic", content="users service reference note")],
+        profile={},
+        warnings=[],
+    )
+
+    hit = evaluate_case(
+        case_id="case_12_reflection_retention",
+        strategy=RetrievalStrategy.variant_3,
+        ctx=ctx_hit,
+        access=None,
+        profile_events=[],
+        reflection_marker="retain-critical-fact",
+        reflection_case=True,
+    )
+    miss = evaluate_case(
+        case_id="case_12_reflection_retention",
+        strategy=RetrievalStrategy.variant_2,
+        ctx=ctx_miss,
+        access=None,
+        profile_events=[],
+        reflection_marker="retain-critical-fact",
+        reflection_case=True,
+    )
+
+    assert hit.reflection_retention_hit_present == 1
+    assert hit.reflection_retention_hit == 1
+    assert miss.reflection_retention_hit == 0
 
 
 def test_compaction_retention_metric_uses_durable_log_facts_when_context_is_truncated():

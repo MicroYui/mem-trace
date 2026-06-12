@@ -94,6 +94,8 @@ class CaseMetrics:
     unsafe_negative_leakage_present: int = 0
     sanitized_notice_present: int = 0
     sanitized_notice_present_present: int = 0
+    reflection_retention_hit: int = 0
+    reflection_retention_hit_present: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -132,6 +134,8 @@ def evaluate_case(
     unsafe_negative_markers: Optional[list[str]] = None,
     failure_learning_case: bool = False,
     sanitized_failure_case: bool = False,
+    reflection_marker: Optional[str] = None,
+    reflection_case: bool = False,
 ) -> CaseMetrics:
     """Build metrics for one (case, strategy) run.
 
@@ -265,6 +269,13 @@ def evaluate_case(
             "redacted" in negative_text
             and "destructive operation" in negative_text
         ) else 0
+
+    # Reflection-lite retention: the high-retention marker reached context.
+    if reflection_case:
+        joined = " ".join(block.content.lower() for block in ctx.context_blocks)
+        marker = (reflection_marker or "").lower()
+        m.reflection_retention_hit_present = 1
+        m.reflection_retention_hit = 1 if marker and marker in joined else 0
 
     return m
 
