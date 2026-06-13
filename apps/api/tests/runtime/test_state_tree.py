@@ -26,6 +26,15 @@ def test_apply_finish_maps_status():
     assert n.status == StateNodeStatus.failed
 
 
+def test_apply_finish_maps_rolled_back_step_to_rolled_back_node():
+    root = _root()
+    n = st.make_step_node(workspace_id="ws", run_id="r", step_id="s1", parent=root)
+
+    st.apply_finish(n, StepStatus.rolled_back)
+
+    assert n.status == StateNodeStatus.rolled_back
+
+
 def test_recovery_parent_resolves_failed_nodes_parent():
     root = _root()
     failed = st.make_step_node(workspace_id="ws", run_id="r", step_id="s1", parent=root)

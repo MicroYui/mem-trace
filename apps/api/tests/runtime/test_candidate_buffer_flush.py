@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
+    AgentStep,
     BranchStatus,
     EventRole,
     EventType,
@@ -183,3 +184,25 @@ async def test_rollback_flushes_then_isolates_buffered_branch_memory():
     # a subsequent flush does not resurrect a new completed-branch copy
     again = await rt.flush_session("s")
     assert again.processed_event_count == 0
+
+
+async def test_rollback_missing_state_node_does_not_flush_buffered_memories():
+    rt = _buffered_runtime()
+    run = await rt.start_run(StartRunRequest(session_id="s", task="t"))
+    good = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="plan A"))
+    await rt.write_event(_ev(run.run_id, good.step_id, "这个项目使用 Bun"))
+    corrupt = AgentStep(workspace_id=run.workspace_id, run_id=run.run_id, state_node_id="missing_node")
+    await rt._repo.add_step(corrupt)  # noqa: SLF001 - seed intentionally corrupt state
+
+    from app.runtime.memory_runtime import StateTreeError
+
+    try:
+        await rt.rollback_branch(RollbackRequest(run_id=run.run_id, step_id=corrupt.step_id, reason="corrupt"))
+    except StateTreeError:
+        pass
+    else:  # pragma: no cover - assertion clarity if the guard regresses
+        raise AssertionError("rollback_branch should reject a corrupt state-node reference")
+
+    assert await _project_memories(rt) == []
+    flushed = await rt.flush_session("s")
+    assert flushed.processed_event_count == 1

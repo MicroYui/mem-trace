@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -47,3 +49,41 @@ async def test_langgraph_adapter_example_runs_or_skips_cleanly(capsys) -> None:
         assert result["event_source"] == "langgraph_adapter"
         assert result["step_status"] == "completed"
         assert "langgraph adapter example completed" in output
+
+
+def test_dogfood_coding_agent_scenario_outputs_safe_recovery() -> None:
+    result = subprocess.run(
+        [sys.executable, "examples/dogfood/coding_agent.py"],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "variant_2 avoids npm: true" in result.stdout
+    assert "recovery command: bun test" in result.stdout
+
+
+def test_dogfood_multi_session_scenario_retrieves_project_constraint() -> None:
+    result = subprocess.run(
+        [sys.executable, "examples/dogfood/multi_session_constraints.py"],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "session_2_retrieved_project_runtime: Bun" in result.stdout
+
+
+def test_dogfood_destructive_failure_scenario_sanitizes_raw_command() -> None:
+    result = subprocess.run(
+        [sys.executable, "examples/dogfood/destructive_failure.py"],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "destructive_failure_sanitized: true" in result.stdout
+    assert "rm -rf" not in result.stdout + result.stderr

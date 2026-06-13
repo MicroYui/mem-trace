@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     sync_database_url: str = "postgresql+psycopg://memtrace:memtrace@localhost:5433/memtrace"
 
     default_workspace_id: str = "ws_default"
+    # Lightweight hosted-demo auth gate (ADR-016). Default-off so local/dev,
+    # deterministic benchmarks, and examples continue to run without secrets.
+    auth_enabled: bool = False
+    api_key: str | None = None
     embedding_dim: int = 256
     retrieval_token_budget: int = 512
     retrieval_timeout_ms: int = 2000

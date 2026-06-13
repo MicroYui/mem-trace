@@ -366,7 +366,7 @@ async def _seed_over_budget_compaction(rt: MemoryRuntime, ws: str) -> SeedResult
         "Which DB, runtime, and users endpoint should I use?",
         ws,
         extra={
-            "token_budget": 18,
+            "token_budget": 24,
             "top_k": 20,
             "compaction_positive_constraints": [f"{key}={value}" for key, value in positive_facts],
             "unsafe_compaction_markers": ["project.runtime=npm", "/v1/old", "secret_token", "sk-live", "--force", "rm -rf"],

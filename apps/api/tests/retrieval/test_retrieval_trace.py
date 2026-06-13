@@ -127,7 +127,6 @@ async def test_hot_path_persists_trace_and_keeps_existing_context_output():
     )
 
     ctx = await runtime.retrieve_context(request)
-
     assert ctx.context_blocks
     access = await repo.get_access_log(ctx.access_id)
     assert access is not None
@@ -143,6 +142,106 @@ async def test_hot_path_persists_trace_and_keeps_existing_context_output():
     stored_memory = await repo.get_memory(memory_id)
     assert stored_memory is not None
     assert stored_memory.access_count == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_selection_uses_memory_id_tiebreak_for_equal_scores():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_trace_tie")
+    run = await runtime.start_run(StartRunRequest(session_id="s_trace_tie", task="tie", workspace_id="ws_trace_tie"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve tie"))
+    await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_z_equal",
+            workspace_id="ws_trace_tie",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="same deterministic retrieval marker",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_a_equal",
+            workspace_id="ws_trace_tie",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="same deterministic retrieval marker",
+            branch_status=BranchStatus.completed,
+        )
+    )
+
+    trace = await runtime._retrieval.trace(  # noqa: SLF001
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="same deterministic retrieval marker",
+            strategy=RetrievalStrategy.baseline_1,
+            top_k=2,
+        ),
+        workspace_id="ws_trace_tie",
+    )
+
+    assert [candidate.memory.memory_id for candidate in trace.candidates] == ["mem_a_equal", "mem_z_equal"]
+
+
+@pytest.mark.asyncio
+async def test_access_log_persists_retrieval_policy_snapshot():
+    runtime, repo, run_id, step_id, _ = await _seed_runtime_with_project_memory()
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run_id,
+            step_id=step_id,
+            query="run tests with bun",
+            strategy=RetrievalStrategy.variant_2,
+            token_budget=123,
+            top_k=4,
+        )
+    )
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    assert access.policy_version == "retrieval-policy-v1"
+    assert access.policy_snapshot["strategy"] == "variant_2"
+    assert access.policy_snapshot["top_k"] == 4
+    assert access.policy_snapshot["token_budget"] == 123
+    assert access.policy_snapshot["gate_config"]["enable_failure_learning"] is True
+    assert access.policy_snapshot["retrieval"]["lifecycle_filter_version"] == "retrievable-statuses-v1"
+    assert access.policy_snapshot["packer"]["token_estimator_version"] == "regex-stopword-cjk-v1"
+    assert access.policy_hash.startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_timeout_access_log_persists_policy_snapshot(monkeypatch):
+    repo = InMemoryRepository()
+    controller = MemoryRuntime(repo, default_workspace_id="ws_policy_timeout")._retrieval  # noqa: SLF001
+    controller._timeout_ms = 1  # noqa: SLF001 - force timeout path
+
+    async def slow_trace(*args, **kwargs):
+        import asyncio
+
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(controller, "trace", slow_trace)
+    request = RetrievalRequest(
+        run_id="run_policy_timeout",
+        query="q",
+        strategy=RetrievalStrategy.long_context,
+        token_budget=77,
+        top_k=6,
+    )
+
+    ctx = await controller.retrieve(request, workspace_id="ws_policy_timeout")
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    assert access.policy_version == "retrieval-policy-v1"
+    assert access.policy_snapshot["strategy"] == "long_context"
+    assert access.policy_snapshot["top_k"] == 6
+    assert access.policy_snapshot["token_budget"] == 77
+    assert access.policy_snapshot["retrieval"]["include_all"] is True
+    assert access.policy_hash.startswith("sha256:")
 
 
 @pytest.mark.asyncio

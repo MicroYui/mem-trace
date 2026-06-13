@@ -23,6 +23,7 @@ from app.runtime.models import (
     EvalCaseRecord,
     EvalResultRecord,
     EvalRunRecord,
+    MemoryItem,
     RetrievalRequest,
     RetrievalStrategy,
 )
@@ -125,31 +126,33 @@ def _other_workspace_markers(case: BenchmarkCase) -> list[str]:
     return []
 
 
-async def _snapshot_access_counts(repo: Repository, *, workspace_id: str) -> dict[str, int]:
-    """Capture seed-time access counts so each strategy sees identical state."""
-    return {
-        mem.memory_id: mem.access_count
-        for mem in await repo.list_memories(workspace_id=workspace_id)
-    }
+async def _snapshot_workspace_memories(repo: Repository, workspace_id: str) -> dict[str, MemoryItem]:
+    """Capture seed-time workspace memories so each strategy sees identical state."""
+    return {mem.memory_id: mem.model_copy(deep=True) for mem in await repo.list_memories(workspace_id=workspace_id)}
 
 
-async def _restore_access_counts(repo: Repository, snapshot: dict[str, int], *, workspace_id: str) -> None:
-    """Restore access counts mutated by a prior strategy's retrieval bump."""
-    for mem in await repo.list_memories(workspace_id=workspace_id):
-        if mem.memory_id in snapshot and mem.access_count != snapshot[mem.memory_id]:
-            mem.access_count = snapshot[mem.memory_id]
-            await repo.update_memory(mem)
+async def _restore_workspace_memories(repo: Repository, workspace_id: str, snapshot: dict[str, MemoryItem]) -> None:
+    """Restore mutable memory fields and reject retrieval-side memory creation."""
+    current = {mem.memory_id: mem for mem in await repo.list_memories(workspace_id=workspace_id)}
+    created = sorted(set(current) - set(snapshot))
+    if created:
+        raise RuntimeError(f"memories created during benchmark retrieval: {created}")
+    missing = sorted(set(snapshot) - set(current))
+    if missing:
+        raise RuntimeError(f"memories missing from benchmark workspace snapshot: {missing}")
+    for original in snapshot.values():
+        await repo.update_memory(original.model_copy(deep=True))
 
 
 async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | None = None) -> list[CaseMetrics]:
     repo = repo or InMemoryRepository()
     runtime = MemoryRuntime(repo, default_workspace_id=workspace_id)
     seed = await case.seed(runtime, workspace_id)
-    access_count_snapshot = await _snapshot_access_counts(repo, workspace_id=seed.workspace_id)
+    memory_snapshot = await _snapshot_workspace_memories(repo, seed.workspace_id)
 
     metrics: list[CaseMetrics] = []
     for strategy in ALL_STRATEGIES:
-        await _restore_access_counts(repo, access_count_snapshot, workspace_id=seed.workspace_id)
+        await _restore_workspace_memories(repo, seed.workspace_id, memory_snapshot)
         ctx = await runtime.retrieve_context(
             RetrievalRequest(
                 run_id=seed.run_id,

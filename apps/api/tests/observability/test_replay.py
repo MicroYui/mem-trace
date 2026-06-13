@@ -1,6 +1,8 @@
 """Replay service tests for Phase 3-A Issue 3."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from app.runtime.memory_runtime import MemoryRuntime
@@ -12,6 +14,10 @@ from app.runtime.models import (
     EventRole,
     EventType,
     FinishStepRequest,
+    GateDecisionType,
+    GateLayer,
+    MemoryAccessLog,
+    MemoryGateLog,
     MemoryItem,
     MemoryStatus,
     MemoryType,
@@ -25,6 +31,144 @@ from app.runtime.models import (
     WriteEventRequest,
 )
 from app.runtime.repository import InMemoryRepository
+
+
+@pytest.mark.asyncio
+async def test_gate_logs_are_sorted_by_created_at_then_gate_id():
+    repo = InMemoryRepository()
+    access = MemoryAccessLog(workspace_id="ws_gate_order", query="q")
+    await repo.add_access_log(access)
+    same_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    await repo.add_gate_log(
+        MemoryGateLog(
+            gate_id="gate_b",
+            access_id=access.access_id,
+            memory_id="mem_b",
+            layer=GateLayer.soft_ranking,
+            decision=GateDecisionType.accept,
+            created_at=same_time,
+        )
+    )
+    await repo.add_gate_log(
+        MemoryGateLog(
+            gate_id="gate_a",
+            access_id=access.access_id,
+            memory_id="mem_a",
+            layer=GateLayer.soft_ranking,
+            decision=GateDecisionType.accept,
+            created_at=same_time,
+        )
+    )
+
+    rows = await repo.list_gate_logs(access.access_id)
+
+    assert [row.gate_id for row in rows] == ["gate_a", "gate_b"]
+
+
+@pytest.mark.asyncio
+async def test_replay_reconstructs_equal_score_context_by_memory_id_tiebreak():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_tiebreak")
+    access = await repo.add_access_log(
+        MemoryAccessLog(
+            workspace_id="ws_replay_tiebreak",
+            query="tie marker",
+            retrieval_strategy=RetrievalStrategy.variant_2,
+            token_budget=128,
+            top_k=10,
+        )
+    )
+    same_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_b",
+            workspace_id="ws_replay_tiebreak",
+            memory_type=MemoryType.episodic,
+            content="tie marker beta",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_a",
+            workspace_id="ws_replay_tiebreak",
+            memory_type=MemoryType.episodic,
+            content="tie marker alpha",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.add_gate_log(
+        MemoryGateLog(
+            gate_id="gate_a",
+            access_id=access.access_id,
+            memory_id="mem_b",
+            layer=GateLayer.soft_ranking,
+            decision=GateDecisionType.accept,
+            final_score=0.5,
+            created_at=same_time,
+        )
+    )
+    await repo.add_gate_log(
+        MemoryGateLog(
+            gate_id="gate_b",
+            access_id=access.access_id,
+            memory_id="mem_a",
+            layer=GateLayer.soft_ranking,
+            decision=GateDecisionType.accept,
+            final_score=0.5,
+            created_at=same_time,
+        )
+    )
+
+    replay = await runtime.replay_access(access.access_id)
+
+    assert replay is not None
+    memory_block_ids = [
+        block.memory_id
+        for block in replay.original_context_blocks_reconstructed
+        if block.memory_id in {"mem_a", "mem_b"}
+    ]
+    assert memory_block_ids == ["mem_a", "mem_b"]
+
+
+@pytest.mark.asyncio
+async def test_replay_warns_when_policy_snapshot_is_missing_on_legacy_access():
+    runtime, _, run_id, step_id, _ = await _seed_runtime()
+    access_id = await _retrieve_once(runtime, run_id, step_id)
+
+    access = await runtime._repo.get_access_log(access_id)  # noqa: SLF001
+    assert access is not None
+    access.policy_hash = None
+    access.policy_snapshot = {}
+    access.policy_version = None
+    await runtime._repo.add_access_log(access)  # noqa: SLF001
+
+    replay = await runtime.replay_access(access_id)
+
+    assert replay is not None
+    assert "policy_snapshot_missing" in replay.warnings
+    assert not [diff for diff in replay.diffs if diff.kind == "policy_drift"]
+
+
+@pytest.mark.asyncio
+async def test_replay_reports_policy_drift_when_persisted_policy_hash_differs():
+    runtime, _, run_id, step_id, _ = await _seed_runtime()
+    access_id = await _retrieve_once(runtime, run_id, step_id)
+
+    access = await runtime._repo.get_access_log(access_id)  # noqa: SLF001
+    assert access is not None
+    access.policy_hash = "sha256:not-current"
+    await runtime._repo.add_access_log(access)  # noqa: SLF001
+
+    replay = await runtime.replay_access(access_id)
+
+    assert replay is not None
+    policy_diffs = [diff for diff in replay.diffs if diff.kind == "policy_drift"]
+    assert len(policy_diffs) == 1
+    assert policy_diffs[0].field == "policy_hash"
+    assert policy_diffs[0].original == "sha256:not-current"
+    assert policy_diffs[0].replayed.startswith("sha256:")
+    assert policy_diffs[0].severity == "warning"
 
 
 async def _seed_runtime() -> tuple[MemoryRuntime, InMemoryRepository, str, str, str]:

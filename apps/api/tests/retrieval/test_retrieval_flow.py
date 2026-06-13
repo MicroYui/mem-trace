@@ -7,11 +7,12 @@ protection, stale rejection, packing order, and merged project constraints.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.retrieval.controller import retention_score
+from app.retrieval.controller import RetrievalController, retention_score
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     BranchStatus,
@@ -35,6 +36,98 @@ from app.runtime.models import (
     WriteEventRequest,
 )
 from app.runtime.repository import InMemoryRepository
+
+
+@pytest.mark.asyncio
+async def test_timeout_context_has_persisted_inspectable_access_log(monkeypatch):
+    repo = InMemoryRepository()
+    controller = RetrievalController(repo)
+    controller._timeout_ms = 1  # noqa: SLF001 - force timeout path
+
+    async def slow_trace(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(controller, "trace", slow_trace)
+    ctx = await controller.retrieve(
+        RetrievalRequest(run_id="run_timeout", query="q", strategy=RetrievalStrategy.baseline_1),
+        workspace_id="ws_timeout",
+    )
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    assert access.run_id == "run_timeout"
+    assert access.query == "q"
+    assert access.workspace_id == "ws_timeout"
+    assert access.retrieval_strategy == RetrievalStrategy.baseline_1
+    assert access.latency_ms == 1
+    assert "timed out" in "\n".join(ctx.warnings)
+
+
+@pytest.mark.asyncio
+async def test_timeout_context_with_prelude_has_same_persisted_access_fields(monkeypatch):
+    repo = InMemoryRepository()
+    controller = RetrievalController(repo)
+    controller._timeout_ms = 1  # noqa: SLF001 - force timeout path
+
+    async def slow_trace(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(controller, "trace", slow_trace)
+    request = RetrievalRequest(
+        run_id="run_timeout_prelude",
+        step_id="step_timeout",
+        query="q prelude",
+        task_intent="debug timeout",
+        strategy=RetrievalStrategy.variant_2,
+        top_k=3,
+        token_budget=42,
+    )
+
+    ctx = await controller.retrieve_with_prelude(
+        request,
+        workspace_id="ws_timeout",
+        prelude_warnings=["prelude warning"],
+    )
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    assert access.run_id == "run_timeout_prelude"
+    assert access.step_id == "step_timeout"
+    assert access.query == "q prelude"
+    assert access.task_intent == "debug timeout"
+    assert access.workspace_id == "ws_timeout"
+    assert access.retrieval_strategy == RetrievalStrategy.variant_2
+    assert access.top_k == 3
+    assert access.token_budget == 42
+    assert access.latency_ms == 1
+    assert ctx.warnings[0] == "prelude warning"
+    assert "timed out" in "\n".join(ctx.warnings)
+
+
+@pytest.mark.asyncio
+async def test_successful_trace_persistence_runs_outside_timeout_window(monkeypatch):
+    repo = InMemoryRepository()
+    controller = RetrievalController(repo)
+    controller._timeout_ms = 1  # noqa: SLF001 - persistence delay should not be timed out
+    request = RetrievalRequest(run_id="run_success_after_trace", query="q", strategy=RetrievalStrategy.baseline_0)
+    trace = await controller.trace(request, workspace_id="ws_timeout")
+
+    async def fast_trace(*args, **kwargs):
+        return trace
+
+    async def slow_persist(_trace):
+        await asyncio.sleep(0.01)
+        await repo.add_access_log(_trace.access_record)
+
+    monkeypatch.setattr(controller, "trace", fast_trace)
+    monkeypatch.setattr(controller, "_persist_trace", slow_persist)
+
+    ctx = await controller.retrieve(request, workspace_id="ws_timeout")
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    assert access.run_id == "run_success_after_trace"
+    assert not ctx.warnings
 
 
 async def _seed_bun_vs_node(runtime, ws="ws_test"):
@@ -225,6 +318,61 @@ async def test_workspace_isolation_no_cross_workspace_candidates():
                          strategy=RetrievalStrategy.variant_2)
     )
     assert all("Deno" not in b.content for b in ctx.context_blocks)
+
+
+async def test_secret_positive_memory_is_rejected_even_when_gate_policies_are_disabled():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo)
+    run = await runtime.start_run(StartRunRequest(workspace_id="ws_redact", session_id="s", task="debug auth"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, name="debug"))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_redact",
+            run_id=run.run_id,
+            source_state_node_id=step.state_node_id,
+            memory_type=MemoryType.episodic,
+            content="Use token sk-1234567890abcdef when calling the API",
+            sensitivity=Sensitivity.internal,
+            risk_flags=RiskFlags(contains_secret=True),
+        )
+    )
+
+    for strategy in (RetrievalStrategy.baseline_1, RetrievalStrategy.long_context, RetrievalStrategy.variant_1):
+        ctx = await runtime.retrieve_context(
+            RetrievalRequest(run_id=run.run_id, query="token api", strategy=strategy, top_k=5)
+        )
+        rendered = "\n".join(block.content for block in ctx.context_blocks)
+        assert "sk-1234567890abcdef" not in rendered
+        gate_logs = await repo.list_gate_logs(ctx.access_id)
+        secret_logs = [g for g in gate_logs if g.reject_reason == "secret"]
+        assert len(secret_logs) == 1
+        assert secret_logs[0].decision == GateDecisionType.reject
+
+
+async def test_secret_project_memory_is_rejected_before_packing():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo)
+    run = await runtime.start_run(StartRunRequest(workspace_id="ws_project_secret", session_id="s", task="inspect"))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_project_secret",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            key="project.database",
+            value="postgres",
+            summary="Database password is hunter2 for local postgres",
+            content="Database password is hunter2 for local postgres",
+            risk_flags=RiskFlags(contains_secret=True),
+        )
+    )
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, query="database password", strategy=RetrievalStrategy.long_context, top_k=5)
+    )
+    rendered = "\n".join(block.content for block in ctx.context_blocks)
+    assert "hunter2" not in rendered
+    gate_logs = await repo.list_gate_logs(ctx.access_id)
+    assert any(g.decision == GateDecisionType.reject and g.reject_reason == "secret" for g in gate_logs)
 
 
 async def test_long_context_includes_all_memories_while_top_k_limits_baseline_1():

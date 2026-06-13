@@ -6,7 +6,10 @@ created at startup and injected into routes.
 from __future__ import annotations
 
 import logging
+from secrets import compare_digest
 from typing import Optional
+
+from fastapi import Header, HTTPException, status
 
 from app.config import Settings, get_settings
 from app.memory.llm_extractor import (
@@ -102,4 +105,28 @@ def get_runtime() -> MemoryRuntime:
     return app_state.runtime
 
 
-__all__ = ["app_state", "get_runtime", "AppState"]
+async def require_api_key(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    settings = get_settings()
+    if not settings.auth_enabled:
+        return
+    expected = settings.api_key
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="auth enabled but api key is not configured",
+        )
+    supplied = None
+    if authorization and authorization.lower().startswith("bearer "):
+        supplied = authorization.split(" ", 1)[1]
+    elif x_api_key:
+        supplied = x_api_key
+    if not supplied:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing api key")
+    if not compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid api key")
+
+
+__all__ = ["app_state", "get_runtime", "require_api_key", "AppState"]

@@ -92,9 +92,9 @@ uv run python -m app.benchmark.runner --output-dir reports
 Strategies:
 
 - `baseline_0`: no memory.
-- `long_context`: includes every retrievable workspace memory with hard/risk/state policies disabled and an effectively unbounded budget, exposing token bloat and failed-branch contamination while preserving the same trace/gate logging path.
-- `baseline_1`: vector/lexical memory without state-aware isolation or admission gate.
-- `variant_1`: state-aware retrieval.
+- `long_context`: includes every retrievable workspace memory with hard/risk/state policies disabled and an effectively unbounded budget, exposing token bloat and failed-branch contamination while preserving the same trace/gate logging path; non-bypassable quarantine/secret/destructive/tool-sensitive/redaction safety floors still apply.
+- `baseline_1`: vector/lexical memory without state-aware isolation or the full admission gate; non-bypassable quarantine/secret/destructive/tool-sensitive/redaction safety floors still apply.
+- `variant_1`: state-aware retrieval with failed/rolled-back branch rejection relaxed for ablation, while hard/risk safety policy remains enabled.
 - `variant_2`: state-aware retrieval plus admission gate.
 - `variant_3`: state-aware + gate + deterministic reflection-lite / retention-rerank (placeholder for the ROADMAP §3.2 Reflection scheduler).
 
@@ -156,10 +156,10 @@ Start the API server as shown below, then point the same SDK facade at it:
 ```python
 from memtrace_sdk import MemTrace
 
-client = MemTrace.http("http://localhost:8000", api_key="optional-future-token")
+client = MemTrace.http("http://localhost:8000", api_key="demo-token-if-auth-enabled")
 ```
 
-The HTTP backend mirrors the `/v1` surface and maps HTTP `404`/`400` responses to SDK `NotFoundError` / `BadRequestError`. It also preserves backend isomorphism for list-shaped reads such as timeline, state tree, steps, profile, and memories.
+The HTTP backend mirrors the `/v1` surface and maps HTTP `404`/`400` responses to SDK `NotFoundError` / `BadRequestError`. `api_key` is optional unless the server is started with `MEMTRACE_AUTH_ENABLED=true`, in which case it is sent as a Bearer token. The backend also preserves backend isomorphism for list-shaped reads such as timeline, state tree, steps, profile, and memories.
 
 ### LangGraph adapter
 
@@ -243,4 +243,4 @@ uv run python -m app.benchmark.runner --output-dir reports
 
 ## Roadmap
 
-The completed MVP, Phase 3-A observability work, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, Phase 3.5 SDK/LangGraph adapter/CLI work, the completed 6-strategy benchmark/eval-table slice, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current recommended next areas are Provider Registry and Controlled Memory Key Ontology.
+The completed MVP, Phase 3-A observability work, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, Phase 3.5 SDK/LangGraph adapter/CLI work, the completed 6-strategy benchmark/eval-table slice, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). ROADMAP §13 Security & Consistency Hardening is complete through H18, including migration policy checks, redacted trace bundle export/validation, and deterministic dogfood harnesses; the next recommended areas are Provider Registry / Controlled Memory Key Ontology (§10/§11), unless deferred I7 compaction-negative retention is explicitly selected first.

@@ -6,9 +6,10 @@ import pytest
 from app.api.deps import get_runtime
 from app.main import app
 from app.runtime.memory_runtime import MemoryRuntime
+from app.runtime.models import AgentStep, MemoryAccessLog, StateNode, StateNodeStatus
 from app.runtime.repository import InMemoryRepository
 from memtrace_sdk.backends import InProcessBackend
-from memtrace_sdk import MemTrace, NotFoundError
+from memtrace_sdk import BadRequestError, MemTrace, NotFoundError
 from memtrace_sdk.types import (
     EventRole,
     EventType,
@@ -94,5 +95,59 @@ async def test_backends_are_isomorphic_for_golden_path_and_read_shapes() -> None
                 await client.inspect_access("acc_missing")
             with pytest.raises(NotFoundError):
                 await client.get_step("step_missing")
+    finally:
+        await http_client.aclose()
+
+
+async def test_state_tree_error_maps_to_bad_request_for_in_process_and_http() -> None:
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_state")
+    in_process = MemTrace.in_process(runtime)
+    http_client = await _http_client_for(runtime)
+
+    try:
+        run = await runtime.start_run(StartRunRequest(workspace_id="ws_state", session_id="s", task="t"))
+        bad_failed_node = StateNode(
+            workspace_id="ws_state",
+            run_id=run.run_id,
+            parent_id="missing_parent",
+            status=StateNodeStatus.failed,
+            failure_reason="boom",
+        )
+        failed_step = AgentStep(
+            workspace_id="ws_state",
+            run_id=run.run_id,
+            state_node_id=bad_failed_node.node_id,
+            status=StepStatus.failed,
+        )
+        bad_failed_node.step_id = failed_step.step_id
+        await repo.add_state_node(bad_failed_node)
+        await repo.add_step(failed_step)
+
+        request = StartStepRequest(
+            run_id=run.run_id,
+            intent="recovery",
+            recovery_from_step_id=failed_step.step_id,
+        )
+        for backend in (in_process, http_client):
+            with pytest.raises(BadRequestError):
+                await backend.start_step(request)
+    finally:
+        await http_client.aclose()
+
+
+async def test_replay_access_missing_run_is_not_found_for_in_process_and_http() -> None:
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay")
+    in_process = MemTrace.in_process(runtime)
+    http_client = await _http_client_for(runtime)
+
+    try:
+        access = MemoryAccessLog(workspace_id="ws_replay", run_id="run_missing", query="q")
+        await repo.add_access_log(access)
+
+        for backend in (in_process, http_client):
+            with pytest.raises(NotFoundError):
+                await backend.replay_access(access.access_id)
     finally:
         await http_client.aclose()

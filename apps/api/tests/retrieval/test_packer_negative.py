@@ -7,16 +7,19 @@ from app.retrieval.negative_evidence import (
     build_negative_evidence,
     safe_observability_content,
 )
-from app.retrieval.packer import pack_context
+from app.retrieval.packer import _truncate_text, estimate_tokens, pack_context
 from app.runtime.models import (
     BranchStatus,
+    ContextBlock,
     MemoryItem,
     MemoryType,
     GateDecisionType,
     GateLayer,
+    RetainedFact,
     RiskFlags,
     Sensitivity,
     StateNode,
+    StateNodeStatus,
     StateNodeType,
 )
 
@@ -43,6 +46,41 @@ def _outcome(mem: MemoryItem):
         state_match=0.5,
         config=GateConfig(enable_failure_learning=True),
     )
+
+
+def test_estimate_tokens_counts_stopwords_and_cjk_characters():
+    assert estimate_tokens("the and of to in") >= 5
+    assert estimate_tokens("这是一个没有空格的中文句子") >= 8
+
+
+def test_truncate_text_handles_cjk_without_exceeding_budget():
+    text = "这是一个没有空格的中文句子用于测试截断行为"
+
+    truncated = _truncate_text(text, 6)
+
+    assert estimate_tokens(truncated) <= 6
+    assert truncated
+    assert len(truncated) < len(text)
+
+
+def test_truncate_text_handles_mixed_ascii_and_cjk_without_exceeding_budget():
+    text = "Investigate 用户认证流程 failure fallback 包含中文 without dropping budget safety"
+
+    truncated = _truncate_text(text, 10)
+
+    assert estimate_tokens(truncated) <= 10
+    assert truncated
+    assert len(truncated) < len(text)
+
+
+def test_truncate_text_handles_small_ascii_budget_without_exceeding_budget():
+    text = "alpha beta gamma delta epsilon zeta eta theta"
+
+    truncated = _truncate_text(text, 3)
+
+    assert estimate_tokens(truncated) <= 3
+    assert truncated
+    assert len(truncated) < len(text)
 
 
 def test_raw_failed_attempt_renders_as_avoided_attempts_block():
@@ -221,3 +259,121 @@ def test_negative_evidence_none_preserves_existing_packer_blocks():
     assert [b.model_dump() for b in after.blocks] == [b.model_dump() for b in before.blocks]
     assert after.used == before.used
     assert after.pre_compaction_tokens == before.pre_compaction_tokens
+
+
+def test_positive_redaction_covers_state_path_prelude_and_project_constraints_without_reordering():
+    active = StateNode(
+        workspace_id="ws",
+        run_id="run_1",
+        node_type=StateNodeType.step,
+        goal="Call API with sk-1234567890abcdef",
+    )
+    completed = StateNode(
+        workspace_id="ws",
+        run_id="run_1",
+        node_type=StateNodeType.step,
+        status=StateNodeStatus.completed,
+        summary="Recovered database password is hunter2",
+    )
+    prelude = ContextBlock(
+        type="procedural",
+        content="Set api_key=abc123 before running the helper",
+        source="test_prelude",
+        tokens=estimate_tokens("Set api_key=abc123 before running the helper"),
+    )
+    project_runtime = MemoryItem(
+        workspace_id="ws",
+        memory_type=MemoryType.project,
+        key="project.runtime",
+        value="bun",
+        content="This project uses Bun",
+        branch_status=BranchStatus.completed,
+    )
+    project_excluded_secret = MemoryItem(
+        workspace_id="ws",
+        memory_type=MemoryType.project,
+        key="project.runtime.excluded",
+        value="password=hunter2",
+        content="Do not use the leaked password=hunter2",
+        branch_status=BranchStatus.completed,
+    )
+
+    result = pack_context(
+        active_node=active,
+        active_path=[completed, active],
+        prelude_blocks=[prelude],
+        accepted=[project_runtime, project_excluded_secret],
+        token_budget=256,
+    )
+
+    assert [block.type for block in result.blocks] == ["active_state", "active_path", "project_memory", "procedural"]
+    rendered = "\n".join(block.content for block in result.blocks)
+    assert "sk-1234567890abcdef" not in rendered
+    assert "hunter2" not in rendered
+    assert "api_key=abc123" not in rendered
+    assert rendered.count("[REDACTED]") >= 4
+    assert all(block.tokens == estimate_tokens(block.content) for block in result.blocks)
+    assert result.used == sum(block.tokens for block in result.blocks)
+
+
+def test_compacted_retained_facts_are_redacted_and_stay_within_budget():
+    fact = RetainedFact(key="profile.database_password", value="password=hunter2", source_memory_id="mem_secret")
+    memory = MemoryItem(
+        memory_id="mem_secret",
+        workspace_id="ws",
+        memory_type=MemoryType.profile,
+        key=fact.key,
+        value=fact.value,
+        content="profile database credential details " * 20,
+        branch_status=BranchStatus.completed,
+    )
+    active = StateNode(workspace_id="ws", run_id="run_1", node_type=StateNodeType.step, goal="fix tests")
+
+    result = pack_context(active_node=active, accepted=[memory], token_budget=12)
+
+    rendered = "\n".join(block.content for block in result.blocks)
+    assert "hunter2" not in rendered
+    assert "password=hunter2" not in rendered
+    assert any(block.type == "compacted_constraints" and "[REDACTED]" in block.content for block in result.blocks)
+    retained_payload = repr([fact.model_dump() for fact in result.retained_constraints])
+    pending_payload = repr([
+        [fact.model_dump() for fact in log.retained_facts]
+        for log in result.pending_compaction_logs
+    ])
+    assert "hunter2" not in retained_payload
+    assert "password=hunter2" not in retained_payload
+    assert "hunter2" not in pending_payload
+    assert "password=hunter2" not in pending_payload
+    assert "[REDACTED]" in retained_payload
+    assert "[REDACTED]" in pending_payload
+    assert any(block.memory_id == memory.memory_id for block in result.dropped_blocks)
+    assert result.used <= 12
+    assert all(block.tokens == estimate_tokens(block.content) for block in result.blocks)
+
+
+def test_compacted_retained_facts_redact_secret_like_keys():
+    memory = MemoryItem(
+        memory_id="mem_secret_key",
+        workspace_id="ws",
+        memory_type=MemoryType.project,
+        key="project.api_key=sk-1234567890abcdef",
+        value="bun",
+        content="secret-like key should not leak " * 20,
+        branch_status=BranchStatus.completed,
+    )
+    active = StateNode(workspace_id="ws", run_id="run_1", node_type=StateNodeType.step, goal="fix tests")
+
+    result = pack_context(active_node=active, accepted=[memory], token_budget=20)
+
+    rendered = repr([block.model_dump() for block in result.blocks])
+    retained_payload = repr([fact.model_dump() for fact in result.retained_constraints])
+    pending_payload = repr([
+        [fact.model_dump() for fact in log.retained_facts]
+        for log in result.pending_compaction_logs
+    ])
+    assert "sk-1234567890abcdef" not in rendered
+    assert "sk-1234567890abcdef" not in retained_payload
+    assert "sk-1234567890abcdef" not in pending_payload
+    assert "[REDACTED]" in rendered
+    assert "[REDACTED]" in retained_payload
+    assert "[REDACTED]" in pending_payload

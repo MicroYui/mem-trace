@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+
+import pytest
 
 import app.benchmark.runner as benchmark_runner
 from app.benchmark.cases import ALL_STRATEGIES, BenchmarkCase, SeedResult
 from app.benchmark.evaluator import CaseMetrics, contaminated, decide_action, evaluate_case
 from app.benchmark.runner import (
     _acceptance,
-    _restore_access_counts,
+    _restore_workspace_memories,
     _run_case,
-    _snapshot_access_counts,
+    _snapshot_workspace_memories,
     _summarize,
     run_benchmark,
 )
@@ -253,22 +256,53 @@ async def test_run_benchmark_eval_persistence_is_repeatable(tmp_path):
     assert len(await repo.list_eval_results()) == 144  # 2 runs x 72
 
 
-async def test_snapshot_restore_resets_access_counts():
+async def test_workspace_memory_snapshot_restores_all_mutable_retrieval_fields():
     repo = InMemoryRepository()
     mem = await repo.add_memory(MemoryItem(
-        workspace_id="ws_snap", memory_type=MemoryType.episodic,
-        content="snapshot target", access_count=3))
-    snapshot = await _snapshot_access_counts(repo, workspace_id="ws_snap")
-    assert snapshot[mem.memory_id] == 3
+        workspace_id="ws_snap",
+        memory_type=MemoryType.episodic,
+        content="snapshot target",
+        access_count=1,
+        trust_score=0.7,
+        freshness_score=0.8,
+    ))
+    snapshot = await _snapshot_workspace_memories(repo, "ws_snap")
 
-    # Simulate a strategy bumping the access count.
     stored = (await repo.list_memories(workspace_id="ws_snap"))[0]
     stored.access_count = 9
+    stored.trust_score = 0.1
+    stored.freshness_score = 0.2
+    stored.last_accessed_at = datetime.now(timezone.utc)
     await repo.update_memory(stored)
 
-    await _restore_access_counts(repo, snapshot, workspace_id="ws_snap")
+    await _restore_workspace_memories(repo, "ws_snap", snapshot)
     restored = (await repo.list_memories(workspace_id="ws_snap"))[0]
-    assert restored.access_count == 3
+    assert restored.memory_id == mem.memory_id
+    assert restored.access_count == 1
+    assert restored.trust_score == 0.7
+    assert restored.freshness_score == 0.8
+    assert restored.last_accessed_at is None
+
+
+async def test_workspace_memory_restore_rejects_new_memories_created_after_snapshot():
+    repo = InMemoryRepository()
+    await repo.add_memory(MemoryItem(workspace_id="ws_snap", memory_type=MemoryType.episodic, content="original"))
+    snapshot = await _snapshot_workspace_memories(repo, "ws_snap")
+    await repo.add_memory(MemoryItem(workspace_id="ws_snap", memory_type=MemoryType.episodic, content="polluting new memory"))
+
+    with pytest.raises(RuntimeError, match="created during benchmark retrieval"):
+        await _restore_workspace_memories(repo, "ws_snap", snapshot)
+
+
+async def test_workspace_memory_restore_rejects_snapshot_memories_missing_from_workspace():
+    repo = InMemoryRepository()
+    mem = await repo.add_memory(MemoryItem(workspace_id="ws_snap", memory_type=MemoryType.episodic, content="original"))
+    snapshot = await _snapshot_workspace_memories(repo, "ws_snap")
+    moved = mem.model_copy(update={"workspace_id": "ws_other"})
+    await repo.update_memory(moved)
+
+    with pytest.raises(RuntimeError, match="missing from benchmark workspace snapshot"):
+        await _restore_workspace_memories(repo, "ws_snap", snapshot)
 
 
 async def test_run_case_restores_access_counts_before_each_strategy(monkeypatch):

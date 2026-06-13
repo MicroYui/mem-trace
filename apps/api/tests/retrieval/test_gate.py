@@ -184,6 +184,62 @@ def test_variant_1_downweights_failed_branch_without_reject():
     assert failed.final_score < completed.final_score
 
 
+def test_variant_1_keeps_hard_and_risk_policy_while_allowing_failed_branch_downweight():
+    cfg = GateConfig.for_strategy(RetrievalStrategy.variant_1)
+    assert cfg.enable_state_match is True
+    assert cfg.allow_failed_branch is True
+    assert cfg.allow_rolled_back is True
+    assert cfg.enable_hard_policy is True
+    assert cfg.enable_risk_policy is True
+    assert cfg.enable_failure_learning is False
+
+
+def test_variant_1_rejects_secret_memory():
+    mem = _mem(
+        branch_status=BranchStatus.completed,
+        sensitivity=Sensitivity.secret,
+        risk_flags=RiskFlags(contains_secret=True),
+    )
+    out = _eval(mem, config=GateConfig.for_strategy(RetrievalStrategy.variant_1))
+    assert out.decision == GateDecisionType.reject
+    assert out.reject_reason == "secret"
+
+
+def test_variant_1_rejects_destructive_and_tool_sensitive_memory():
+    for flags, reason in [
+        (RiskFlags(destructive_command=True), "destructive_command"),
+        (RiskFlags(tool_sensitive=True), "tool_sensitive"),
+    ]:
+        mem = _mem(risk_flags=flags)
+        out = _eval(mem, config=GateConfig.for_strategy(RetrievalStrategy.variant_1))
+        assert out.decision == GateDecisionType.reject
+        assert out.reject_reason == reason
+
+
+def test_quarantined_memory_is_rejected_for_every_strategy_even_when_hard_policy_is_disabled():
+    for strategy in RetrievalStrategy:
+        cfg = GateConfig.for_strategy(strategy)
+        out = _eval(_mem(status=MemoryStatus.quarantined), config=cfg)
+        assert out.decision == GateDecisionType.reject
+        assert out.reject_reason == "invalid_status"
+
+
+@pytest.mark.parametrize("strategy", [RetrievalStrategy.baseline_1, RetrievalStrategy.long_context])
+@pytest.mark.parametrize(
+    ("memory_kwargs", "reason"),
+    [
+        ({"sensitivity": Sensitivity.secret}, "secret"),
+        ({"risk_flags": RiskFlags(contains_secret=True)}, "secret"),
+        ({"risk_flags": RiskFlags(destructive_command=True)}, "destructive_command"),
+        ({"risk_flags": RiskFlags(tool_sensitive=True)}, "tool_sensitive"),
+    ],
+)
+def test_ablation_strategies_keep_non_bypassable_secret_and_tool_safety_floor(strategy, memory_kwargs, reason):
+    out = _eval(_mem(**memory_kwargs), config=GateConfig.for_strategy(strategy))
+    assert out.decision == GateDecisionType.reject
+    assert out.reject_reason == reason
+
+
 @pytest.mark.parametrize(
     ("strategy", "expected"),
     [

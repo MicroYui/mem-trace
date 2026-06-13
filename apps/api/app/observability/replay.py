@@ -9,6 +9,7 @@ from app.retrieval import gate as gatemod
 from app.retrieval.controller import RetrievalCandidateTrace, RetrievalController, RetrievalPipelineTrace
 from app.retrieval.negative_evidence import build_negative_evidence, safe_observability_content, safe_observability_key_value
 from app.retrieval.packer import pack_context
+from app.retrieval.policy import build_policy_snapshot, policy_hash
 from app.runtime.models import (
     BranchStatus,
     CompactionKind,
@@ -81,6 +82,11 @@ class RetrievalReplayService:
         original = await self._build_original_view(access, gate_logs, prelude_blocks=history_prelude)
         warnings: list[str] = []
         diffs = self._integrity_diffs(original.missing_memory_ids)
+        policy_warning, policy_diff = self._policy_drift(access)
+        if policy_warning is not None:
+            warnings.append(policy_warning)
+        if policy_diff is not None:
+            diffs.append(policy_diff)
         warnings.extend(
             f"negative evidence source memory {memory_id} is missing; raw failed-attempt text was not reconstructed"
             for memory_id in original.missing_negative_evidence_memory_ids
@@ -207,7 +213,7 @@ class RetrievalReplayService:
             if mem is not None and gate_log.decision in _ACCEPTED_DECISIONS:
                 accepted.append((gate_log, mem))
 
-        accepted.sort(key=lambda pair: pair[0].final_score, reverse=True)
+        accepted.sort(key=lambda pair: (-pair[0].final_score, pair[1].memory_id))
         accepted_memories = [mem for _, mem in accepted]
         negative_evidence = build_negative_evidence(outcomes, memories_by_id, max_blocks=3)
         active_node, active_path = await self._load_original_access_state(access)
@@ -273,6 +279,29 @@ class RetrievalReplayService:
             token_budget=access.token_budget or None,
             top_k=access.top_k or 10,
         )
+
+    def _policy_drift(self, access: MemoryAccessLog) -> tuple[str | None, ReplayDiffItem | None]:
+        request = self._request_from_access(access)
+        current = build_policy_snapshot(
+            request,
+            gate_config=gatemod.GateConfig.for_strategy(request.strategy),
+            effective_token_budget=access.token_budget or self._retrieval._default_budget,
+            vector_enabled=self._retrieval._use_vector,
+            vector_weight=self._retrieval._vector_weight,
+            compaction_notice_reserve_tokens=self._retrieval._compaction_notice_reserve_tokens,
+        )
+        current_hash = policy_hash(current)
+        if not access.policy_hash:
+            return "policy_snapshot_missing", None
+        if access.policy_hash != current_hash:
+            return None, ReplayDiffItem(
+                kind="policy_drift",
+                field="policy_hash",
+                original=access.policy_hash,
+                replayed=current_hash,
+                severity="warning",
+            )
+        return None, None
 
     @staticmethod
     def _integrity_diffs(missing_memory_ids: list[str]) -> list[ReplayDiffItem]:

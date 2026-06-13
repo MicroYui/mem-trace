@@ -67,6 +67,7 @@ class Repository(Protocol):
     # events
     async def next_sequence_no(self, run_id: str) -> int: ...
     async def add_event(self, event: AgentEvent) -> AgentEvent: ...
+    async def append_event(self, event: AgentEvent) -> AgentEvent: ...
     async def list_events(self, run_id: str) -> list[AgentEvent]: ...
     async def get_event(self, event_id: str) -> Optional[AgentEvent]: ...
 
@@ -200,6 +201,12 @@ class InMemoryRepository:
         self._events[event.event_id] = event.model_copy(deep=True)
         return event
 
+    async def append_event(self, event: AgentEvent) -> AgentEvent:
+        self._seq_counters[event.run_id] = self._seq_counters.get(event.run_id, 0) + 1
+        stored = event.model_copy(update={"sequence_no": self._seq_counters[event.run_id]})
+        self._events[stored.event_id] = stored.model_copy(deep=True)
+        return stored.model_copy(deep=True)
+
     async def list_events(self, run_id: str) -> list[AgentEvent]:
         events = [e for e in self._events.values() if e.run_id == run_id]
         events.sort(key=lambda e: e.sequence_no)
@@ -299,7 +306,9 @@ class InMemoryRepository:
         return log
 
     async def list_gate_logs(self, access_id: str) -> list[MemoryGateLog]:
-        return [g.model_copy(deep=True) for g in self._gate_logs if g.access_id == access_id]
+        rows = [g for g in self._gate_logs if g.access_id == access_id]
+        rows.sort(key=lambda g: (g.created_at, g.gate_id))
+        return [g.model_copy(deep=True) for g in rows]
 
     async def add_profile_event(self, event: ProfileEvent) -> ProfileEvent:
         self._profile_events.append(event.model_copy(deep=True))

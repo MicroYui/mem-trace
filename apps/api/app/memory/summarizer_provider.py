@@ -158,7 +158,7 @@ class RuleSummarizerProvider:
         pre_tokens = sum(block.tokens for block in request.blocks)
         if pre_tokens == 0:
             pre_tokens = sum(estimate_tokens(block.content) for block in request.blocks)
-        return SummarizeResult(
+        result = SummarizeResult(
             summary=summary,
             retained_facts=facts,
             omitted_count=len(request.blocks),
@@ -170,6 +170,7 @@ class RuleSummarizerProvider:
             warnings=warnings,
             provider=CompactionProvider.rule,
         )
+        return _validate_result(request, result)
 
 
 class LLMSummarizerProvider:
@@ -274,6 +275,21 @@ def _validate_source_ids(request: SummarizeRequest, result: SummarizeResult) -> 
     allowed_state_node_ids = set(request.source_state_node_ids)
     allowed_run_ids = {request.run_id} if request.run_id is not None else set()
     allowed_step_ids: set[str] = set()
+    for fact in request.must_retain_facts:
+        if fact.source_memory_id is not None and fact.source_memory_id not in allowed_memory_ids:
+            raise SummarizerValidationError(
+                "summarizer request has retained fact source_memory_id outside source_memory_ids"
+            )
+        if fact.provenance is None:
+            continue
+        if fact.provenance.run_id is not None:
+            allowed_run_ids.add(fact.provenance.run_id)
+        if fact.provenance.step_id is not None:
+            allowed_step_ids.add(fact.provenance.step_id)
+        if fact.provenance.event_id is not None:
+            allowed_event_ids.add(fact.provenance.event_id)
+        if fact.provenance.state_node_id is not None:
+            allowed_state_node_ids.add(fact.provenance.state_node_id)
     for block in request.blocks:
         if block.provenance is None:
             continue
@@ -282,11 +298,11 @@ def _validate_source_ids(request: SummarizeRequest, result: SummarizeResult) -> 
         if block.provenance.step_id is not None:
             allowed_step_ids.add(block.provenance.step_id)
 
-    if set(result.source_memory_ids) != allowed_memory_ids:
+    if result.source_memory_ids != request.source_memory_ids:
         raise SummarizerValidationError("summarizer did not preserve source_memory_ids")
-    if set(result.source_event_ids) != allowed_event_ids:
+    if result.source_event_ids != request.source_event_ids:
         raise SummarizerValidationError("summarizer did not preserve source_event_ids")
-    if set(result.source_state_node_ids) != allowed_state_node_ids:
+    if result.source_state_node_ids != request.source_state_node_ids:
         raise SummarizerValidationError("summarizer did not preserve source_state_node_ids")
 
     for fact in result.retained_facts:
@@ -304,7 +320,7 @@ def _validate_source_ids(request: SummarizeRequest, result: SummarizeResult) -> 
             raise SummarizerValidationError("summarizer invented retained fact state_node_id")
 
 
-_SUMMARY_FACT_PATTERN = re.compile(r"\b([A-Za-z][\w.-]*)=([^\s;,`]+)")
+_SUMMARY_FACT_PATTERN = re.compile(r"\b([A-Za-z][\w.-]*)\s*=\s*([^\s;,`]+)")
 
 
 def _summary_fact_keys(summary: str) -> set[tuple[str, str]]:

@@ -5,12 +5,17 @@ First) plus rollback/recovery behavior.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from app.runtime.memory_runtime import StateTreeError, StepNotFoundError
 from app.runtime.models import (
+    AgentStep,
     EventRole,
     EventType,
     FinishStepRequest,
+    RetrievalRequest,
     RollbackRequest,
     RunStatus,
     StartRunRequest,
@@ -62,6 +67,27 @@ async def test_write_event_assigns_monotonic_sequence_numbers_per_run(runtime):
     assert [e.sequence_no for e in timeline] == [1, 2, 3]
 
 
+async def test_concurrent_write_events_get_gap_free_run_local_sequence_numbers(runtime):
+    run = await _start(runtime)
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="concurrent"))
+
+    async def write(i: int):
+        return await runtime.write_event(
+            WriteEventRequest(
+                run_id=run.run_id,
+                step_id=step.step_id,
+                role=EventRole.user,
+                event_type=EventType.message,
+                content=f"event {i}",
+            )
+        )
+
+    await asyncio.gather(*(write(i) for i in range(50)))
+
+    events = await runtime.get_timeline(run.run_id)
+    assert [event.sequence_no for event in events] == list(range(1, 51))
+
+
 async def test_sequence_numbers_are_independent_per_run(runtime):
     r1 = await _start(runtime)
     r2 = await _start(runtime)
@@ -79,6 +105,82 @@ async def test_write_event_binds_event_to_step_and_state_node(runtime):
     r = await runtime.write_event(WriteEventRequest(run_id=run.run_id, step_id=step.step_id, content="hi"))
     assert r.event.step_id == step.step_id
     assert r.event.state_node_id == step.state_node_id
+
+
+async def test_write_event_rejects_step_from_another_run_without_side_effects(runtime):
+    run_a = await runtime.start_run(StartRunRequest(session_id="s-cross-a", task="run a"))
+    run_b = await runtime.start_run(StartRunRequest(session_id="s-cross-b", task="run b"))
+    step_b = await runtime.start_step(StartStepRequest(run_id=run_b.run_id, intent="foreign"))
+
+    with pytest.raises(StepNotFoundError):
+        await runtime.write_event(
+            WriteEventRequest(run_id=run_a.run_id, step_id=step_b.step_id, content="cross-run event")
+        )
+
+    assert await runtime.get_timeline(run_a.run_id) == []
+    assert await runtime.get_timeline(run_b.run_id) == []
+    node_b = await runtime._repo.get_state_node(step_b.state_node_id)  # noqa: SLF001
+    assert node_b is not None
+    assert node_b.raw_event_ids == []
+
+
+async def test_start_step_rejects_cross_run_parent_or_recovery_step(runtime):
+    run_a = await runtime.start_run(StartRunRequest(session_id="s-parent-a", task="run a"))
+    run_b = await runtime.start_run(StartRunRequest(session_id="s-parent-b", task="run b"))
+    foreign_step = await runtime.start_step(StartStepRequest(run_id=run_b.run_id, intent="foreign"))
+
+    with pytest.raises(StepNotFoundError):
+        await runtime.start_step(StartStepRequest(run_id=run_a.run_id, parent_step_id=foreign_step.step_id))
+    with pytest.raises(StepNotFoundError):
+        await runtime.start_step(StartStepRequest(run_id=run_a.run_id, recovery_from_step_id=foreign_step.step_id))
+
+    assert await runtime.get_steps(run_a.run_id) == []
+
+
+async def test_finish_step_rejects_step_from_another_run_without_side_effects(runtime):
+    run_a = await runtime.start_run(StartRunRequest(session_id="s-finish-a", task="run a"))
+    run_b = await runtime.start_run(StartRunRequest(session_id="s-finish-b", task="run b"))
+    step_b = await runtime.start_step(StartStepRequest(run_id=run_b.run_id, intent="foreign"))
+
+    with pytest.raises(StepNotFoundError):
+        await runtime.finish_step(
+            FinishStepRequest(run_id=run_a.run_id, step_id=step_b.step_id, summary="foreign summary")
+        )
+
+    stored_step = await runtime._repo.get_step(step_b.step_id)  # noqa: SLF001
+    assert stored_step is not None
+    assert stored_step.status == StepStatus.active
+    node_b = await runtime._repo.get_state_node(step_b.state_node_id)  # noqa: SLF001
+    assert node_b is not None
+    assert node_b.status == StateNodeStatus.active
+    assert await runtime._repo.list_memories(workspace_id=run_b.workspace_id) == []  # noqa: SLF001
+
+
+async def test_retrieve_context_rejects_step_from_another_run_without_access_log(runtime):
+    run_a = await runtime.start_run(StartRunRequest(session_id="s-retrieve-a", task="run a"))
+    run_b = await runtime.start_run(StartRunRequest(session_id="s-retrieve-b", task="run b"))
+    step_b = await runtime.start_step(StartStepRequest(run_id=run_b.run_id, intent="foreign"))
+
+    with pytest.raises(StepNotFoundError):
+        await runtime.retrieve_context(
+            RetrievalRequest(run_id=run_a.run_id, step_id=step_b.step_id, query="foreign", top_k=1)
+        )
+
+    access_logs = await runtime._repo.list_access_logs(workspace_id=run_a.workspace_id)  # noqa: SLF001
+    assert [log for log in access_logs if log.run_id == run_a.run_id] == []
+
+
+async def test_rollback_branch_rejects_step_from_another_run_without_side_effects(runtime):
+    run_a = await runtime.start_run(StartRunRequest(session_id="s-rollback-a", task="run a"))
+    run_b = await runtime.start_run(StartRunRequest(session_id="s-rollback-b", task="run b"))
+    step_b = await runtime.start_step(StartStepRequest(run_id=run_b.run_id, intent="foreign"))
+
+    with pytest.raises(StepNotFoundError):
+        await runtime.rollback_branch(RollbackRequest(run_id=run_a.run_id, step_id=step_b.step_id, reason="cross"))
+
+    stored_step = await runtime._repo.get_step(step_b.step_id)  # noqa: SLF001
+    assert stored_step is not None
+    assert stored_step.status == StepStatus.active
 
 
 async def test_write_event_stamps_event_source(runtime):
@@ -131,6 +233,54 @@ async def test_finish_step_failed_marks_step_and_state_node_failed(runtime):
     assert res.step.status == StepStatus.failed
     assert res.state_node.status == StateNodeStatus.failed
     assert res.state_node.failure_reason == "boom"
+
+
+async def test_finish_step_missing_state_node_raises_state_tree_error(runtime):
+    step = AgentStep(workspace_id="ws_missing_node", run_id="run_missing_node", state_node_id="missing_node")
+    await runtime._repo.add_step(step)  # noqa: SLF001 - seed intentionally corrupt state
+
+    with pytest.raises(StateTreeError):
+        await runtime.finish_step(
+            FinishStepRequest(step_id=step.step_id, run_id=step.run_id, status=StepStatus.completed)
+        )
+
+    stored = await runtime.get_step(step.step_id)
+    assert stored is not None
+    assert stored.status == StepStatus.active
+    assert stored.finished_at is None
+    assert stored.error_message is None
+
+
+async def test_finish_step_without_state_node_id_raises_state_tree_error(runtime):
+    step = AgentStep(workspace_id="ws_missing_node", run_id="run_missing_node", state_node_id=None)
+    await runtime._repo.add_step(step)  # noqa: SLF001 - seed intentionally corrupt state
+
+    with pytest.raises(StateTreeError):
+        await runtime.finish_step(
+            FinishStepRequest(step_id=step.step_id, run_id=step.run_id, status=StepStatus.completed)
+        )
+
+    stored = await runtime.get_step(step.step_id)
+    assert stored is not None
+    assert stored.status == StepStatus.active
+    assert stored.finished_at is None
+    assert stored.error_message is None
+
+
+async def test_rollback_branch_missing_state_node_raises_state_tree_error(runtime):
+    step = AgentStep(workspace_id="ws_missing_node", run_id="run_missing_node", state_node_id="missing_node")
+    await runtime._repo.add_step(step)  # noqa: SLF001 - seed intentionally corrupt state
+
+    with pytest.raises(StateTreeError):
+        await runtime.rollback_branch(RollbackRequest(run_id=step.run_id, step_id=step.step_id, reason="corrupt"))
+
+
+async def test_rollback_branch_without_state_node_id_raises_state_tree_error(runtime):
+    step = AgentStep(workspace_id="ws_missing_node", run_id="run_missing_node", state_node_id=None)
+    await runtime._repo.add_step(step)  # noqa: SLF001 - seed intentionally corrupt state
+
+    with pytest.raises(StateTreeError):
+        await runtime.rollback_branch(RollbackRequest(run_id=step.run_id, step_id=step.step_id, reason="corrupt"))
 
 
 async def test_rollback_branch_marks_failed_step_rolled_back(runtime):

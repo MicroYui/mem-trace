@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Optional
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.runtime.repository import ensure_embedding
@@ -167,7 +168,9 @@ def _access_to_orm(a: MemoryAccessLog) -> orm.AccessLogORM:
         retrieval_strategy=a.retrieval_strategy.value, candidate_count=a.candidate_count,
         accepted_count=a.accepted_count, rejected_count=a.rejected_count,
         token_budget=a.token_budget, top_k=a.top_k, actual_tokens=a.actual_tokens,
-        latency_ms=a.latency_ms, created_at=a.created_at,
+        latency_ms=a.latency_ms, policy_version=a.policy_version,
+        policy_hash=a.policy_hash, policy_snapshot=a.policy_snapshot,
+        created_at=a.created_at,
     )
 
 
@@ -178,7 +181,9 @@ def _access_from_orm(o: orm.AccessLogORM) -> MemoryAccessLog:
         retrieval_strategy=o.retrieval_strategy, candidate_count=o.candidate_count,
         accepted_count=o.accepted_count, rejected_count=o.rejected_count,
         token_budget=o.token_budget, top_k=o.top_k, actual_tokens=o.actual_tokens,
-        latency_ms=o.latency_ms, created_at=o.created_at,
+        latency_ms=o.latency_ms, policy_version=o.policy_version,
+        policy_hash=o.policy_hash, policy_snapshot=o.policy_snapshot or {},
+        created_at=o.created_at,
     )
 
 
@@ -463,6 +468,31 @@ class SqlRepository:
             await s.commit()
         return event
 
+    async def append_event(self, event: AgentEvent) -> AgentEvent:
+        last_error: IntegrityError | None = None
+        for _attempt in range(3):
+            try:
+                async with self._sf() as s:
+                    async with s.begin():
+                        await s.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext('memtrace_event_seq'), hashtext(:run_id))"),
+                            {"run_id": event.run_id},
+                        )
+                        cur = (
+                            await s.execute(
+                                select(func.coalesce(func.max(orm.EventORM.sequence_no), 0)).where(
+                                    orm.EventORM.run_id == event.run_id
+                                )
+                            )
+                        ).scalar_one()
+                        stored = event.model_copy(update={"sequence_no": int(cur) + 1})
+                        s.add(_event_to_orm(stored))
+                    return stored
+            except IntegrityError as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
     async def list_events(self, run_id: str) -> list[AgentEvent]:
         async with self._sf() as s:
             rows = (await s.execute(
@@ -582,7 +612,7 @@ class SqlRepository:
         async with self._sf() as s:
             rows = (await s.execute(
                 select(orm.GateLogORM).where(orm.GateLogORM.access_id == access_id)
-                .order_by(orm.GateLogORM.created_at)
+                .order_by(orm.GateLogORM.created_at, orm.GateLogORM.gate_id)
             )).scalars().all()
             return [_gate_from_orm(o) for o in rows]
 

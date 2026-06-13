@@ -13,9 +13,11 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -76,6 +78,7 @@ class StepORM(Base):
 
 class EventORM(Base):
     __tablename__ = "agent_events"
+    __table_args__ = (UniqueConstraint("run_id", "sequence_no", name="uq_event_run_seq"),)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(String, index=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -178,6 +181,9 @@ class AccessLogORM(Base):
     actual_tokens: Mapped[int] = mapped_column(Integer, default=0)
     top_k: Mapped[int] = mapped_column(Integer, default=10, server_default="10")
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    policy_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -221,11 +227,14 @@ class ProfileEventORM(Base):
 
 class ContextCompactionORM(Base):
     __tablename__ = "context_compaction_logs"
+    __table_args__ = (
+        Index("ix_context_compaction_logs_workspace_created", "workspace_id", "created_at"),
+    )
     compaction_id: Mapped[str] = mapped_column(String, primary_key=True)
     access_id: Mapped[str] = mapped_column(String, index=True)
     run_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
     step_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    workspace_id: Mapped[str] = mapped_column(String)
     kind: Mapped[str] = mapped_column(String)
     provider: Mapped[str] = mapped_column(String)
     pre_tokens: Mapped[int] = mapped_column(Integer, default=0)

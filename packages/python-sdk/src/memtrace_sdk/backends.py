@@ -5,7 +5,7 @@ from typing import Any, Optional, Protocol, TypeVar
 import httpx
 from pydantic import BaseModel, TypeAdapter
 
-from app.runtime.memory_runtime import MemoryRuntime, RunNotFoundError, StepNotFoundError
+from app.runtime.memory_runtime import MemoryRuntime, RunNotFoundError, StepNotFoundError, StateTreeError
 from app.runtime.repository import InMemoryRepository
 
 from memtrace_sdk.errors import BadRequestError, MemTraceError, NotFoundError
@@ -112,6 +112,8 @@ class InProcessBackend:
             return await self._runtime.start_step(request)
         except (RunNotFoundError, StepNotFoundError) as exc:
             raise NotFoundError(str(exc)) from exc
+        except StateTreeError as exc:
+            raise BadRequestError(str(exc)) from exc
 
     async def write_event(self, request: WriteEventRequest) -> WriteEventResult:
         try:
@@ -124,12 +126,16 @@ class InProcessBackend:
             return await self._runtime.finish_step(request)
         except (RunNotFoundError, StepNotFoundError) as exc:
             raise NotFoundError(str(exc)) from exc
+        except StateTreeError as exc:
+            raise BadRequestError(str(exc)) from exc
 
     async def rollback_branch(self, request: RollbackRequest) -> RollbackResult:
         try:
             return await self._runtime.rollback_branch(request)
         except (RunNotFoundError, StepNotFoundError) as exc:
             raise NotFoundError(str(exc)) from exc
+        except StateTreeError as exc:
+            raise BadRequestError(str(exc)) from exc
 
     async def complete_run(self, request: CompleteRunRequest) -> CompleteRunResult:
         try:
@@ -156,7 +162,7 @@ class InProcessBackend:
         return await self._runtime.get_steps(run_id)
 
     async def get_step(self, step_id: str) -> AgentStep:
-        step = await self._runtime._repo.get_step(step_id)  # noqa: SLF001 - align with existing HTTP read route
+        step = await self._runtime.get_step(step_id)
         if step is None:
             raise NotFoundError(f"step not found: {step_id}")
         return step
@@ -176,15 +182,19 @@ class InProcessBackend:
         return result
 
     async def replay_access(self, access_id: str) -> ReplayRetrievalResult:
-        result = await self._runtime.replay_access(access_id)
+        try:
+            result = await self._runtime.replay_access(access_id)
+        except RunNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
         if result is None:
             raise NotFoundError(f"access not found: {access_id}")
         return result
 
     async def replay_run(self, run_id: str) -> RunReplayResult:
-        if await self._runtime._repo.get_run(run_id) is None:  # noqa: SLF001 - align SDK with HTTP 404 mapping
-            raise NotFoundError(f"run not found: {run_id}")
-        return await self._runtime.replay_run(run_id)
+        try:
+            return await self._runtime.replay_run(run_id)
+        except RunNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
 
     async def observability_summary(
         self, *, workspace_id: Optional[str] = None, run_id: Optional[str] = None

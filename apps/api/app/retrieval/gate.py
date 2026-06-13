@@ -12,10 +12,14 @@ Three policy layers run in order (mvp.md section 7):
 
 Strategy modes tune which layers apply, so the demo/benchmark can prove the
 differentiation comes from state-awareness + gating, not from different data:
-  - long_context : no hard/risk policy, no state match; controller later stuffs
-                   all retrievable workspace memory into an unbounded budget
-  - baseline_1 : no hard/risk policy, no state match (pure relevance top-k)
-  - variant_1  : state-aware rerank; failed branch downweighted, not rejected
+  - long_context : ablation baseline with hard/risk policy disabled and no state
+                   match; controller later stuffs all retrievable workspace
+                   memory into an unbounded budget. Non-bypassable safety floors
+                   (such as quarantine rejection) still apply.
+  - baseline_1 : hard/risk policy disabled, no state match (pure relevance top-k),
+                 while non-bypassable safety floors still apply.
+  - variant_1  : state-aware rerank; failed branch downweighted, not rejected;
+                 hard/risk safety policy remains enabled.
   - variant_2  : full hard + risk policy + state-aware ranking
   - variant_3  : variant_2 + deterministic reflection-lite retention rerank
 """
@@ -61,8 +65,8 @@ class GateConfig:
             )
         if strategy == RetrievalStrategy.variant_1:
             return cls(
-                enable_hard_policy=False,
-                enable_risk_policy=False,
+                enable_hard_policy=True,
+                enable_risk_policy=True,
                 enable_state_match=True,
                 allow_failed_branch=True,
                 allow_rolled_back=True,
@@ -116,6 +120,13 @@ def evaluate(
     freshness = float(memory.freshness_score)
     trust = float(memory.trust_score)
     risk = float(memory.risk_score)
+
+    # Mandatory safety floor: quarantine is never prompt-injectable, even in
+    # ablation strategies that disable parts of the hard/risk gate. Candidate
+    # retrieval may still surface quarantined memories so gate logs remain
+    # auditable, but the prompt context must never include them.
+    if memory.status == MemoryStatus.quarantined:
+        return _reject(memory, GateLayer.hard_policy, "invalid_status", relevance, state_match, freshness, trust, risk)
 
     # ---- Layer 1: hard policy ------------------------------------------- #
     if config.enable_hard_policy:
@@ -173,6 +184,16 @@ def evaluate(
             return _reject(memory, GateLayer.hard_policy, "rolled_back", relevance, state_match, freshness, trust, risk)
         if memory.sensitivity == Sensitivity.secret or memory.risk_flags.contains_secret:
             return _reject(memory, GateLayer.hard_policy, "secret", relevance, state_match, freshness, trust, risk)
+
+    # Non-bypassable safety floor for ablation strategies with hard/risk policy
+    # disabled. This intentionally runs after failure-learning sanitization so
+    # unsafe failed/rolled_back branches keep their sanitized reject reasons.
+    if memory.sensitivity == Sensitivity.secret or memory.risk_flags.contains_secret:
+        return _reject(memory, GateLayer.hard_policy, "secret", relevance, state_match, freshness, trust, risk)
+    if memory.risk_flags.destructive_command:
+        return _reject(memory, GateLayer.risk_policy, "destructive_command", relevance, state_match, freshness, trust, risk)
+    if memory.risk_flags.tool_sensitive:
+        return _reject(memory, GateLayer.risk_policy, "tool_sensitive", relevance, state_match, freshness, trust, risk)
 
     warnings: list[str] = []
     # ---- Layer 2: risk policy ------------------------------------------- #

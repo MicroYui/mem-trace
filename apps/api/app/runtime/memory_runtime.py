@@ -32,6 +32,13 @@ from app.memory.summarizer_provider import (
 from app.observability.metrics import build_observability_summary
 from app.observability.replay import RetrievalReplayService
 from app.observability.reports import write_observability_report
+from app.observability.trace_bundle import (
+    TraceBundle,
+    TraceBundleValidation,
+    export_access_bundle,
+    export_run_bundle,
+    validate_bundle_schema,
+)
 from app.retrieval.controller import RetrievalController
 from app.retrieval.packer import estimate_tokens as _estimate_history_tokens
 from app.runtime import state_tree
@@ -164,6 +171,8 @@ class MemoryRuntime:
             failed_step = await self._repo.get_step(request.recovery_from_step_id)
             if failed_step is None:
                 raise StepNotFoundError(request.recovery_from_step_id)
+            if failed_step.run_id != run.run_id:
+                raise StepNotFoundError(request.recovery_from_step_id)
             failed_node = nodes.get(failed_step.state_node_id) if failed_step.state_node_id else None
             if failed_node is not None:
                 parent_node = state_tree.recovery_parent(failed_node, nodes)
@@ -184,7 +193,9 @@ class MemoryRuntime:
                 branch_reason["rollback_reason"] = failed_node.failure_reason
         elif request.parent_step_id:
             parent_step = await self._repo.get_step(request.parent_step_id)
-            if parent_step and parent_step.state_node_id:
+            if parent_step is None or parent_step.run_id != run.run_id:
+                raise StepNotFoundError(request.parent_step_id)
+            if parent_step.state_node_id:
                 parent_node = nodes.get(parent_step.state_node_id)
 
         if parent_node is None:
@@ -222,8 +233,14 @@ class MemoryRuntime:
         step = await self._repo.get_step(request.step_id)
         if step is None:
             raise StepNotFoundError(request.step_id)
+        if step.run_id != run.run_id:
+            raise StepNotFoundError(request.step_id)
 
-        seq = await self._repo.next_sequence_no(run.run_id)
+        state_node = None
+        if step.state_node_id:
+            state_node = await self._repo.get_state_node(step.state_node_id)
+            if state_node is None or state_node.run_id != run.run_id:
+                raise StateTreeError(f"state node not found for step: {step.step_id}")
 
         # Secret protection: redact content; do not create retrievable memory.
         content = request.content
@@ -239,7 +256,7 @@ class MemoryRuntime:
             run_id=run.run_id,
             step_id=step.step_id,
             state_node_id=step.state_node_id,
-            sequence_no=seq,
+            sequence_no=0,
             event_source=request.event_source,
             role=request.role,
             event_type=request.event_type,
@@ -252,7 +269,7 @@ class MemoryRuntime:
             latency_ms=request.latency_ms,
             metadata=request.metadata,
         )
-        await self._repo.add_event(event)
+        event = await self._repo.append_event(event)
 
         created_ids: list[str] = []
         buffered = False
@@ -268,12 +285,10 @@ class MemoryRuntime:
                 created_ids = await self._apply_write_rules(event)
 
         # cache event id on the state node (denormalized; best-effort)
-        if step.state_node_id:
-            node = await self._repo.get_state_node(step.state_node_id)
-            if node is not None:
-                node.raw_event_ids.append(event.event_id)
-                node.updated_at = _now()
-                await self._repo.update_state_node(node)
+        if state_node is not None:
+            state_node.raw_event_ids.append(event.event_id)
+            state_node.updated_at = _now()
+            await self._repo.update_state_node(state_node)
 
         return WriteEventResult(event=event, created_memory_ids=created_ids, buffered=buffered)
 
@@ -281,13 +296,23 @@ class MemoryRuntime:
         step = await self._repo.get_step(request.step_id)
         if step is None:
             raise StepNotFoundError(request.step_id)
+        if step.run_id != request.run_id:
+            raise StepNotFoundError(request.step_id)
+
+        if not step.state_node_id:
+            raise StateTreeError(f"state node not found for step: {step.step_id}")
+        node = await self._repo.get_state_node(step.state_node_id)
+        if node is None or node.run_id != request.run_id:
+            raise StateTreeError(f"state node not found for step: {step.step_id}")
+
+        run = await self._repo.get_run(request.run_id)
+        if run is None:
+            raise RunNotFoundError(request.run_id)
 
         # finish_step is a natural window boundary: lazily flush any buffered
         # candidates for this run's session so the step's working-state memory
         # is written on top of an already-extracted buffer (architecture.md §12.1).
-        run = await self._repo.get_run(step.run_id)
-        if run is not None:
-            await self._flush_session(run.session_id)
+        await self._flush_session(run.session_id)
 
         step.status = request.status
         step.error_message = request.error_message
@@ -295,14 +320,12 @@ class MemoryRuntime:
         step.updated_at = _now()
         await self._repo.update_step(step)
 
-        node = await self._repo.get_state_node(step.state_node_id) if step.state_node_id else None
-        if node is not None:
-            state_tree.apply_finish(node, request.status)
-            if request.status == StepStatus.failed and request.error_message:
-                node.failure_reason = request.error_message
-            if request.summary:
-                node.summary = request.summary
-            await self._repo.update_state_node(node)
+        state_tree.apply_finish(node, request.status)
+        if request.status == StepStatus.failed and request.error_message:
+            node.failure_reason = request.error_message
+        if request.summary:
+            node.summary = request.summary
+        await self._repo.update_state_node(node)
 
         created_ids: list[str] = []
         mem = writer.write_from_finish_step(step, summary=request.summary)
@@ -311,7 +334,7 @@ class MemoryRuntime:
 
         return FinishStepResult(
             step=step,
-            state_node=node if node is not None else StateNode(workspace_id=step.workspace_id, run_id=step.run_id),
+            state_node=node,
             created_memory_ids=created_ids,
         )
 
@@ -319,39 +342,48 @@ class MemoryRuntime:
         step = await self._repo.get_step(request.step_id)
         if step is None:
             raise StepNotFoundError(request.step_id)
+        if step.run_id != request.run_id:
+            raise StepNotFoundError(request.step_id)
+
+        all_nodes = await self._repo.list_state_nodes(request.run_id)
+        by_id = {n.node_id: n for n in all_nodes}
+        if not step.state_node_id:
+            raise StateTreeError(f"state node not found for rollback step: {step.step_id}")
+        target_node = by_id.get(step.state_node_id)
+        if target_node is None:
+            raise StateTreeError(f"state node not found for rollback step: {step.step_id}")
+
+        run = await self._repo.get_run(request.run_id)
+        if run is None:
+            raise RunNotFoundError(request.run_id)
 
         # Flush before rolling back: in buffered mode the branch's memories may
         # still be pending extraction. Materializing them first lets rollback
         # flip them to rolled_back, keeping failed-branch isolation identical to
         # sync mode (otherwise a later flush would resurrect them as completed).
-        run = await self._repo.get_run(request.run_id)
-        if run is not None:
-            await self._flush_session(run.session_id)
+        await self._flush_session(run.session_id)
 
         all_nodes = await self._repo.list_state_nodes(request.run_id)
         by_id = {n.node_id: n for n in all_nodes}
-        target_node = by_id.get(step.state_node_id) if step.state_node_id else None
+        target_node = by_id.get(step.state_node_id)
+        if target_node is None:
+            raise StateTreeError(f"state node not found for rollback step: {step.step_id}")
 
         rolled_node_ids: list[str] = []
         rolled_step_ids: list[str] = []
 
-        if target_node is not None:
-            affected_nodes = [target_node] + state_tree.descendants(target_node.node_id, all_nodes)
-            for n in affected_nodes:
-                state_tree.apply_rollback(n, reason=request.reason)
-                await self._repo.update_state_node(n)
-                rolled_node_ids.append(n.node_id)
-                if n.step_id:
-                    s = await self._repo.get_step(n.step_id)
-                    if s is not None:
-                        s.status = StepStatus.rolled_back
-                        s.updated_at = _now()
-                        await self._repo.update_step(s)
-                        rolled_step_ids.append(s.step_id)
-        else:
-            step.status = StepStatus.rolled_back
-            await self._repo.update_step(step)
-            rolled_step_ids.append(step.step_id)
+        affected_nodes = [target_node] + state_tree.descendants(target_node.node_id, all_nodes)
+        for n in affected_nodes:
+            state_tree.apply_rollback(n, reason=request.reason)
+            await self._repo.update_state_node(n)
+            rolled_node_ids.append(n.node_id)
+            if n.step_id:
+                s = await self._repo.get_step(n.step_id)
+                if s is not None:
+                    s.status = StepStatus.rolled_back
+                    s.updated_at = _now()
+                    await self._repo.update_step(s)
+                    rolled_step_ids.append(s.step_id)
 
         # Flip related memories to rolled_back. Match by the set of rolled-back
         # node ids; in the degenerate case where the step's node is missing but
@@ -424,6 +456,10 @@ class MemoryRuntime:
         run = await self._repo.get_run(request.run_id)
         if run is None:
             raise RunNotFoundError(request.run_id)
+        if request.step_id is not None:
+            step = await self._repo.get_step(request.step_id)
+            if step is None or step.run_id != run.run_id:
+                raise StepNotFoundError(request.step_id)
         # Lazy flush: extraction is deferred in buffered mode, so before reading
         # context we drain this session's buffer so freshly-written events are
         # reflected in the retrieved memory (architecture.md §12.1 "lazy").
@@ -770,6 +806,9 @@ class MemoryRuntime:
     async def get_steps(self, run_id: str) -> list[AgentStep]:
         return await self._repo.list_steps(run_id)
 
+    async def get_step(self, step_id: str) -> AgentStep | None:
+        return await self._repo.get_step(step_id)
+
     async def get_profile(self, run_id: str) -> list:
         return await self._repo.list_profile_events(run_id=run_id)
 
@@ -807,10 +846,17 @@ class MemoryRuntime:
 
     async def replay_access(self, access_id: str) -> ReplayRetrievalResult | None:
         """Replay one persisted retrieval access without runtime side effects."""
+        access = await self._repo.get_access_log(access_id)
+        if access is None:
+            return None
+        if access.run_id is not None and await self._repo.get_run(access.run_id) is None:
+            raise RunNotFoundError(access.run_id)
         return await RetrievalReplayService(self._repo, self._retrieval).replay_access(access_id)
 
     async def replay_run(self, run_id: str) -> RunReplayResult:
         """Replay every persisted retrieval access for a run without flushing buffers."""
+        if await self._repo.get_run(run_id) is None:
+            raise RunNotFoundError(run_id)
         return await RetrievalReplayService(self._repo, self._retrieval).replay_run(run_id)
 
     async def observability_summary(
@@ -824,6 +870,22 @@ class MemoryRuntime:
     ) -> ObservabilityReportResult:
         """Generate static JSON/Markdown/HTML observability reports without side effects."""
         return await write_observability_report(self._repo, self._retrieval, request)
+
+    async def export_trace_bundle(self, *, run_id: str, redacted: bool = True) -> TraceBundle:
+        """Export a read-only trace bundle for one run.
+
+        Bundles are redacted by default and are validation/debug artifacts only;
+        they are intentionally not importable into production repositories.
+        """
+        return await export_run_bundle(self._repo, run_id, redacted=redacted)
+
+    async def export_access_bundle(self, access_id: str, *, redacted: bool = True) -> TraceBundle:
+        """Export a redacted trace bundle centered on one access log."""
+        return await export_access_bundle(self._repo, access_id, redacted=redacted)
+
+    def validate_trace_bundle(self, bundle: TraceBundle | dict) -> TraceBundleValidation:
+        """Validate trace bundle schema/counts without writing repository data."""
+        return validate_bundle_schema(bundle)
 
     async def inspect_access(self, access_id: str):
         """Rebuild the full retrieval story for GET /v1/access/{access_id}.
@@ -893,10 +955,8 @@ class MemoryRuntime:
             if g.decision in (GateDecisionType.accept, GateDecisionType.warn) and mem:
                 accepted_mems.append(mem)
 
-        accepted_mems.sort(
-            key=lambda m: next((v.final_score for v in views if v.memory_id == m.memory_id), 0.0),
-            reverse=True,
-        )
+        score_by_id = {v.memory_id: v.final_score for v in views}
+        accepted_mems.sort(key=lambda m: (-score_by_id.get(m.memory_id, 0.0), m.memory_id))
         negative_evidence = build_negative_evidence(outcomes, memories_by_id, max_blocks=3)
         active_node = None
         active_path: list = []
@@ -920,7 +980,7 @@ class MemoryRuntime:
         # gate's input view). gate_decisions: the per-candidate admission outcome
         # in gate-processing order (the gate's output view). Both derive from the
         # same gate logs (one per candidate) but expose distinct orderings/intent.
-        candidates = sorted(views, key=lambda v: v.relevance_score, reverse=True)
+        candidates = sorted(views, key=lambda v: (-v.relevance_score, v.memory_id))
         return AccessInspection(
             access_id=access.access_id,
             query=access.query,

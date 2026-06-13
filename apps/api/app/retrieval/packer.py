@@ -9,9 +9,11 @@ constraints are merged into one stable sentence so prompts stay consistent.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
+from app.memory.secrets import redact
 from app.runtime.models import (
     ContextBlock,
     CompactionKind,
@@ -26,12 +28,19 @@ from app.runtime.models import (
     StateNodeStatus,
     StateNodeType,
 )
-from app.retrieval.similarity import tokenize
+
+
+_TOKEN_PATTERN = re.compile(
+    r"\[REDACTED\]|[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*(?:=(?:\[REDACTED\]|[A-Za-z0-9_./:-]+))?|[^\sA-Za-z0-9_]",
+    re.UNICODE,
+)
 
 
 def estimate_tokens(text: str | None) -> int:
-    """Cheap deterministic token estimate (whitespace + CJK aware)."""
-    return max(1, len(tokenize(text))) if text else 0
+    """Cheap deterministic budget estimate that preserves stopwords and CJK units."""
+    if not text:
+        return 0
+    return max(1, len(_TOKEN_PATTERN.findall(text)))
 
 
 _TYPE_ORDER = {
@@ -103,26 +112,41 @@ def _copy_block(block: ContextBlock, *, content: str, reason_suffix: str) -> Con
     return block.model_copy(update={"content": content, "tokens": estimate_tokens(content), "reason": reason})
 
 
+def _safe_content(text: str | None) -> str:
+    """Apply final defense-in-depth redaction before prompt context packing."""
+    return redact(text or "")
+
+
+def _safe_block(block: ContextBlock) -> ContextBlock:
+    safe = _safe_content(block.content)
+    tokens = estimate_tokens(safe)
+    if safe == block.content and tokens == block.tokens:
+        return block
+    return block.model_copy(update={"content": safe, "tokens": tokens})
+
+
 def _truncate_text(text: str, max_tokens: int, *, suffix: str = " … (truncated)") -> str:
     """Deterministically truncate text to fit the approximate token budget."""
     if max_tokens <= 0:
         return ""
     if estimate_tokens(text) <= max_tokens:
         return text
-    words = text.split()
-    if not words:
-        return text[: max(1, max_tokens)]
-    # Leave room for the suffix tokens where possible. Re-check because the
-    # project tokenizer is approximate and strips common stopwords.
-    keep = max(1, min(len(words), max_tokens))
+    has_whitespace = bool(re.search(r"\s", text))
+    units = text.split() if has_whitespace else list(text)
+    suffix_tokens = estimate_tokens(suffix)
+    if max_tokens <= suffix_tokens + 1:
+        suffix = ""
+        suffix_tokens = 0
+    keep = max(1, min(len(units), max_tokens - suffix_tokens))
     while keep > 0:
-        candidate = " ".join(words[:keep]) + suffix
+        head = " ".join(units[:keep]) if has_whitespace else "".join(units[:keep])
+        candidate = head + suffix
         if estimate_tokens(candidate) <= max_tokens:
             return candidate
         keep -= 1
     while suffix and estimate_tokens(suffix) > max_tokens:
-        suffix = suffix.rsplit(" ", 1)[0]
-    return suffix if suffix else words[0]
+        suffix = suffix[:-1]
+    return suffix
 
 
 def fit_block(block: ContextBlock, max_tokens: int) -> ContextBlock:
@@ -172,8 +196,8 @@ def extract_retained_facts(
             continue
         facts.append(
             RetainedFact(
-                key=mem.key,
-                value=str(mem.value),
+                key=_safe_content(mem.key),
+                value=_safe_content(str(mem.value)),
                 source_memory_id=mem.memory_id,
                 provenance=_provenance(mem),
             )
@@ -185,7 +209,10 @@ def extract_retained_facts(
 def build_compacted_constraints_block(facts: list[RetainedFact], *, max_tokens: int | None = None) -> ContextBlock | None:
     if not facts:
         return None
-    content = "Compacted: " + "; ".join(f"{f.key}={f.value}" for f in facts) + "."
+    content = "Compacted: " + "; ".join(
+        f"{_safe_content(f.key)}={_safe_content(f.value)}" for f in facts
+    ) + "."
+    content = _safe_content(content)
     if max_tokens is not None:
         content = _truncate_text(content, max_tokens)
     return ContextBlock(
@@ -302,6 +329,7 @@ def build_project_constraint_block(memories: list[MemoryItem]) -> Optional[Conte
         content = f"This project uses {pos_name}."
     else:
         content = f"This project should not use {exc_names}."
+    content = _safe_content(content)
     return ContextBlock(
         type="project_memory",
         content=content,
@@ -331,8 +359,8 @@ def build_active_path_block(active_path: list[StateNode]) -> Optional[ContextBlo
     parts = []
     for n in steps:
         label = n.summary or n.goal or (n.step_id or n.node_id)
-        parts.append(label)
-    content = "Progress so far: " + " -> ".join(parts) + "."
+        parts.append(_safe_content(label))
+    content = _safe_content("Progress so far: " + " -> ".join(parts) + ".")
     leaf = active_path[-1]
     return ContextBlock(
         type="active_path",
@@ -363,7 +391,7 @@ def pack_context(
 
     # Active state block (from state tree, not a memory item).
     if active_node is not None:
-        content = active_node.goal or active_node.summary or f"Current {active_node.node_type.value} step."
+        content = _safe_content(active_node.goal or active_node.summary or f"Current {active_node.node_type.value} step.")
         blocks.append(
             ContextBlock(
                 type="active_state",
@@ -385,7 +413,7 @@ def pack_context(
             blocks.append(path_block)
 
     if prelude_blocks:
-        blocks.extend(prelude_blocks)
+        blocks.extend(_safe_block(block) for block in prelude_blocks)
 
     # Merged project constraints (runtime + excluded keys only).
     proj_block = build_project_constraint_block(accepted)
@@ -410,7 +438,7 @@ def pack_context(
         # project.cache_layer from LLM extraction) are not merged into the
         # runtime constraint block, but must still be packed individually.
         btype = "project_memory" if mem.memory_type == MemoryType.project else type_map.get(mem.memory_type, "episodic")
-        content = mem.summary or mem.content if mem.memory_type == MemoryType.project else mem.content
+        content = _safe_content((mem.summary or mem.content) if mem.memory_type == MemoryType.project else mem.content)
         blocks.append(
             ContextBlock(
                 type=btype,
@@ -426,7 +454,7 @@ def pack_context(
         blocks.append(proj_block)
 
     if negative_evidence:
-        blocks.extend(build_negative_evidence_block(ev) for ev in negative_evidence)
+        blocks.extend(_safe_block(build_negative_evidence_block(ev)) for ev in negative_evidence)
 
     if any(block.type == "history_summary" for block in blocks):
         blocks = _ordered_blocks(blocks)

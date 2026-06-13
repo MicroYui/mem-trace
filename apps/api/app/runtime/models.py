@@ -333,6 +333,9 @@ class MemoryAccessLog(_Base):
     top_k: int = 10
     actual_tokens: int = 0
     latency_ms: int = 0
+    policy_version: Optional[str] = None
+    policy_hash: Optional[str] = None
+    policy_snapshot: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_now)
 
 

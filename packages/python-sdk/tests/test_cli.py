@@ -6,6 +6,7 @@ import json
 import httpx
 
 from app.api.deps import get_runtime
+from app.config import get_settings
 from app.main import app
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.repository import InMemoryRepository
@@ -21,6 +22,15 @@ from memtrace_sdk.types import (
     StepStatus,
     WriteEventRequest,
 )
+
+
+def setup_function() -> None:
+    get_settings.cache_clear()
+
+
+def teardown_function() -> None:
+    get_settings.cache_clear()
+    app.dependency_overrides.clear()
 
 
 def _override_runtime(runtime: MemoryRuntime) -> None:
@@ -106,6 +116,52 @@ def test_cli_demo_http_runs_against_persistent_server(monkeypatch, capsys) -> No
         assert "baseline_1 action: npm test" in output
         assert "variant_2 action: bun test" in output
         assert "contamination eliminated: true" in output.lower()
+    finally:
+        for client in clients:
+            asyncio.run(client.aclose())
+        app.dependency_overrides.clear()
+
+
+def test_cli_api_key_reaches_token_protected_http_route(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("MEMTRACE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_API_KEY", "dev-secret")
+    get_settings.cache_clear()
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_cli_auth")
+    clients: list[httpx.AsyncClient] = []
+
+    def http_factory(base_url: str, *, api_key: str | None = None) -> MemTrace:
+        assert base_url == "http://test"
+        assert api_key == "dev-secret"
+        _override_runtime(runtime)
+        http_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        )
+        clients.append(http_client)
+        return MemTrace.http("http://test", api_key=api_key, client=http_client)
+
+    monkeypatch.setattr(cli, "_http_client", http_factory, raising=False)
+
+    try:
+        exit_code = cli.main(
+            [
+                "--http",
+                "http://test",
+                "--api-key",
+                "dev-secret",
+                "--json",
+                "start-run",
+                "--session-id",
+                "cli-auth-s1",
+                "--task",
+                "auth smoke",
+            ]
+        )
+        output = capsys.readouterr().out
+        payload = json.loads(output)
+
+        assert exit_code == 0
+        assert payload["session_id"] == "cli-auth-s1"
     finally:
         for client in clients:
             asyncio.run(client.aclose())

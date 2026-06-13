@@ -12,7 +12,9 @@ from app.memory.summarizer_provider import (
     LLMSummarizerProvider,
     RuleSummarizerProvider,
     SummarizeRequest,
+    SummarizeResult,
     SummarizerValidationError,
+    _validate_result,
 )
 from app.runtime.models import CompactionKind, CompactionProvider, ContextBlock, Provenance, RetainedFact
 
@@ -99,6 +101,108 @@ async def test_rule_provider_handles_mixed_none_and_string_provenance_when_dedup
     result = await provider.summarize(request)
 
     assert len(result.retained_facts) == 3
+
+
+async def test_rule_provider_applies_same_source_validation_as_llm_provider():
+    provider = RuleSummarizerProvider()
+    request = _request(facts=[RetainedFact(key="project.runtime", value="bun", source_memory_id="mem_invented")])
+    request = request.model_copy(update={"source_memory_ids": ["mem_1"]})
+
+    with pytest.raises(SummarizerValidationError, match="source_memory_id"):
+        await provider.summarize(request)
+
+
+def test_validate_result_allows_must_retain_fact_provenance_not_present_in_block_provenance():
+    fact = RetainedFact(
+        key="project.runtime",
+        value="bun",
+        source_memory_id="mem_1",
+        provenance=Provenance(run_id="run_1", step_id="step_1", event_id="evt_1", state_node_id="node_1"),
+    )
+    request = SummarizeRequest(
+        blocks=[],
+        must_retain_facts=[fact],
+        source_memory_ids=["mem_1"],
+        source_event_ids=["evt_1"],
+        source_state_node_ids=["node_1"],
+        summary_budget_tokens=50,
+        run_id="run_1",
+        workspace_id="ws",
+        kind=CompactionKind.history_summary,
+    )
+    result = SummarizeResult(
+        summary="project.runtime=bun",
+        retained_facts=[fact],
+        source_memory_ids=["mem_1"],
+        source_event_ids=["evt_1"],
+        source_state_node_ids=["node_1"],
+        pre_tokens=10,
+        post_tokens=2,
+    )
+
+    assert _validate_result(request, result).retained_facts == [fact]
+
+
+def test_validate_result_requires_exact_top_level_source_id_lists():
+    request = _request()
+    result = SummarizeResult(
+        provider=CompactionProvider.llm,
+        summary="project.runtime=bun; project.database=postgres.",
+        retained_facts=request.must_retain_facts,
+        omitted_count=1,
+        source_memory_ids=["mem_2", "mem_1"],
+        source_event_ids=["evt_1"],
+        source_state_node_ids=["node_1"],
+        pre_tokens=8,
+        post_tokens=2,
+        warnings=[],
+    )
+
+    with pytest.raises(SummarizerValidationError, match="source_memory_ids"):
+        _validate_result(request, result)
+
+
+def test_validate_result_rejects_must_retain_fact_source_not_declared_by_request_sources():
+    fact = RetainedFact(key="project.runtime", value="bun", source_memory_id="mem_invented")
+    request = SummarizeRequest(
+        blocks=[],
+        must_retain_facts=[fact],
+        source_memory_ids=["mem_1"],
+        source_event_ids=[],
+        source_state_node_ids=[],
+        summary_budget_tokens=50,
+        run_id="run_1",
+        workspace_id="ws",
+        kind=CompactionKind.history_summary,
+    )
+    result = SummarizeResult(
+        summary="project.runtime=bun",
+        retained_facts=[fact],
+        source_memory_ids=["mem_1", "mem_invented"],
+        source_event_ids=[],
+        source_state_node_ids=[],
+        pre_tokens=10,
+        post_tokens=2,
+    )
+
+    with pytest.raises(SummarizerValidationError, match="source_memory_id"):
+        _validate_result(request, result)
+
+
+def test_validate_result_rejects_invented_summary_fact_with_spaces_around_equals():
+    request = _request(facts=[_fact()])
+    result = SummarizeResult(
+        summary="project.runtime=bun; project.secret = token.",
+        retained_facts=[_fact()],
+        source_memory_ids=["mem_1", "mem_2"],
+        source_event_ids=["evt_1"],
+        source_state_node_ids=["node_1"],
+        pre_tokens=10,
+        post_tokens=5,
+    )
+
+    with pytest.raises(SummarizerValidationError, match="invented summary facts"):
+        _validate_result(request, result)
 
 
 def _chat_response(payload: dict) -> httpx.Response:

@@ -94,7 +94,7 @@ def apply_finish(node: StateNode, step_status: StepStatus) -> StateNode:
         node.status = StateNodeStatus.completed
     elif step_status == StepStatus.failed:
         node.status = StateNodeStatus.failed
-    elif step_status == StepStatus.cancelled:
+    elif step_status in (StepStatus.cancelled, StepStatus.rolled_back):
         node.status = StateNodeStatus.rolled_back
     node.updated_at = _now()
     return node

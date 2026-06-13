@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from app.api.deps import get_runtime
+from app.config import get_settings
 from app.main import app
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.repository import InMemoryRepository
@@ -30,7 +31,9 @@ def _override_runtime(runtime: MemoryRuntime) -> None:
 
 @pytest.fixture(autouse=True)
 def _clear_overrides():
+    get_settings.cache_clear()
     yield
+    get_settings.cache_clear()
     app.dependency_overrides.clear()
 
 
@@ -82,6 +85,24 @@ async def test_http_backend_runs_golden_path_over_asgi_transport() -> None:
         assert inspection.access_id == context.access_id
     finally:
         await client.aclose()
+
+
+async def test_http_backend_api_key_reaches_token_protected_route(monkeypatch) -> None:
+    monkeypatch.setenv("MEMTRACE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_API_KEY", "dev-secret")
+    get_settings.cache_clear()
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_http_auth")
+    _override_runtime(runtime)
+    http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+    client = MemTrace.http("http://test", api_key="dev-secret", client=http_client)
+
+    try:
+        run = await client.start_run(StartRunRequest(session_id="http-auth-s1", task="auth smoke"))
+    finally:
+        await client.aclose()
+        await http_client.aclose()
+
+    assert run.session_id == "http-auth-s1"
 
 
 async def test_http_backend_maps_404_and_400_to_sdk_errors(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ from typing import Any, Optional
 from app.retrieval import gate as gatemod
 from app.retrieval.negative_evidence import build_negative_evidence
 from app.retrieval.packer import pack_context
+from app.retrieval.policy import POLICY_VERSION, build_policy_snapshot, policy_hash
 from app.retrieval.similarity import cosine_similarity, lexical_similarity, stable_embedding
 from app.config import get_settings
 from app.runtime.models import (
@@ -118,17 +119,19 @@ class RetrievalController:
         # budget disables the guard (mainly for tests).
         if self._timeout_ms and self._timeout_ms > 0:
             try:
-                return await asyncio.wait_for(
-                    self._retrieve_impl(request, workspace_id=workspace_id),
+                trace = await asyncio.wait_for(
+                    self.trace(request, workspace_id=workspace_id),
                     timeout=self._timeout_ms / 1000.0,
                 )
             except asyncio.TimeoutError:
-                return MemoryContext(
-                    access_id=MemoryAccessLog(workspace_id=workspace_id).access_id,
-                    query=request.query,
-                    warnings=[f"retrieval timed out after {self._timeout_ms}ms; returned empty context"],
-                )
-        return await self._retrieve_impl(request, workspace_id=workspace_id)
+                access = self._timeout_access(request, workspace_id=workspace_id)
+                await self._repo.add_access_log(access)
+                return self._timeout_context(access)
+            await self._persist_trace_and_mutations(trace)
+            return self._context_from_trace(trace)
+        trace = await self.trace(request, workspace_id=workspace_id)
+        await self._persist_trace_and_mutations(trace)
+        return self._context_from_trace(trace)
 
     async def retrieve_with_prelude(
         self,
@@ -141,8 +144,8 @@ class RetrievalController:
     ) -> MemoryContext:
         if self._timeout_ms and self._timeout_ms > 0:
             try:
-                return await asyncio.wait_for(
-                    self._retrieve_impl(
+                trace = await asyncio.wait_for(
+                    self.trace(
                         request,
                         workspace_id=workspace_id,
                         prelude_blocks=prelude_blocks,
@@ -152,29 +155,20 @@ class RetrievalController:
                     timeout=self._timeout_ms / 1000.0,
                 )
             except asyncio.TimeoutError:
-                access = MemoryAccessLog(
-                    workspace_id=workspace_id,
-                    run_id=request.run_id,
-                    step_id=request.step_id,
-                    query=request.query,
-                    task_intent=request.task_intent,
-                    retrieval_strategy=request.strategy,
-                    token_budget=request.token_budget or self._default_budget,
-                    top_k=request.top_k,
-                )
+                access = self._timeout_access(request, workspace_id=workspace_id)
                 await self._repo.add_access_log(access)
-                return MemoryContext(
-                    access_id=access.access_id,
-                    query=request.query,
-                    warnings=[*(prelude_warnings or []), f"retrieval timed out after {self._timeout_ms}ms; returned empty context"],
-                )
-        return await self._retrieve_impl(
+                return self._timeout_context(access, prelude_warnings=prelude_warnings)
+            await self._persist_trace_and_mutations(trace)
+            return self._context_from_trace(trace)
+        trace = await self.trace(
             request,
             workspace_id=workspace_id,
             prelude_blocks=prelude_blocks,
             pending_compaction_logs=pending_compaction_logs,
             prelude_warnings=prelude_warnings,
         )
+        await self._persist_trace_and_mutations(trace)
+        return self._context_from_trace(trace)
 
     async def _retrieve_impl(
         self,
@@ -195,6 +189,57 @@ class RetrievalController:
         await self._persist_trace(trace)
         await self._bump_access_counts(trace.accepted_memories)
         return self._context_from_trace(trace)
+
+    async def _persist_trace_and_mutations(self, trace: RetrievalPipelineTrace) -> None:
+        await self._persist_trace(trace)
+        await self._bump_access_counts(trace.accepted_memories)
+
+    def _timeout_access(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryAccessLog:
+        budget = request.token_budget or self._default_budget
+        access = MemoryAccessLog(
+            workspace_id=workspace_id,
+            run_id=request.run_id,
+            step_id=request.step_id,
+            query=request.query,
+            task_intent=request.task_intent,
+            retrieval_strategy=request.strategy,
+            token_budget=budget,
+            top_k=request.top_k,
+            latency_ms=self._timeout_ms or 0,
+        )
+        self._attach_policy_snapshot(access, request, effective_token_budget=budget)
+        return access
+
+    def _attach_policy_snapshot(
+        self,
+        access: MemoryAccessLog,
+        request: RetrievalRequest,
+        *,
+        effective_token_budget: int,
+    ) -> None:
+        snapshot = build_policy_snapshot(
+            request,
+            gate_config=gatemod.GateConfig.for_strategy(request.strategy),
+            effective_token_budget=effective_token_budget,
+            vector_enabled=self._use_vector,
+            vector_weight=self._vector_weight,
+            compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
+        )
+        access.policy_version = POLICY_VERSION
+        access.policy_snapshot = snapshot
+        access.policy_hash = policy_hash(snapshot)
+
+    def _timeout_context(
+        self,
+        access: MemoryAccessLog,
+        *,
+        prelude_warnings: list[str] | None = None,
+    ) -> MemoryContext:
+        return MemoryContext(
+            access_id=access.access_id,
+            query=access.query,
+            warnings=[*(prelude_warnings or []), f"retrieval timed out after {self._timeout_ms}ms; returned empty context"],
+        )
 
     async def trace(
         self,
@@ -221,6 +266,8 @@ class RetrievalController:
             token_budget=budget,
             top_k=request.top_k,
         )
+        config = gatemod.GateConfig.for_strategy(request.strategy)
+        self._attach_policy_snapshot(access, request, effective_token_budget=budget)
         phase_profile: dict[str, dict[str, Any]] = {}
 
         # ---- baseline_0: no memory ------------------------------------- #
@@ -233,8 +280,6 @@ class RetrievalController:
                 "rejected_count": 0,
             }
             return RetrievalPipelineTrace(access_record=access, phase_profile=phase_profile)
-
-        config = gatemod.GateConfig.for_strategy(request.strategy)
 
         # ---- phase: retrieval (candidate selection) -------------------- #
         t0 = time.perf_counter()
@@ -296,9 +341,9 @@ class RetrievalController:
         if config.enable_reflection_rerank:
             for outcome in accepted_outcomes:
                 outcome.final_score = round(0.5 * outcome.final_score + 0.5 * retention_score(outcome.memory), 6)
-            accepted_outcomes.sort(key=lambda o: o.final_score, reverse=True)
+            accepted_outcomes.sort(key=lambda o: (-o.final_score, o.memory.memory_id))
         else:
-            accepted_outcomes.sort(key=lambda o: o.final_score, reverse=True)
+            accepted_outcomes.sort(key=lambda o: (-o.final_score, o.memory.memory_id))
         accepted_memories = [o.memory for o in accepted_outcomes]
         memories_by_id = {candidate.memory.memory_id: candidate.memory for candidate in candidates}
         negative_evidence = build_negative_evidence(outcomes, memories_by_id, max_blocks=3)
@@ -321,6 +366,7 @@ class RetrievalController:
             # exact pre-compaction size instead of relying on a fixed sentinel.
             budget = max(budget, pack_result.pre_compaction_tokens)
             access.token_budget = budget
+            self._attach_policy_snapshot(access, request, effective_token_budget=budget)
             pack_result = pack_context(
                 active_node=active_node,
                 accepted=accepted_memories,
@@ -550,7 +596,7 @@ class RetrievalController:
                         relevance_score=rel,
                     )
                 )
-        scored.sort(key=lambda c: c.relevance_score, reverse=True)
+        scored.sort(key=lambda c: (-c.relevance_score, c.memory.memory_id))
         if include_all:
             return scored
         return scored[:top_k]
