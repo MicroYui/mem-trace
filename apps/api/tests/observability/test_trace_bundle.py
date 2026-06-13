@@ -7,6 +7,9 @@ import pytest
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     AgentEvent,
+    CompactionKind,
+    CompactionProvider,
+    ContextCompactionLog,
     EventRole,
     EventType,
     MemoryItem,
@@ -14,6 +17,7 @@ from app.runtime.models import (
     MemoryType,
     RetrievalRequest,
     RetrievalStrategy,
+    RetainedNegativeEvidence,
     RiskFlags,
     StartRunRequest,
     StartStepRequest,
@@ -90,6 +94,111 @@ async def test_trace_bundle_export_redacts_event_string_payload_fields():
     assert "toolsecret" not in payload
     assert "sk-status1234567890" not in payload
     assert "[REDACTED]" in payload
+
+
+@pytest.mark.asyncio
+async def test_trace_bundle_export_redacts_retained_negative_evidence():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo)
+    run = await runtime.start_run(StartRunRequest(workspace_id="ws_bundle_retained_negative", session_id="s", task="bundle"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+    access = await repo.add_access_log(
+        MemoryAccessLog(
+            workspace_id=run.workspace_id,
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="retain negative evidence",
+        )
+    )
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=access.access_id,
+            run_id=run.run_id,
+            step_id=step.step_id,
+            workspace_id=run.workspace_id,
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            retained_negative_evidence=[
+                RetainedNegativeEvidence(
+                    source_memory_id="mem_unsafe",
+                    source_state_node_id=step.state_node_id,
+                    mode="sanitized_risk_notice",
+                    risk_kind="destructive",
+                    reason="failed_branch_sanitized",
+                    safe_text="Do not run rm -rf /prod with password=hunter2 or Authorization: Bearer sk-test123456",
+                )
+            ],
+        )
+    )
+
+    bundle = await runtime.export_access_bundle(access.access_id, redacted=True)
+    payload = json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False)
+
+    for marker in ("rm -rf", "/prod", "hunter2", "Authorization", "sk-test123456"):
+        assert marker not in payload
+    assert "destructive operation" in payload
+
+
+@pytest.mark.asyncio
+async def test_trace_bundle_export_defensively_redacts_malformed_retained_negative_evidence():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo)
+    run = await runtime.start_run(StartRunRequest(workspace_id="ws_bundle_malformed_retained_negative", session_id="s", task="bundle"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+    access = await repo.add_access_log(
+        MemoryAccessLog(
+            workspace_id=run.workspace_id,
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="retain malformed negative evidence",
+        )
+    )
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=access.access_id,
+            run_id=run.run_id,
+            step_id=step.step_id,
+            workspace_id=run.workspace_id,
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            retained_negative_evidence=[
+                RetainedNegativeEvidence(
+                    source_memory_id="mem_raw_unsafe",
+                    source_state_node_id=step.state_node_id,
+                    mode="raw_failed_attempt",
+                    risk_kind=None,
+                    reason="failed_branch_degraded",
+                    safe_text="Malformed retained row says rm -rf /prod with password and Authorization: Bearer sk-short",
+                ),
+                RetainedNegativeEvidence(
+                    source_memory_id="mem_unknown_risk",
+                    source_state_node_id=step.state_node_id,
+                    mode="sanitized_risk_notice",
+                    risk_kind="future_destructive_alias",
+                    reason="failed_branch_sanitized",
+                    safe_text="Unknown risk row says rm -rf /prod with password and Authorization: Bearer sk-short",
+                ),
+                RetainedNegativeEvidence(
+                    source_memory_id="mem_raw_known_risk",
+                    source_state_node_id=step.state_node_id,
+                    mode="raw_failed_attempt",
+                    risk_kind="destructive",
+                    reason="failed_branch_degraded",
+                    safe_text="Malformed raw retained row says kubectl delete namespace production",
+                ),
+            ],
+        )
+    )
+
+    bundle = await runtime.export_access_bundle(access.access_id, redacted=True)
+    payload = json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False)
+
+    for marker in ("rm -rf", "/prod", "sk-", "password", "Authorization"):
+        assert marker not in payload
+    assert "kubectl delete" not in payload
+    assert "namespace production" not in payload
+    assert "destructive operation" in payload
+    assert "unsafe operations" in payload
 
 
 @pytest.mark.asyncio

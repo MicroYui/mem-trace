@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
 from app.memory.secrets import redact
+from app.retrieval.negative_evidence import to_retained_negative_evidence
 from app.runtime.models import (
     ContextBlock,
     CompactionKind,
@@ -24,6 +25,7 @@ from app.runtime.models import (
     PendingCompactionLog,
     Provenance,
     RetainedFact,
+    RetainedNegativeEvidence,
     StateNode,
     StateNodeStatus,
     StateNodeType,
@@ -206,6 +208,54 @@ def extract_retained_facts(
     return facts
 
 
+def extract_retained_negative_evidence(
+    dropped_blocks: list[ContextBlock],
+    negative_by_memory_id: Mapping[str, NegativeEvidence],
+    negative_by_state_reason: Mapping[tuple[str, str], NegativeEvidence],
+) -> list[RetainedNegativeEvidence]:
+    """Extract safe retained negative lessons from dropped avoided-attempt blocks.
+
+    The rendered prompt text is intentionally ignored. Retention is rebuilt only
+    from the safe ``NegativeEvidence`` DTOs supplied to the packer.
+    """
+    retained: list[RetainedNegativeEvidence] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for block in dropped_blocks:
+        if block.type != "avoided_attempts" or block.source != "negative_evidence":
+            continue
+        evidence: NegativeEvidence | None = None
+        if block.memory_id:
+            evidence = negative_by_memory_id.get(block.memory_id)
+        if evidence is None and block.provenance is not None and block.provenance.state_node_id:
+            evidence = negative_by_state_reason.get((block.provenance.state_node_id, block.reason or ""))
+        if evidence is None:
+            continue
+        if evidence.provenance is None and block.provenance is not None:
+            evidence = evidence.model_copy(update={"provenance": block.provenance})
+        item = to_retained_negative_evidence(evidence)
+        identity = (
+            item.source_memory_id or "",
+            item.source_state_node_id or "",
+            item.mode,
+            item.reason,
+            item.safe_text,
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        retained.append(item)
+    retained.sort(
+        key=lambda item: (
+            item.source_state_node_id or "",
+            item.source_memory_id or "",
+            item.mode,
+            item.reason,
+            item.safe_text,
+        )
+    )
+    return retained
+
+
 def build_compacted_constraints_block(facts: list[RetainedFact], *, max_tokens: int | None = None) -> ContextBlock | None:
     if not facts:
         return None
@@ -246,13 +296,16 @@ def build_negative_evidence_block(ev: NegativeEvidence) -> ContextBlock:
         )
     else:
         content = ev.safe_text
+    provenance = ev.provenance
+    if provenance is None and ev.source_state_node_id:
+        provenance = Provenance(state_node_id=ev.source_state_node_id)
     return ContextBlock(
         type="avoided_attempts",
         content=content,
         source="negative_evidence",
         memory_id=ev.source_memory_id,
         reason=ev.reason,
-        provenance=ev.provenance,
+        provenance=provenance,
         tokens=estimate_tokens(content),
     )
 
@@ -272,6 +325,7 @@ def _build_pending_budget_notice_log(
     dropped: list[ContextBlock],
     reserved_blocks: list[ContextBlock],
     retained_facts: list[RetainedFact],
+    retained_negative_evidence: list[RetainedNegativeEvidence],
     memory_by_id: Mapping[str, MemoryItem],
 ) -> PendingCompactionLog:
     pre_tokens = sum(block.tokens for block in dropped)
@@ -286,6 +340,7 @@ def _build_pending_budget_notice_log(
         compression_ratio=round(post_tokens / max(1, pre_tokens), 6),
         summary_text="\n".join(block.content for block in reserved_blocks) if reserved_blocks else None,
         retained_facts=list(retained_facts),
+        retained_negative_evidence=list(retained_negative_evidence),
         source_memory_ids=_unique_nonempty(block.memory_id for block in dropped),
         source_event_ids=_unique_nonempty(
             [
@@ -462,6 +517,12 @@ def pack_context(
         blocks.sort(key=_block_order)
     pre_compaction_tokens = sum(b.tokens for b in blocks)
     memory_by_id = {m.memory_id: m for m in accepted}
+    negative_by_memory_id = {ev.source_memory_id: ev for ev in (negative_evidence or []) if ev.source_memory_id}
+    negative_by_state_reason = {
+        (ev.source_state_node_id, ev.reason): ev
+        for ev in (negative_evidence or [])
+        if ev.source_state_node_id
+    }
 
     if pre_compaction_tokens <= token_budget:
         return PackResult(blocks=blocks, used=pre_compaction_tokens, pre_compaction_tokens=pre_compaction_tokens)
@@ -494,9 +555,15 @@ def pack_context(
 
     notice: ContextBlock | None = None
     retained_facts: list[RetainedFact] = []
+    retained_negative_evidence: list[RetainedNegativeEvidence] = []
     pending_logs: list[PendingCompactionLog] = []
     if dropped and reserve > 0:
         retained_facts = extract_retained_facts(dropped, memory_by_id)
+        retained_negative_evidence = extract_retained_negative_evidence(
+            dropped,
+            negative_by_memory_id,
+            negative_by_state_reason,
+        )
         notice_budget = min(6, reserve)
         constraints_budget = max(0, reserve - notice_budget)
         constraints_block = build_compacted_constraints_block(retained_facts, max_tokens=constraints_budget) if constraints_budget else None
@@ -513,6 +580,11 @@ def pack_context(
                 used -= candidate.tokens
                 dropped.append(packed.pop(shrink_index))
                 retained_facts = extract_retained_facts(dropped, memory_by_id)
+                retained_negative_evidence = extract_retained_negative_evidence(
+                    dropped,
+                    negative_by_memory_id,
+                    negative_by_state_reason,
+                )
                 constraints_block = build_compacted_constraints_block(retained_facts, max_tokens=constraints_budget) if constraints_budget else None
                 reserved_blocks = [b for b in (constraints_block, notice) if b is not None and b.tokens > 0]
                 reserved_tokens = sum(b.tokens for b in reserved_blocks)
@@ -547,6 +619,7 @@ def pack_context(
                     dropped=dropped,
                     reserved_blocks=final_reserved_blocks,
                     retained_facts=retained_facts,
+                    retained_negative_evidence=retained_negative_evidence,
                     memory_by_id=memory_by_id,
                 )
             )
@@ -573,6 +646,7 @@ __all__ = [
     "build_compaction_notice",
     "build_negative_evidence_block",
     "extract_retained_facts",
+    "extract_retained_negative_evidence",
     "fit_block",
     "estimate_tokens",
 ]

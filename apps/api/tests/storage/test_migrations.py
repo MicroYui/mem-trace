@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[4]
 MIGRATION_PATH = ROOT / "migrations" / "versions" / "0004_phase3a_observability.py"
 COMPACTION_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0005_context_compaction.py"
 HARDENING_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0006_security_consistency_hardening.py"
+I7_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0007_i7_retained_negative_evidence.py"
 
 
 def _migration_files() -> list[Path]:
@@ -96,6 +97,15 @@ def _load_compaction_migration():
 
 def _load_hardening_migration():
     spec = importlib.util.spec_from_file_location("migration_0006_security_consistency_hardening", HARDENING_MIGRATION_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_i7_migration():
+    spec = importlib.util.spec_from_file_location("migration_0007_i7_retained_negative_evidence", I7_MIGRATION_PATH)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -236,6 +246,8 @@ def test_compaction_log_table_present_after_upgrade():
     assert ContextCompactionORM.__table__.c.access_id.index is True
     assert ContextCompactionORM.__table__.c.run_id.index is True
     assert ContextCompactionORM.__table__.c.retained_facts.default is not None
+    assert ContextCompactionORM.__table__.c.retained_negative_evidence.default is not None
+    assert str(ContextCompactionORM.__table__.c.retained_negative_evidence.server_default.arg) == "'[]'::jsonb"
     assert ContextCompactionORM.__table__.c.source_memory_ids.default is not None
     assert ContextCompactionORM.__table__.c.warnings.default is not None
 
@@ -267,3 +279,17 @@ def test_context_compaction_migration_declares_expected_revision_and_schema_oper
     assert 'op.drop_index("ix_context_compaction_logs_run_id", table_name="context_compaction_logs")' in source
     assert 'op.drop_index("ix_context_compaction_logs_access_id", table_name="context_compaction_logs")' in source
     assert 'op.drop_table("context_compaction_logs")' in source
+
+
+def test_i7_migration_adds_retained_negative_evidence_jsonb_column():
+    migration = _load_i7_migration()
+    assert migration.revision == "0007_i7_retained_negative_evidence"
+    assert migration.down_revision == "0006_security_consistency_hardening"
+
+    source = I7_MIGRATION_PATH.read_text()
+    assert '"context_compaction_logs",' in source
+    assert '"retained_negative_evidence"' in source
+    assert "postgresql.JSONB" in source
+    assert "nullable=False" in source
+    assert "server_default=sa.text(\"'[]'::jsonb\")" in source
+    assert 'op.drop_column("context_compaction_logs", "retained_negative_evidence")' in source

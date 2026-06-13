@@ -6,6 +6,7 @@ from app.retrieval.negative_evidence import (
     SANITIZED_TEMPLATES,
     build_negative_evidence,
     safe_observability_content,
+    to_retained_negative_evidence,
 )
 from app.retrieval.packer import _truncate_text, estimate_tokens, pack_context
 from app.runtime.models import (
@@ -15,6 +16,8 @@ from app.runtime.models import (
     MemoryType,
     GateDecisionType,
     GateLayer,
+    NegativeEvidence,
+    Provenance,
     RetainedFact,
     RiskFlags,
     Sensitivity,
@@ -237,6 +240,79 @@ def test_negative_evidence_is_ordinary_and_dropped_before_protected_blocks_under
     assert not any(b.type == "avoided_attempts" for b in result.blocks)
 
 
+def test_negative_evidence_retained_when_avoided_attempt_block_dropped_by_compaction():
+    active = StateNode(
+        workspace_id="ws",
+        run_id="run_1",
+        node_type=StateNodeType.step,
+        goal="fix the test command",
+    )
+    failed = _mem(content="npm test failed with lockfile mismatch; prefer bun test next time")
+    evidence = build_negative_evidence([_outcome(failed)], {failed.memory_id: failed})
+    positive_fact = MemoryItem(
+        memory_id="mem_database",
+        workspace_id="ws",
+        memory_type=MemoryType.project,
+        key="project.database",
+        value="postgres",
+        content="project.database=postgres " * 10,
+        branch_status=BranchStatus.completed,
+    )
+
+    result = pack_context(
+        active_node=active,
+        accepted=[positive_fact],
+        negative_evidence=evidence,
+        token_budget=14,
+    )
+
+    assert any(block.type == "avoided_attempts" for block in result.dropped_blocks)
+    assert not any(block.type == "avoided_attempts" for block in result.blocks)
+    assert result.pending_compaction_logs
+    retained = result.pending_compaction_logs[0].retained_negative_evidence
+    assert len(retained) == 1
+    assert retained[0].source_memory_id == failed.memory_id
+    assert retained[0].source_state_node_id == failed.source_state_node_id
+    assert retained[0].safe_text == evidence[0].safe_text
+    assert retained[0].reason == "failed_branch_degraded"
+    assert all(isinstance(fact, RetainedFact) for fact in result.retained_constraints)
+    assert result.retained_constraints
+    assert result.retained_constraints[0].key == "project.database"
+
+
+def test_retained_negative_evidence_does_not_force_prompt_injection():
+    active = StateNode(
+        workspace_id="ws",
+        run_id="run_1",
+        node_type=StateNodeType.step,
+        goal="fix tests",
+    )
+    evidence = [
+        NegativeEvidence(
+            source_memory_id=None,
+            source_state_node_id="node_failed_without_memory",
+            memory_type=MemoryType.tool_evidence,
+            branch_status=BranchStatus.failed,
+            mode="raw_failed_attempt",
+            reason="failed_branch_degraded",
+            safe_text="npm test failed repeatedly because npm is unavailable in this workspace",
+            provenance=None,
+        )
+    ]
+
+    result = pack_context(active_node=active, accepted=[], negative_evidence=evidence, token_budget=8)
+
+    assert not [block for block in result.blocks if block.type == "avoided_attempts"]
+    assert [block for block in result.dropped_blocks if block.type == "avoided_attempts"]
+    assert result.pending_compaction_logs
+    retained = result.pending_compaction_logs[0].retained_negative_evidence
+    assert len(retained) == 1
+    assert retained[0].source_memory_id is None
+    assert retained[0].source_state_node_id == "node_failed_without_memory"
+    assert retained[0].provenance is not None
+    assert retained[0].provenance.state_node_id == "node_failed_without_memory"
+
+
 def test_negative_evidence_none_preserves_existing_packer_blocks():
     project = MemoryItem(
         workspace_id="ws",
@@ -259,6 +335,56 @@ def test_negative_evidence_none_preserves_existing_packer_blocks():
     assert [b.model_dump() for b in after.blocks] == [b.model_dump() for b in before.blocks]
     assert after.used == before.used
     assert after.pre_compaction_tokens == before.pre_compaction_tokens
+
+
+def test_negative_retained_conversion_preserves_safe_failed_attempt_only():
+    evidence = NegativeEvidence(
+        source_memory_id="mem_failed",
+        source_state_node_id="node_failed",
+        memory_type=MemoryType.tool_evidence,
+        branch_status=BranchStatus.failed,
+        mode="raw_failed_attempt",
+        risk_kind=None,
+        reason="failed_branch_degraded",
+        safe_text="npm install failed with lockfile mismatch",
+        provenance=Provenance(run_id="run_1", step_id="step_1", event_id="evt_1", state_node_id="node_failed"),
+    )
+
+    retained = to_retained_negative_evidence(evidence)
+    dumped = retained.model_dump(mode="json")
+
+    assert retained.safe_text == "npm install failed with lockfile mismatch"
+    assert retained.source_memory_id == "mem_failed"
+    assert retained.source_state_node_id == "node_failed"
+    assert retained.mode == "raw_failed_attempt"
+    assert retained.reason == "failed_branch_degraded"
+    assert retained.provenance == evidence.provenance
+    assert retained.created_from_block_type == "avoided_attempts"
+    assert "content" not in dumped
+    assert "raw_content" not in dumped
+    assert "memory_content" not in dumped
+
+
+def test_negative_retained_conversion_uses_sanitized_text_for_risky_attempt():
+    evidence = NegativeEvidence(
+        source_memory_id="mem_risky",
+        source_state_node_id="node_risky",
+        memory_type=MemoryType.tool_evidence,
+        branch_status=BranchStatus.failed,
+        mode="sanitized_risk_notice",
+        risk_kind="destructive",
+        reason="failed_branch_sanitized",
+        safe_text=SANITIZED_TEMPLATES["destructive"],
+        provenance=Provenance(run_id="run_1", event_id="evt_unsafe", state_node_id="node_risky"),
+    )
+
+    retained = to_retained_negative_evidence(evidence)
+    payload = str(retained.model_dump(mode="json"))
+
+    assert retained.risk_kind == "destructive"
+    assert retained.safe_text == SANITIZED_TEMPLATES["destructive"]
+    for marker in ("rm -rf", "/prod", "sk-", "password", "Authorization"):
+        assert marker not in payload
 
 
 def test_positive_redaction_covers_state_path_prelude_and_project_constraints_without_reordering():

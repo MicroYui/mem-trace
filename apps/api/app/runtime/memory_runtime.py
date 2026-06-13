@@ -669,6 +669,7 @@ class MemoryRuntime:
             compression_ratio=round(block.tokens / max(1, result.pre_tokens or pre_tokens), 6),
             summary_text=result.summary,
             retained_facts=list(result.retained_facts),
+            retained_negative_evidence=[],
             source_memory_ids=list(result.source_memory_ids),
             source_event_ids=list(result.source_event_ids),
             source_state_node_ids=list(result.source_state_node_ids),
@@ -1111,6 +1112,21 @@ def _benchmark_summary_from_records(results) -> dict[str, dict[str, float]]:
             ]),
             "reflection_retention_hit_rate": _avg([
                 float(r.get("reflection_retention_hit", 0)) for r in rows if r.get("reflection_retention_hit_present")
+            ]),
+            "avg_retained_negative_evidence_count": _avg([
+                float(r.get("retained_negative_evidence_count", 0))
+                for r in rows
+                if r.get("retained_negative_evidence_count_present")
+            ]),
+            "compaction_negative_lesson_retained_rate": _avg([
+                float(r.get("compaction_negative_lesson_retained", 0))
+                for r in rows
+                if r.get("compaction_negative_lesson_retained_present")
+            ]),
+            "compaction_retained_negative_unsafe_leakage_rate": _avg([
+                float(r.get("compaction_retained_negative_unsafe_leakage", 0))
+                for r in rows
+                if r.get("compaction_retained_negative_unsafe_leakage_present")
             ]),
             "avg_retrieval_latency_ms": _avg([float(r.get("retrieval_latency_ms", 0)) for r in rows]),
             "avg_gate_latency_ms": _avg([float(r.get("gate_latency_ms", 0)) for r in rows]),

@@ -21,6 +21,7 @@ from app.runtime.models import (
     MemoryType,
     ProfileEvent,
     ProfilePhase,
+    RetainedNegativeEvidence,
     RetrievalStrategy,
     RiskFlags,
 )
@@ -94,6 +95,50 @@ async def test_negative_evidence_metrics_are_explicit_and_not_positive_injection
     assert summary.sanitized_failure_notice_count == 1
     assert summary.negative_evidence_block_count == 2
     assert summary.by_strategy["variant_2"]["negative_evidence_block_rate"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_negative_evidence_block_count_excludes_retained_compaction_metadata():
+    repo = InMemoryRepository()
+    access = await repo.add_access_log(
+        MemoryAccessLog(
+            workspace_id="ws_metrics",
+            run_id="run_negative_retained",
+            retrieval_strategy=RetrievalStrategy.variant_2,
+            candidate_count=1,
+            accepted_count=0,
+            rejected_count=1,
+        )
+    )
+    degraded, degraded_gate = await _add_logged_memory(
+        repo,
+        access.access_id,
+        _memory(branch_status=BranchStatus.failed, source_state_node_id="node_retained"),
+        GateDecisionType.degrade,
+        "failed_branch_degraded",
+    )
+    retained_log = _compaction_log(access.access_id, run_id="run_negative_retained")
+    retained_log.retained_negative_evidence = [
+        RetainedNegativeEvidence(
+            source_memory_id=degraded.memory_id,
+            source_state_node_id="node_retained",
+            mode="raw_failed_attempt",
+            risk_kind=None,
+            reason="failed_branch_degraded",
+            safe_text="npm test failed previously",
+        )
+    ]
+
+    access_metrics = metrics.build_access_observability_metrics(
+        access,
+        [degraded_gate],
+        [degraded],
+        [],
+        [retained_log],
+    )
+
+    assert access_metrics["negative_evidence_block_count"] == 0.0
+    assert access_metrics["retained_negative_evidence_count"] == 1.0
 
 
 @pytest.mark.asyncio
@@ -293,6 +338,8 @@ async def test_access_metrics_cover_all_quality_safety_signals():
         "degraded_negative_evidence_count": 0.0,
         "sanitized_failure_notice_count": 0.0,
         "negative_evidence_block_count": 0.0,
+        "retained_negative_evidence_count": 0.0,
+        "sanitized_retained_negative_evidence_count": 0.0,
         "stale_rejected": 1.0,
         "stale_injected": 1.0,
         "tool_sensitive_blocked": 1.0,
@@ -381,6 +428,8 @@ async def test_summary_filters_and_by_strategy_rates():
     assert summary.degraded_negative_evidence_count == 0
     assert summary.sanitized_failure_notice_count == 0
     assert summary.negative_evidence_block_count == 0
+    assert summary.retained_negative_evidence_count == 0
+    assert summary.sanitized_retained_negative_evidence_count == 0
     assert summary.stale_injected == 1
     assert summary.tool_sensitive_blocked == 1
     assert summary.superseded_injected == 1
@@ -398,6 +447,8 @@ async def test_summary_filters_and_by_strategy_rates():
         "avg_rejected_count": 1.5,
         "failed_branch_injection_rate": 0.0,
         "negative_evidence_block_rate": 0.0,
+        "retained_negative_evidence_rate": 0.0,
+        "sanitized_retained_negative_evidence_rate": 0.0,
         "degraded_negative_evidence_rate": 0.0,
         "sanitized_failure_notice_rate": 0.0,
         "stale_injection_rate": 0.5,

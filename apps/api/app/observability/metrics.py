@@ -73,6 +73,8 @@ async def build_observability_summary(
         degraded_negative_evidence_count=int(totals["degraded_negative_evidence_count"]),
         sanitized_failure_notice_count=int(totals["sanitized_failure_notice_count"]),
         negative_evidence_block_count=int(totals["negative_evidence_block_count"]),
+        retained_negative_evidence_count=int(totals["retained_negative_evidence_count"]),
+        sanitized_retained_negative_evidence_count=int(totals["sanitized_retained_negative_evidence_count"]),
         stale_rejected=int(totals["stale_rejected"]),
         stale_injected=int(totals["stale_injected"]),
         tool_sensitive_blocked=int(totals["tool_sensitive_blocked"]),
@@ -127,6 +129,8 @@ def build_access_observability_metrics(
     now = datetime.now(timezone.utc)
     compaction_logs = compaction_logs or []
     negative_evidence = _rebuilt_negative_evidence(gate_logs, candidate_memories)
+    retained_negative_evidence_count = sum(len(log.retained_negative_evidence) for log in compaction_logs)
+    actual_negative_evidence_block_count = max(0, len(negative_evidence) - retained_negative_evidence_count)
     return {
         "access_count": 1.0,
         "candidate_count": float(access.candidate_count),
@@ -144,7 +148,16 @@ def build_access_observability_metrics(
         "sanitized_failure_notice_count": float(
             sum(g.reject_reason in {"failed_branch_sanitized", "rolled_back_sanitized"} for g in gate_logs)
         ),
-        "negative_evidence_block_count": float(len(negative_evidence)),
+        "negative_evidence_block_count": float(actual_negative_evidence_block_count),
+        "retained_negative_evidence_count": float(retained_negative_evidence_count),
+        "sanitized_retained_negative_evidence_count": float(
+            sum(
+                1
+                for log in compaction_logs
+                for item in log.retained_negative_evidence
+                if item.mode == "sanitized_risk_notice"
+            )
+        ),
         "stale_rejected": float(sum(g.reject_reason == "stale" for g in gate_logs)),
         "stale_injected": float(sum(m.expires_at is not None and m.expires_at < now for m in accepted_memories)),
         "tool_sensitive_blocked": float(sum(g.reject_reason == "tool_sensitive" for g in gate_logs)),
@@ -197,6 +210,8 @@ def _empty_totals() -> dict[str, float]:
         "degraded_negative_evidence_count": 0.0,
         "sanitized_failure_notice_count": 0.0,
         "negative_evidence_block_count": 0.0,
+        "retained_negative_evidence_count": 0.0,
+        "sanitized_retained_negative_evidence_count": 0.0,
         "stale_rejected": 0.0,
         "stale_injected": 0.0,
         "tool_sensitive_blocked": 0.0,
@@ -250,6 +265,8 @@ def _strategy_summary(totals: dict[str, float]) -> dict[str, float]:
         "avg_rejected_count": _avg(totals, "rejected_count"),
         "failed_branch_injection_rate": _rate(totals, "failed_branch_injected"),
         "negative_evidence_block_rate": _rate(totals, "negative_evidence_block_count"),
+        "retained_negative_evidence_rate": _rate(totals, "retained_negative_evidence_count"),
+        "sanitized_retained_negative_evidence_rate": _rate(totals, "sanitized_retained_negative_evidence_count"),
         "degraded_negative_evidence_rate": _rate(totals, "degraded_negative_evidence_count"),
         "sanitized_failure_notice_rate": _rate(totals, "sanitized_failure_notice_count"),
         "stale_injection_rate": _rate(totals, "stale_injected"),

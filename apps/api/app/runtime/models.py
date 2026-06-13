@@ -437,6 +437,7 @@ class ContextCompactionLog(_Base):
     compression_ratio: float = 1.0
     summary_text: Optional[str] = None
     retained_facts: list["RetainedFact"] = Field(default_factory=list)
+    retained_negative_evidence: list["RetainedNegativeEvidence"] = Field(default_factory=list)
     source_memory_ids: list[str] = Field(default_factory=list)
     source_event_ids: list[str] = Field(default_factory=list)
     source_state_node_ids: list[str] = Field(default_factory=list)
@@ -454,6 +455,7 @@ class PendingCompactionLog:
     compression_ratio: float
     summary_text: str | None
     retained_facts: list["RetainedFact"]
+    retained_negative_evidence: list["RetainedNegativeEvidence"]
     source_memory_ids: list[str]
     source_event_ids: list[str]
     source_state_node_ids: list[str]
@@ -480,6 +482,7 @@ class PendingCompactionLog:
             compression_ratio=self.compression_ratio,
             summary_text=self.summary_text,
             retained_facts=list(self.retained_facts),
+            retained_negative_evidence=list(self.retained_negative_evidence),
             source_memory_ids=list(self.source_memory_ids),
             source_event_ids=list(self.source_event_ids),
             source_state_node_ids=list(self.source_state_node_ids),
@@ -533,6 +536,23 @@ class NegativeEvidence(_Base):
     reason: str
     safe_text: str
     provenance: Optional[Provenance] = None
+
+
+class RetainedNegativeEvidence(_Base):
+    """Safe metadata retained when negative evidence is dropped by compaction.
+
+    This is deliberately separate from positive ``RetainedFact`` and carries
+    only the already-sanitized negative-evidence text, never raw memory content.
+    """
+
+    source_memory_id: Optional[str] = None
+    source_state_node_id: Optional[str] = None
+    mode: Literal["raw_failed_attempt", "sanitized_risk_notice"]
+    risk_kind: Optional[str] = None
+    reason: str
+    safe_text: str
+    provenance: Optional[Provenance] = None
+    created_from_block_type: Literal["avoided_attempts"] = "avoided_attempts"
 
 
 class GateDecisionView(_Base):
@@ -655,6 +675,8 @@ class ObservabilitySummary(_Base):
     degraded_negative_evidence_count: int = 0
     sanitized_failure_notice_count: int = 0
     negative_evidence_block_count: int = 0
+    retained_negative_evidence_count: int = 0
+    sanitized_retained_negative_evidence_count: int = 0
     stale_rejected: int = 0
     stale_injected: int = 0
     tool_sensitive_blocked: int = 0

@@ -17,6 +17,7 @@ from app.runtime.models import (
     MemoryType,
     NegativeEvidence,
     Provenance,
+    RetainedNegativeEvidence,
     Sensitivity,
 )
 
@@ -145,6 +146,36 @@ def dedupe_negative_evidence(items: list[NegativeEvidence], *, max_blocks: int =
     return [selected[key] for key in order[: max(0, max_blocks)]]
 
 
+def to_retained_negative_evidence(evidence: NegativeEvidence) -> RetainedNegativeEvidence:
+    """Convert safe negative evidence into compaction-retained metadata.
+
+    The conversion intentionally copies only fields from the safe
+    ``NegativeEvidence`` DTO. It never reads source memory content.
+    """
+    return RetainedNegativeEvidence(
+        source_memory_id=evidence.source_memory_id,
+        source_state_node_id=evidence.source_state_node_id,
+        mode=evidence.mode,
+        risk_kind=_normalize_retained_risk_kind(evidence.risk_kind),
+        reason=evidence.reason,
+        safe_text=redact(evidence.safe_text),
+        provenance=evidence.provenance,
+    )
+
+
+def _normalize_retained_risk_kind(kind: str | None) -> str | None:
+    if kind is None:
+        return None
+    aliases = {
+        "destructive_command": "destructive",
+        "destructive": "destructive",
+        "production_env": "tool_sensitive",
+        "tool_sensitive": "tool_sensitive",
+        "secret": "secret",
+    }
+    return aliases.get(kind, kind)
+
+
 def _raw_or_secret_sanitized(mem: MemoryItem, reason: str) -> NegativeEvidence:
     redacted = redact(mem.content)
     if contains_secret(mem.content) or redacted != mem.content:
@@ -207,4 +238,5 @@ __all__ = [
     "risk_kind",
     "safe_observability_content",
     "safe_observability_key_value",
+    "to_retained_negative_evidence",
 ]

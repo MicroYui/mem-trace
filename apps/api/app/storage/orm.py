@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
@@ -243,6 +244,12 @@ class ContextCompactionORM(Base):
     compression_ratio: Mapped[float] = mapped_column(Float, default=1.0)
     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     retained_facts: Mapped[list] = mapped_column(JSONB, default=list)
+    retained_negative_evidence: Mapped[list] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=sa.text("'[]'::jsonb"),
+    )
     source_memory_ids: Mapped[list] = mapped_column(JSONB, default=list)
     source_event_ids: Mapped[list] = mapped_column(JSONB, default=list)
     source_state_node_ids: Mapped[list] = mapped_column(JSONB, default=list)

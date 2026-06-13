@@ -453,6 +453,43 @@ async def test_replay_reconstructs_negative_evidence_without_false_context_drift
     assert replay.metrics["negative_evidence_block_count"] == original_negative_blocks
 
 
+@pytest.mark.asyncio
+async def test_replay_surfaces_retained_negative_evidence_from_compaction_logs():
+    runtime, repo, run_id, step_id = await _seed_failure_learning_runtime()
+    for i in range(5):
+        await repo.add_memory(
+            MemoryItem(
+                workspace_id="ws_replay_negative",
+                run_id=run_id,
+                memory_type=MemoryType.episodic,
+                content=f"verbose benign troubleshooting detail {i} that can be dropped under budget pressure",
+                branch_status=BranchStatus.completed,
+            )
+        )
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run_id,
+            step_id=step_id,
+            query="npm test failed how should I run tests now",
+            strategy=RetrievalStrategy.variant_2,
+            token_budget=18,
+            top_k=10,
+        )
+    )
+    assert not any(block.type == "avoided_attempts" for block in ctx.context_blocks)
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    assert replay.compaction_logs
+    retained = replay.compaction_logs[0].retained_negative_evidence
+    assert len(retained) == 1
+    assert retained[0].mode == "raw_failed_attempt"
+    assert "npm test" in retained[0].safe_text
+    assert replay.metrics["negative_evidence_block_count"] == 0
+    assert replay.metrics["retained_negative_evidence_count"] == 1
+
+
 def _positive_failed_blocks(blocks):
     return [
         block

@@ -16,6 +16,7 @@ Cases:
   7. stale_rejection      - expired legacy endpoint memory -> gate rejects as stale
   8. no_memory_baseline   - constraint only in memory -> no-memory baseline fails
   9. over_budget_compaction - tiny context budget -> retain key=value facts safely
+ 13. compaction_retains_negative_lesson - dropped negative evidence retained as metadata
  12. reflection_retention - +reflection keeps a high-retention memory under budget
 """
 from __future__ import annotations
@@ -493,6 +494,62 @@ async def _seed_reflection_retention(rt: MemoryRuntime, ws: str) -> SeedResult:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Case 13: compaction retains dropped negative evidence as metadata only.
+# --------------------------------------------------------------------------- #
+async def _seed_compaction_retains_negative_lesson(rt: MemoryRuntime, ws: str) -> SeedResult:
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="avoid compacted npm failure", workspace_id=ws))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+    await rt.write_event(_ev(run.run_id, s1.step_id, EventRole.user, EventType.message,
+                             content="这个项目使用 Bun，不用 Node.js"))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id,
+                                           status=StepStatus.completed, summary="confirmed project uses Bun"))
+
+    failed = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="debugging"))
+    await rt.write_event(_ev(run.run_id, failed.step_id, EventRole.tool, EventType.tool_call,
+                             tool_name="bash", content="npm test"))
+    await rt.write_event(_ev(run.run_id, failed.step_id, EventRole.tool, EventType.tool_result, status="failed",
+                             content="Tried npm test, failed because the workspace uses Bun tooling."))
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=failed.step_id,
+                                           status=StepStatus.failed, error_message="npm unavailable"))
+    await rt.rollback_branch(RollbackRequest(run_id=run.run_id, step_id=failed.step_id, reason="npm unavailable"))
+
+    for i in range(10):
+        await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+            MemoryItem(
+                workspace_id=ws,
+                run_id=run.run_id,
+                memory_type=MemoryType.episodic,
+                content=(
+                    f"verbose benign compaction filler {i}: test runner notes "
+                    "include enough ordinary detail to exceed a very tight context budget"
+                ),
+                summary=f"verbose benign compaction filler {i}",
+                branch_status=BranchStatus.completed,
+            )
+        )
+
+    recovery = await rt.start_step(StartStepRequest(
+        run_id=run.run_id,
+        intent="debugging",
+        recovery_from_step_id=failed.step_id,
+        goal="run tests correctly without repeating npm failure",
+    ))
+    return SeedResult(
+        run.run_id,
+        recovery.step_id,
+        "I previously tried npm test and it failed. How should I run tests now?",
+        ws,
+        extra={
+            "token_budget": 24,
+            "top_k": 20,
+            "negative_lesson_markers": ["npm"],
+            "unsafe_negative_markers": ["rm -rf", "/prod", "sk-", "password", "authorization"],
+            "compaction_negative_learning_case": True,
+        },
+    )
+
+
 CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_1_project_preference", "Project preference persistence",
                   "User states Bun, not Node.js; later commands should use bun.",
@@ -530,6 +587,9 @@ CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_12_reflection_retention", "Reflection-lite retention",
                   "A frequently-used high-retention memory is retained under a tight budget by +reflection where +gate drops it.",
                   _seed_reflection_retention),
+    BenchmarkCase("case_13_compaction_retains_negative_lesson", "Compaction retains negative lesson",
+                  "A dropped avoided-attempt block is retained as safe compaction metadata without prompt injection.",
+                  _seed_compaction_retains_negative_lesson),
 ]
 
 ALL_STRATEGIES = [

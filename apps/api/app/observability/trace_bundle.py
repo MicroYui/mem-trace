@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.memory.secrets import redact
+from app.retrieval.negative_evidence import SANITIZED_TEMPLATES
 from app.runtime.models import (
     AgentEvent,
     AgentRun,
@@ -21,6 +22,7 @@ from app.runtime.models import (
     MemoryItem,
     ProfileEvent,
     RetainedFact,
+    RetainedNegativeEvidence,
     StateNode,
 )
 from app.runtime.repository import Repository
@@ -310,12 +312,44 @@ def _redact_compaction(log: ContextCompactionLog) -> ContextCompactionLog:
         else fact
         for fact in log.retained_facts
     ]
+    retained_negative_evidence = [
+        item.model_copy(update={"reason": redact(item.reason), "safe_text": _redact_retained_negative_text(item)})
+        if isinstance(item, RetainedNegativeEvidence)
+        else item
+        for item in log.retained_negative_evidence
+    ]
     return log.model_copy(
         update={
             "summary_text": redact(log.summary_text),
             "retained_facts": facts,
+            "retained_negative_evidence": retained_negative_evidence,
             "warnings": _redact_value(log.warnings),
         }
+    )
+
+
+def _redact_retained_negative_text(item: RetainedNegativeEvidence) -> str:
+    if item.risk_kind in SANITIZED_TEMPLATES:
+        return SANITIZED_TEMPLATES[item.risk_kind]
+    redacted = redact(item.safe_text)
+    if _contains_retained_negative_unsafe_marker(redacted):
+        return SANITIZED_TEMPLATES["unknown"]
+    if item.mode == "sanitized_risk_notice":
+        return SANITIZED_TEMPLATES["unknown"]
+    return redacted
+
+
+def _contains_retained_negative_unsafe_marker(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "rm -rf",
+            "/prod",
+            "sk-",
+            "password",
+            "authorization",
+        )
     )
 
 

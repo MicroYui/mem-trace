@@ -8,8 +8,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.memory.secrets import redact
 from app.observability.metrics import build_access_observability_metrics, build_observability_summary
 from app.observability.replay import RetrievalReplayService
+from app.retrieval.negative_evidence import SANITIZED_TEMPLATES
 from app.retrieval.controller import RetrievalController
 from app.runtime.models import (
     ContextCompactionLog,
@@ -20,6 +22,7 @@ from app.runtime.models import (
     ObservabilityReportResult,
     ObservabilitySummary,
     ReplayRetrievalResult,
+    RetainedNegativeEvidence,
 )
 from app.runtime.repository import Repository
 
@@ -78,7 +81,7 @@ async def write_observability_report(
         "summary": summary.model_dump(mode="json"),
         "accesses": access_rows,
         "compactions": compaction_rows,
-        "replays": [replay.model_dump(mode="json") for replay in replays],
+        "replays": [_safe_replay_dump(replay) for replay in replays],
     }
 
     json_path = output_dir / f"{_REPORT_BASENAME}.json"
@@ -194,11 +197,69 @@ def _compaction_rows(access: MemoryAccessLog, logs: list[ContextCompactionLog]) 
                 "compression_ratio": log.compression_ratio,
                 "summary_text": log.summary_text,
                 "retained_facts": [fact.model_dump(mode="json") for fact in log.retained_facts],
+                "retained_negative_evidence": [
+                    _safe_retained_negative_evidence(item).model_dump(mode="json")
+                    for item in log.retained_negative_evidence
+                ],
                 "source_memory_ids": list(log.source_memory_ids),
                 "warnings": list(log.warnings),
             }
         )
     return rows
+
+
+def _safe_retained_negative_evidence(item: RetainedNegativeEvidence) -> RetainedNegativeEvidence:
+    safe_text = _safe_retained_negative_text(item)
+    return item.model_copy(update={"reason": redact(item.reason), "safe_text": safe_text})
+
+
+def _safe_replay_dump(replay: ReplayRetrievalResult) -> dict[str, Any]:
+    payload = replay.model_dump(mode="json")
+    payload["compaction_logs"] = [
+        _safe_compaction_log(log).model_dump(mode="json") for log in replay.compaction_logs
+    ]
+    return payload
+
+
+def _safe_compaction_log(log: ContextCompactionLog) -> ContextCompactionLog:
+    return log.model_copy(
+        update={
+            "summary_text": redact(log.summary_text),
+            "retained_facts": [
+                fact.model_copy(update={"key": redact(fact.key), "value": redact(fact.value)})
+                for fact in log.retained_facts
+            ],
+            "retained_negative_evidence": [
+                _safe_retained_negative_evidence(item) for item in log.retained_negative_evidence
+            ],
+            "warnings": [redact(warning) for warning in log.warnings],
+        }
+    )
+
+
+def _safe_retained_negative_text(item: RetainedNegativeEvidence) -> str:
+    if item.risk_kind in SANITIZED_TEMPLATES:
+        return SANITIZED_TEMPLATES[item.risk_kind]
+    redacted = redact(item.safe_text)
+    if _contains_retained_negative_unsafe_marker(redacted):
+        return SANITIZED_TEMPLATES["unknown"]
+    if item.mode == "sanitized_risk_notice":
+        return SANITIZED_TEMPLATES["unknown"]
+    return redacted
+
+
+def _contains_retained_negative_unsafe_marker(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "rm -rf",
+            "/prod",
+            "sk-",
+            "password",
+            "authorization",
+        )
+    )
 
 
 def _render_markdown(
@@ -249,19 +310,25 @@ def _render_markdown(
             f"- Avg compression ratio: {summary.avg_compression_ratio}",
             f"- Total dropped blocks: {summary.total_dropped_blocks}",
             f"- History summaries: {summary.history_summary_count}",
+            f"- Retained negative evidence: {summary.retained_negative_evidence_count}",
+            f"- Sanitized retained negative evidence: {summary.sanitized_retained_negative_evidence_count}",
             "",
-            "| Access | Kind | Provider | Pre/Post Tokens | Dropped | Retained Facts |",
-            "|---|---|---|---:|---:|---|",
+            "| Access | Kind | Provider | Pre/Post Tokens | Dropped | Retained Facts | Retained negative evidence |",
+            "|---|---|---|---:|---:|---|---|",
         ]
     )
     for row in payload.get("compactions", []):
         facts = "; ".join(_md_text(f"{fact['key']}={fact['value']}") for fact in row.get("retained_facts", []))
+        retained_negative = "; ".join(
+            _md_text(f"{item.get('mode')}:{item.get('reason')}:{item.get('safe_text')}")
+            for item in row.get("retained_negative_evidence", [])
+        )
         lines.append(
             f"| `{_md_text(row['access_id'])}` | {_md_text(row['kind'])} | {_md_text(row['provider'])} | "
-            f"{row['pre_tokens']}/{row['post_tokens']} | {row['dropped_block_count']} | {facts} |"
+            f"{row['pre_tokens']}/{row['post_tokens']} | {row['dropped_block_count']} | {facts} | {retained_negative} |"
         )
     if not payload.get("compactions"):
-        lines.append("| none | - | - | 0/0 | 0 |  |")
+        lines.append("| none | - | - | 0/0 | 0 |  |  |")
 
     lines.extend(
         [
@@ -383,13 +450,17 @@ h1,h2{color:#111827}.cards{display:grid;grid-template-columns:repeat(auto-fit,mi
         [
             "</table>",
             "<h2>Compaction</h2>",
-            "<table><tr><th>Access</th><th>Kind</th><th>Provider</th><th>Pre/Post Tokens</th><th>Dropped</th><th>Retained Facts</th></tr>",
+            "<table><tr><th>Access</th><th>Kind</th><th>Provider</th><th>Pre/Post Tokens</th><th>Dropped</th><th>Retained Facts</th><th>Retained negative evidence</th></tr>",
         ]
     )
     compactions = payload.get("compactions", [])
     if compactions:
         for row in compactions:
             facts = "; ".join(f"{fact['key']}={fact['value']}" for fact in row.get("retained_facts", []))
+            retained_negative = "; ".join(
+                f"{item.get('mode')}:{item.get('reason')}:{item.get('safe_text')}"
+                for item in row.get("retained_negative_evidence", [])
+            )
             parts.append(
                 "<tr>"
                 f"<td><code>{html.escape(row['access_id'])}</code></td>"
@@ -398,10 +469,11 @@ h1,h2{color:#111827}.cards{display:grid;grid-template-columns:repeat(auto-fit,mi
                 f"<td>{row['pre_tokens']}/{row['post_tokens']}</td>"
                 f"<td>{row['dropped_block_count']}</td>"
                 f"<td>{html.escape(facts)}</td>"
+                f"<td>{html.escape(retained_negative)}</td>"
                 "</tr>"
             )
     else:
-        parts.append("<tr><td>none</td><td>-</td><td>-</td><td>0/0</td><td>0</td><td></td></tr>")
+        parts.append("<tr><td>none</td><td>-</td><td>-</td><td>0/0</td><td>0</td><td></td><td></td></tr>")
     parts.extend(
         [
             "</table>",
@@ -417,6 +489,8 @@ h1,h2{color:#111827}.cards{display:grid;grid-template-columns:repeat(auto-fit,mi
         ("tool_sensitive_blocked", summary.tool_sensitive_blocked),
         ("destructive_command_blocked", summary.destructive_command_blocked),
         ("risk_blocked", summary.risk_blocked),
+        ("retained_negative_evidence_count", summary.retained_negative_evidence_count),
+        ("sanitized_retained_negative_evidence_count", summary.sanitized_retained_negative_evidence_count),
         ("workspace_mismatch_rejected", summary.workspace_mismatch_rejected),
         ("workspace_leakage", summary.workspace_leakage),
         ("superseded_injected", summary.superseded_injected),

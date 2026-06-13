@@ -96,6 +96,12 @@ class CaseMetrics:
     sanitized_notice_present_present: int = 0
     reflection_retention_hit: int = 0
     reflection_retention_hit_present: int = 0
+    retained_negative_evidence_count: int = 0
+    retained_negative_evidence_count_present: int = 0
+    compaction_negative_lesson_retained: int = 0
+    compaction_negative_lesson_retained_present: int = 0
+    compaction_retained_negative_unsafe_leakage: int = 0
+    compaction_retained_negative_unsafe_leakage_present: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -113,6 +119,19 @@ def _compaction_log_text(logs: list[ContextCompactionLog]) -> str:
             parts.append(log.summary_text)
         parts.extend(f"{fact.key}={fact.value}" for fact in log.retained_facts)
         parts.extend(log.warnings)
+    return " ".join(parts).lower()
+
+
+def _retained_negative_text(logs: list[ContextCompactionLog]) -> str:
+    parts: list[str] = []
+    for log in logs:
+        for item in log.retained_negative_evidence:
+            parts.extend([
+                item.safe_text,
+                item.reason,
+                item.risk_kind or "",
+                item.mode,
+            ])
     return " ".join(parts).lower()
 
 
@@ -136,6 +155,7 @@ def evaluate_case(
     sanitized_failure_case: bool = False,
     reflection_marker: Optional[str] = None,
     reflection_case: bool = False,
+    compaction_negative_learning_case: bool = False,
 ) -> CaseMetrics:
     """Build metrics for one (case, strategy) run.
 
@@ -157,6 +177,7 @@ def evaluate_case(
     m.warnings = list(ctx.warnings)
     positive_blocks = _positive_blocks(ctx)
     negative_blocks = _negative_blocks(ctx)
+    logs = list(compaction_logs or [])
 
     if access is not None:
         m.retrieval_latency_ms = _phase_latency(profile_events, access.access_id, "retrieval")
@@ -217,7 +238,6 @@ def evaluate_case(
 
     # compaction quality: only scored for the over-budget compaction case.
     if compaction_positive_constraints is not None:
-        logs = list(compaction_logs or [])
         m.compaction_triggered_present = 1
         m.constraint_retention_hit_present = 1
         m.unsafe_compaction_leakage_present = 1
@@ -269,6 +289,31 @@ def evaluate_case(
             "redacted" in negative_text
             and "destructive operation" in negative_text
         ) else 0
+
+    # I7 retained-negative metadata is persisted on compaction logs after an
+    # ordinary `avoided_attempts` prompt block is dropped. It is not prompt
+    # input: score it from compaction logs only, while keeping action success
+    # tied to the positive/project context path.
+    if compaction_negative_learning_case:
+        retained_count = sum(len(log.retained_negative_evidence) for log in logs)
+        retained_text = _retained_negative_text(logs)
+        markers = [marker.lower() for marker in (negative_lesson_markers or [])]
+        unsafe_markers = [marker.lower() for marker in (unsafe_negative_markers or [])]
+        m.positive_contamination_present = 1
+        m.retained_negative_evidence_count_present = 1
+        m.compaction_negative_lesson_retained_present = 1
+        m.unsafe_negative_leakage_present = 1
+        m.compaction_retained_negative_unsafe_leakage_present = 1
+        m.correct_action_present = 1
+        m.positive_contamination = 1 if contaminated(ctx) else 0
+        m.retained_negative_evidence_count = retained_count
+        m.compaction_negative_lesson_retained = 1 if (
+            retained_count > 0 and (not markers or any(marker in retained_text for marker in markers))
+        ) else 0
+        unsafe_leaked = any(marker in retained_text for marker in unsafe_markers)
+        m.unsafe_negative_leakage = 1 if unsafe_leaked else 0
+        m.compaction_retained_negative_unsafe_leakage = 1 if unsafe_leaked else 0
+        m.correct_action = 1 if m.final_action == "bun test" else 0
 
     # Reflection-lite retention: the high-retention marker reached context.
     if reflection_case:

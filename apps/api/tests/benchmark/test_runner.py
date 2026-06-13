@@ -41,7 +41,7 @@ from app.runtime.repository import InMemoryRepository
 async def test_run_benchmark_writes_markdown_and_json_reports(tmp_path):
     report = await run_benchmark(output_dir=tmp_path)
 
-    assert len(report["cases"]) == 12
+    assert len(report["cases"]) == 13
     assert {c["case_id"] for c in report["cases"]} == {
         "case_1_project_preference",
         "case_2_failed_branch",
@@ -55,8 +55,9 @@ async def test_run_benchmark_writes_markdown_and_json_reports(tmp_path):
         "case_10_avoid_repeating_failed_attempt",
         "case_11_sanitized_failed_destructive_attempt",
         "case_12_reflection_retention",
+        "case_13_compaction_retains_negative_lesson",
     }
-    assert len(report["results"]) == 72  # 12 cases x 6 strategies
+    assert len(report["results"]) == 78  # 13 cases x 6 strategies
 
     json_path = tmp_path / "benchmark_results.json"
     md_path = tmp_path / "benchmark_report.md"
@@ -75,11 +76,17 @@ async def test_run_benchmark_writes_markdown_and_json_reports(tmp_path):
     assert saved["summary"]["variant_2"]["correct_action_rate"] == 1
     assert saved["summary"]["variant_2"]["unsafe_negative_leakage_rate"] == 0
     assert saved["summary"]["variant_2"]["sanitized_notice_rate"] == 1
+    assert saved["summary"]["variant_2"]["compaction_negative_lesson_retained_rate"] == 1
+    assert saved["summary"]["variant_2"]["compaction_retained_negative_unsafe_leakage_rate"] == 0
     assert (
         saved["summary"]["variant_2"]["failed_branch_contamination_rate"]
         < saved["summary"]["baseline_1"]["failed_branch_contamination_rate"]
     )
-    assert "failed_branch_contamination_rate" in md_path.read_text()
+    md = md_path.read_text()
+    assert "failed_branch_contamination_rate" in md
+    assert "compaction_negative_lesson_retained_rate" in md
+    assert "compaction_retained_negative_unsafe_leakage_rate" in md
+    assert "retained_negative_evidence_count" in md
 
 
 async def test_run_benchmark_meets_mvp_acceptance(tmp_path):
@@ -96,6 +103,7 @@ async def test_run_benchmark_meets_mvp_acceptance(tmp_path):
     assert acc["checks"]["variant_2_retains_constraints_under_compaction"] is True
     assert acc["checks"]["variant_2_learns_from_failure_without_repeating"] is True
     assert acc["checks"]["variant_2_sanitizes_destructive_failure_without_leakage"] is True
+    assert acc["checks"]["variant_2_retains_negative_lesson_under_compaction"] is True
 
 
 async def test_acceptance_includes_reflection_and_long_context_checks(tmp_path):
@@ -108,6 +116,67 @@ async def test_acceptance_includes_reflection_and_long_context_checks(tmp_path):
     assert report["summary"]["variant_2"]["reflection_retention_hit_rate"] == 0
     overhead = {s: report["summary"][s]["avg_memory_token_overhead"] for s in report["strategies"]}
     assert overhead["long_context"] == max(overhead.values())
+
+
+async def test_compaction_retains_negative_lesson_case_and_acceptance(tmp_path):
+    report = await run_benchmark(output_dir=tmp_path)
+
+    assert len(report["cases"]) == 13
+    assert {c["case_id"] for c in report["cases"]} >= {"case_13_compaction_retains_negative_lesson"}
+    assert len(report["results"]) == 78  # 13 cases x 6 strategies
+    assert report["acceptance"]["checks"]["variant_2_retains_negative_lesson_under_compaction"] is True
+
+    row = next(
+        r
+        for r in report["results"]
+        if r["case_id"] == "case_13_compaction_retains_negative_lesson"
+        and r["strategy"] == "variant_2"
+    )
+    assert row["positive_contamination"] == 0
+    assert row["retained_negative_evidence_count"] > 0
+    assert row["unsafe_negative_leakage"] == 0
+    # This success comes from existing positive/project context. Retained
+    # negative evidence is compaction metadata only and must not be required as
+    # prompt input for the deterministic action to remain correct.
+    assert row["task_success"] == 1
+
+
+def test_compaction_retains_negative_lesson_acceptance_requires_present_case_row():
+    summary = {
+        "variant_2": {
+            "compaction_negative_lesson_retained_rate": 1.0,
+            "compaction_retained_negative_unsafe_leakage_rate": 0.0,
+        }
+    }
+
+    acceptance = _acceptance(summary, results=[])
+
+    assert acceptance["checks"]["variant_2_retains_negative_lesson_under_compaction"] is False
+
+
+def test_compaction_retains_negative_lesson_acceptance_requires_case_specific_scoring_flags():
+    summary = {
+        "variant_2": {
+            "compaction_negative_lesson_retained_rate": 1.0,
+            "compaction_retained_negative_unsafe_leakage_rate": 0.0,
+        }
+    }
+    row = CaseMetrics(
+        case_id="case_13_compaction_retains_negative_lesson",
+        strategy="variant_2",
+        task_success=1,
+        positive_contamination=0,
+        retained_negative_evidence_count=1,
+        retained_negative_evidence_count_present=1,
+        compaction_negative_lesson_retained=1,
+        compaction_negative_lesson_retained_present=1,
+        compaction_retained_negative_unsafe_leakage=0,
+        compaction_retained_negative_unsafe_leakage_present=1,
+    )
+
+    acceptance = _acceptance(summary, results=[row])
+
+    assert acceptance["checks"]["variant_2_retains_negative_lesson_under_compaction"] is False
 
 
 def test_long_context_token_bloat_acceptance_requires_variant_2_comparator():
@@ -148,8 +217,8 @@ async def test_run_benchmark_persists_cases_and_results(tmp_path):
 
     cases = await repo.list_benchmark_cases()
     results = await repo.list_benchmark_results()
-    assert len(cases) == 12
-    assert len(results) == 72
+    assert len(cases) == 13
+    assert len(results) == 78
     assert {r.strategy for r in results} == {
         "baseline_0",
         "long_context",
@@ -192,6 +261,14 @@ async def test_run_benchmark_persists_cases_and_results(tmp_path):
         and r.metrics["reflection_retention_hit"] == 1
         for r in results
     )
+    assert any(
+        r.case_id == "case_13_compaction_retains_negative_lesson" and r.strategy == "variant_2"
+        and r.metrics["positive_contamination"] == 0
+        and r.metrics["retained_negative_evidence_count"] > 0
+        and r.metrics["unsafe_negative_leakage"] == 0
+        and r.metrics["task_success"] == 1
+        for r in results
+    )
 
 
 async def test_run_benchmark_persists_eval_records(tmp_path):
@@ -201,7 +278,7 @@ async def test_run_benchmark_persists_eval_records(tmp_path):
 
     eval_cases = await repo.list_eval_cases()
     eval_runs = await repo.list_eval_runs()
-    assert len(eval_cases) == 12
+    assert len(eval_cases) == 13
     assert len(eval_runs) == 1
     eval_run = eval_runs[0]
     assert eval_run.name == "deterministic_benchmark"
@@ -218,8 +295,11 @@ async def test_run_benchmark_persists_eval_records(tmp_path):
     assert eval_run.finished_at is not None
 
     results = await repo.list_eval_results(eval_run_id=eval_run.eval_run_id)
-    assert len(results) == 72  # 12 cases x 6 strategies
-    assert {r.eval_case_id for r in eval_cases} >= {"case_12_reflection_retention"}
+    assert len(results) == 78  # 13 cases x 6 strategies
+    assert {r.eval_case_id for r in eval_cases} >= {
+        "case_12_reflection_retention",
+        "case_13_compaction_retains_negative_lesson",
+    }
     assert all(r.passed is True for r in results)
     assert any(
         r.eval_case_id == "case_12_reflection_retention"
@@ -253,9 +333,9 @@ async def test_run_benchmark_eval_persistence_is_repeatable(tmp_path):
         for strategy, fields in second["summary"].items()
     }
     assert deterministic_first == deterministic_second
-    assert len(await repo.list_eval_cases()) == 12
+    assert len(await repo.list_eval_cases()) == 13
     assert len(await repo.list_eval_runs()) == 2
-    assert len(await repo.list_eval_results()) == 144  # 2 runs x 72
+    assert len(await repo.list_eval_results()) == 156  # 2 runs x 78
 
 
 async def test_workspace_memory_snapshot_restores_all_mutable_retrieval_fields():

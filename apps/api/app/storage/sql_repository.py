@@ -26,6 +26,7 @@ from app.runtime.models import (
     MemoryGateLog,
     MemoryItem,
     ProfileEvent,
+    RetainedNegativeEvidence,
     RiskFlags,
     StateNode,
 )
@@ -246,6 +247,7 @@ def _compaction_to_orm(c: ContextCompactionLog) -> orm.ContextCompactionORM:
         compression_ratio=c.compression_ratio,
         summary_text=c.summary_text,
         retained_facts=[fact.model_dump(mode="json") for fact in c.retained_facts],
+        retained_negative_evidence=[item.model_dump(mode="json") for item in c.retained_negative_evidence],
         source_memory_ids=list(c.source_memory_ids),
         source_event_ids=list(c.source_event_ids),
         source_state_node_ids=list(c.source_state_node_ids),
@@ -269,6 +271,10 @@ def _compaction_from_orm(o: orm.ContextCompactionORM) -> ContextCompactionLog:
         compression_ratio=o.compression_ratio,
         summary_text=o.summary_text,
         retained_facts=o.retained_facts or [],
+        retained_negative_evidence=[
+            RetainedNegativeEvidence.model_validate(item)
+            for item in (getattr(o, "retained_negative_evidence", None) or [])
+        ],
         source_memory_ids=o.source_memory_ids or [],
         source_event_ids=o.source_event_ids or [],
         source_state_node_ids=o.source_state_node_ids or [],

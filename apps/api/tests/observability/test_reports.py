@@ -21,6 +21,7 @@ from app.runtime.models import (
     MemoryItem,
     MemoryType,
     ObservabilityReportRequest,
+    RetainedNegativeEvidence,
     RetainedFact,
     RetrievalRequest,
     RetrievalStrategy,
@@ -290,6 +291,67 @@ async def test_report_filters_compaction_rows_and_escapes_markdown(monkeypatch, 
     assert "must-not-render" not in markdown
     assert "project.pipe=bun\\|safe<br>value&lt;script&gt;\\!\\[x\\]\\(https://evil.test/pixel\\)" in markdown
     assert "![x](https://evil.test/pixel)" not in markdown
+
+
+@pytest.mark.asyncio
+async def test_report_includes_retained_negative_evidence_counts_and_sanitized_rows(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_report")
+    run_id, access_id = await _seed_observable_access(runtime, repo)
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=access_id,
+            workspace_id="ws_report",
+            run_id=run_id,
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            pre_tokens=40,
+            post_tokens=6,
+            dropped_block_count=2,
+            compression_ratio=0.15,
+            retained_negative_evidence=[
+                RetainedNegativeEvidence(
+                    source_memory_id="mem_failed",
+                    source_state_node_id="node_failed",
+                    mode="sanitized_risk_notice",
+                    risk_kind="destructive",
+                    reason="failed_branch_sanitized",
+                    safe_text="MALFORMED legacy row leaked rm -rf /prod with password=hunter2 Authorization: Bearer sk-1234567890abcdef",
+                ),
+                RetainedNegativeEvidence(
+                    source_memory_id="mem_malformed_raw_risk",
+                    source_state_node_id="node_failed_raw_risk",
+                    mode="raw_failed_attempt",
+                    risk_kind="destructive",
+                    reason="failed_branch_degraded",
+                    safe_text="Malformed raw retained row says kubectl delete namespace production",
+                )
+            ],
+        )
+    )
+
+    result = await runtime.write_observability_report(
+        ObservabilityReportRequest(workspace_id="ws_report", output_dir="reports", include_replay=True)
+    )
+
+    payload = json.loads((tmp_path / result.json_path).read_text())
+    metrics = payload["accesses"][0]["metrics"]
+    assert metrics["retained_negative_evidence_count"] == 2.0
+    assert metrics["sanitized_retained_negative_evidence_count"] == 1.0
+    assert payload["summary"]["retained_negative_evidence_count"] == 2
+    assert payload["summary"]["sanitized_retained_negative_evidence_count"] == 1
+    assert payload["compactions"][0]["retained_negative_evidence"][0]["risk_kind"] == "destructive"
+    markdown = (tmp_path / result.markdown_path).read_text()
+    html = (tmp_path / result.html_path).read_text()
+    assert "Retained negative evidence" in markdown
+    assert "Retained negative evidence" in html
+    serialized = json.dumps(payload, ensure_ascii=False) + markdown + html
+    assert "destructive operation" in serialized
+    for marker in ("rm -rf", "/prod", "sk-", "password", "Authorization"):
+        assert marker not in serialized
+    assert "kubectl delete" not in serialized
+    assert "namespace production" not in serialized
 
 
 @pytest.mark.asyncio

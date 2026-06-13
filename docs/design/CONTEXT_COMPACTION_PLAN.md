@@ -34,7 +34,7 @@ Six Issues, dependency-ordered:
 
 Related deferred design note:
 
-7. **C6 / I7 — Failure-aware negative retained facts:** deferred — do **not** change compaction behavior in the completed C0-C5 loop. This is a future cross-feature design for preserving safe failed-branch lessons through compaction as a separate negative-evidence channel, coordinated with `docs/design/FAILURE_AWARE_NEGATIVE_MEMORY_PLAN.md` I7.
+7. **C6 / I7 — Failure-aware negative retained facts:** ✅ complete — C0-C5 compaction behavior remains complete and stable, while I7 preserves safe failed-branch lessons through compaction as a separate negative-evidence metadata channel. I7.1-I7.6 landed the DTO, dedicated compaction-log persistence field, dropped `avoided_attempts` metadata retention, replay/metrics/reports/trace-bundle surfacing, benchmark `case_13_compaction_retains_negative_lesson`, acceptance `variant_2_retains_negative_lesson_under_compaction`, and full closeout verification without protecting or forcing negative evidence into prompt context.
 
 ## 2. Non-goals (deferred)
 

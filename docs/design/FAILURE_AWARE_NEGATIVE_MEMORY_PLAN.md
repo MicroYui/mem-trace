@@ -1,6 +1,6 @@
 # Failure-aware Negative Memory Injection — 实施计划
 
-> **状态**：I1-I6 已完成；I7 deferred。设计已纳入第二轮 review 修正（replay/observability 同步、sanitized DTO 边界、reject_reason 顺序陷阱、计数闭合、负向块排序/去重/query 稳定性）。
+> **状态**：I1-I7 已完成。I7 compaction-negative retained facts 已完成 retained-negative DTO、dedicated compaction-log field、SQL JSONB migration/mapping、trace-bundle redaction、packer dropped-block metadata retention、replay/metrics/reports/bundle surfacing、benchmark `case_13_compaction_retains_negative_lesson`、acceptance `variant_2_retains_negative_lesson_under_compaction` 与 closeout verification。设计已纳入第二轮 review 修正（replay/observability 同步、sanitized DTO 边界、reject_reason 顺序陷阱、计数闭合、负向块排序/去重/query 稳定性）。
 > **来源**：ROADMAP §9 Context Compaction 的反向补集 + §1 技术债（failed branch 一刀切拦截）。
 > **关联文档**：`docs/design/ROADMAP.md`、`docs/design/CONTEXT_COMPACTION_PLAN.md`、`.ai/PROJECT_STATE.md`。
 > **执行约定**：每完成一个 Issue 须同步更新 `.ai/PROJECT_STATE.md`，并在本文件勾掉对应 checkbox。TDD：先写失败测试看红，再实现看绿。
@@ -141,9 +141,9 @@ def dedupe_negative_evidence(items, max_blocks=3) -> list[NegativeEvidence]
 | I4 ✅ | **Inspect + Replay + Observability 接线**（inspect_access / `replay.py` / `metrics.py` 三处 `_ACCEPTED_DECISIONS` 同步，调用 D6 builder，replay drift 严重度，防 drift / 指标错乱） | 首批 | I1,I2,I3 |
 | I5 ✅ | Benchmark case_10（safe）+ case_11（sanitized destructive）+ evaluator 显式分区 + 指标 + acceptance | 首批 | I1-I4 |
 | I6 ✅ | ROADMAP / CONTEXT_COMPACTION_PLAN / PROJECT_STATE 文档同步（实现与 benchmark 稳定后） | 首批收尾 | I1-I5 |
-| I7 | Compaction 负向 retained（独立 negative-lesson 通道 + replay 快照） | **后续独立** | I1-I6 |
+| I7 ✅ | Compaction 负向 retained（独立 negative-lesson 通道 + replay 快照） | 独立收尾 | I1-I6 |
 
-依赖链：I1 → I2 → I3 → I4 → I5 → I6。I7 后置。
+依赖链：I1 → I2 → I3 → I4 → I5 → I6 → I7（已完成）。
 （与原 review 建议一致：replay/observability 从「隐含项」提升为首批独立 I4；文档同步后移到 benchmark 稳定之后。）
 
 ---
@@ -318,23 +318,25 @@ cases 9→**11**；strategies 4 不变；runs `9×4=36`→**`11×4=44`**。
 
 ## 8. I6 — 文档同步（首批收尾，benchmark 稳定后，仅编辑既有文件） ✅
 
-- [x] `docs/design/ROADMAP.md`：§9.1 已标注首批 I1-I6 完成，当前后续为 Phase 3.5 SDK/LangGraph adapter 或 6-strategy benchmark expansion；I7 compaction negative retained 继续 deferred。
-- [x] `docs/design/CONTEXT_COMPACTION_PLAN.md`：新增 "C6: Failure-aware negative retained facts" 章节作为 I7 设计草案占位（首批不改 compaction 实际行为）。
-- [x] `.ai/PROJECT_STATE.md`：按 AGENTS.md 约定更新 current state / changed files / next action（Phase 3.5 或 6-strategy；I7 deferred）、benchmark 计数 36→44、新 acceptance check 名（`variant_2_learns_from_failure_without_repeating` + `variant_2_sanitizes_destructive_failure_without_leakage`）。
+- [x] `docs/design/ROADMAP.md`：§9.1 已标注首批 I1-I6 完成；后续主线 Phase 3.5、6-strategy benchmark、§13 hardening、§10/§11 provider/key ontology 均已完成；I7 compaction negative retained 已启动并完成 I7.1-I7.4。
+- [x] `docs/design/CONTEXT_COMPACTION_PLAN.md`：新增 "C6: Failure-aware negative retained facts" 章节作为 I7 设计草案占位；当前该交叉项已进入 I7 实现，I7.1-I7.4 已完成，并保持不改变 prompt 注入语义。
+- [x] `.ai/PROJECT_STATE.md`：按 AGENTS.md 约定更新 current state / changed files / next action；当前 I7.1-I7.6 complete，benchmark 已扩展到 case 13 与 acceptance `variant_2_retains_negative_lesson_under_compaction`。历史 benchmark 计数 36→44、新 acceptance check 名（`variant_2_learns_from_failure_without_repeating` + `variant_2_sanitizes_destructive_failure_without_leakage`）保留为 I5 记录。
 
 **I6 验证（2026-06-12）**：本 Issue 仅做文档/项目记忆同步，不改变运行时代码。同步范围包括 `docs/design/ROADMAP.md`、`docs/design/CONTEXT_COMPACTION_PLAN.md`、本计划、`AGENTS.md`、`.ai/PROJECT_STATE.md`、`.ai/REQUIREMENTS.md`、`.ai/IMPLEMENTATION_PLAN.md`、`.ai/DECISIONS.md`。Post-I6 验证：stale-reference grep 未发现旧的 I6-pending / I1-I5-only 状态表述；targeted benchmark/dashboard regression `uv run pytest apps/api/tests/benchmark/test_runner.py apps/api/tests/api/test_dashboard.py -q` -> 14 passed；full regression `uv run pytest -q` -> 251 passed；deterministic benchmark + reproducibility `uv run python -m app.benchmark.runner --output-dir reports && bash scripts/reproduce.sh` -> `acceptance.passed=true (10/10 checks true)`。
 
 ---
 
-## 9. I7 — Compaction 负向 retained（后续独立 Issue，首批不做）
+## 9. I7 — Compaction 负向 retained（独立 Issue） ✅
 
 **后置理由**：触及 `ContextCompactionLog` 持久化快照 + replay（改安全规则=改持久化语义，可能引入 `compaction_drift`，需 replay 回归/快照迁移）；且失败 memory 无 key/value，`RetainedFact` 白名单（project./endpoint./profile./procedure.）不适配；现有 summarizer 校验（`summarizer_provider.py:318` `_validate_result`）会禁止发明 facts、要求 source ids 完全一致，贸然塞 failed lesson 会冲突。首批 I1-I5 已能在检索/打包路径端到端证明价值。
 
-**落地方案建议**：
-- [ ] 在 `_history_retained_facts`（`memory_runtime.py:596-611`）旁新增并行收集器 `_history_negative_lessons`，只收 failed/rolled_back 且安全的 memory，脱敏成高层教训文本（**独立通道，不进 project./endpoint. 白名单**，避免被当正向约束渲染）。
-- [ ] secret/destructive 仍全排除。
-- [ ] `summarizer_provider.py` `_SYSTEM_PROMPT` 规则3（`:82`）改为：failed/rolled_back 不得作为正向事实；失败教训仅作高层 "avoided approach" 警告、绝不含可执行 destructive 命令。同步放宽 `_validate_result`（`:318`）对 failed-derived 文本的校验。
-- [ ] `ContextCompactionLog` 承载负向教训（新字段或复用 warnings），replay 端到端覆盖 `compaction_drift`。
+**实际落地（2026-06-13/14）**：
+- [x] 采用 dedicated metadata channel：新增 `RetainedNegativeEvidence` 与 `ContextCompactionLog.retained_negative_evidence` / `PendingCompactionLog.retained_negative_evidence`，不复用 positive `retained_facts`，不进入 summarizer 正向事实白名单。
+- [x] Packer 仅在预算压缩丢弃标准负向 prompt block（`type="avoided_attempts"` 且 `source="negative_evidence"`）时，从 safe `NegativeEvidence` DTO 恢复 metadata；不会把 `avoided_attempts` 变成 protected block，也不会强制注入 prompt。
+- [x] replay / metrics / reports / trace bundle 直接读取 compaction log retained-negative metadata，并做防御性脱敏；`negative_evidence_block_count` 保持表示实际 prompt blocks，retained metadata 使用独立计数。
+- [x] Benchmark 新增 `case_13_compaction_retains_negative_lesson` 与 acceptance `variant_2_retains_negative_lesson_under_compaction`，验证 metadata retention、正向污染为 0、不泄漏 unsafe markers、且 task success 仍来自既有 positive/project context。
+
+**I7 验证（2026-06-14）**：I7.5 RED `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py -k "compaction_retains_negative" -q` 先观察到 2 failed（缺 case 13 与 acceptance key）；实现后 targeted -> 2 passed，review hardening 后 benchmark suite `uv run --extra dev pytest apps/api/tests/benchmark/test_runner.py -q` -> 27 passed。I7 closeout：affected regression `uv run --extra dev pytest apps/api/tests/retrieval apps/api/tests/observability apps/api/tests/benchmark/test_runner.py apps/api/tests/storage/test_migrations.py -q` -> 221 passed, 1 skipped；compile `uv run --extra dev python -m compileall -q apps/api/app packages/python-sdk/src examples` -> passed；full regression `uv run --extra dev pytest -q` -> 477 passed, 1 skipped；benchmark + reproduce `uv run python -m app.benchmark.runner --output-dir reports && bash scripts/reproduce.sh` -> `acceptance.passed=true (13/13 checks true)`；generated report unsafe-marker scan（`rm -rf`, `/prod`, `sk-`, `password`, `Authorization`）-> passed。
 
 ---
 

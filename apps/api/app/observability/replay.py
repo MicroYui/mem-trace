@@ -145,7 +145,7 @@ class RetrievalReplayService:
         )
         diffs = _sort_diffs(diffs)
 
-        metrics = _access_metrics(access, gate_logs, original.accepted_memories, original.context_blocks, diffs)
+        metrics = _access_metrics(access, gate_logs, original.accepted_memories, original.context_blocks, diffs, compaction_logs)
         warnings.extend(replay_trace.warnings)
         return ReplayRetrievalResult(
             access_id=access.access_id,
@@ -614,6 +614,7 @@ def _history_prelude_from_logs(logs: list[ContextCompactionLog]) -> tuple[list[C
                 compression_ratio=log.compression_ratio,
                 summary_text=log.summary_text,
                 retained_facts=list(log.retained_facts),
+                retained_negative_evidence=list(log.retained_negative_evidence),
                 source_memory_ids=list(log.source_memory_ids),
                 source_event_ids=list(log.source_event_ids),
                 source_state_node_ids=list(log.source_state_node_ids),
@@ -636,6 +637,7 @@ def _access_metrics(
     accepted_memories: list[MemoryItem],
     original_context_blocks: list[ContextBlock],
     diffs: list[ReplayDiffItem],
+    compaction_logs: list[ContextCompactionLog],
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     return {
@@ -666,6 +668,13 @@ def _access_metrics(
         "negative_evidence_block_count": sum(
             block.type == "avoided_attempts" or block.source == "negative_evidence"
             for block in original_context_blocks
+        ),
+        "retained_negative_evidence_count": sum(len(log.retained_negative_evidence) for log in compaction_logs),
+        "sanitized_retained_negative_evidence_count": sum(
+            1
+            for log in compaction_logs
+            for item in log.retained_negative_evidence
+            if item.mode == "sanitized_risk_notice"
         ),
         "stale_rejected": sum(g.reject_reason == "stale" for g in gate_logs),
         "stale_injected": sum(m.expires_at is not None and m.expires_at < now for m in accepted_memories),

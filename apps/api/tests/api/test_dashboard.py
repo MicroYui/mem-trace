@@ -40,13 +40,13 @@ async def test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows(tmp_
 
     assert resp.status_code == 200
     payload = resp.json()
-    # Twelve benchmark cases: case 3 seeds a competing workspace run, case 6
+    # Thirteen benchmark cases: case 3 seeds a competing workspace run, case 6
     # seeds a prior completed run plus a follow-up run, and each remaining case
-    # (including case 12) seeds one benchmark run, for 14 runs total.
-    assert len(payload["runs"]) == 14
-    assert len(payload["accesses"]) == 72
-    assert len(payload["benchmark_cases"]) == 12
-    assert len(payload["benchmark_results"]) == 72
+    # (including case 12/13) seeds one benchmark run, for 15 runs total.
+    assert len(payload["runs"]) == 15
+    assert len(payload["accesses"]) == 78
+    assert len(payload["benchmark_cases"]) == 13
+    assert len(payload["benchmark_results"]) == 78
     assert payload["benchmark_summary"]["variant_2"]["failed_branch_contamination_rate"] == 0
     assert payload["benchmark_summary"]["variant_2"]["constraint_retention_hit_rate"] == 1
     for field in [
@@ -62,6 +62,9 @@ async def test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows(tmp_
         "unsafe_negative_leakage_rate",
         "sanitized_notice_rate",
         "reflection_retention_hit_rate",
+        "avg_retained_negative_evidence_count",
+        "compaction_negative_lesson_retained_rate",
+        "compaction_retained_negative_unsafe_leakage_rate",
         "avg_compression_ratio",
         "avg_memory_token_overhead",
     ]:
