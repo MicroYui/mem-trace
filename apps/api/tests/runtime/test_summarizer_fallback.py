@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 
 from app.memory.summarizer_provider import SummarizeRequest, SummarizeResult
+from app.providers import ProviderCapabilities, ProviderKind, ProviderRegistry
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import CompactionProvider, RetainedFact
 from app.runtime.repository import InMemoryRepository
@@ -26,6 +27,24 @@ class _HangingSummarizer:
         self.seen.append(request)
         await asyncio.sleep(60)
         raise AssertionError("unreachable")
+
+
+class _RegistrySummarizer:
+    def __init__(self) -> None:
+        self.seen: list[SummarizeRequest] = []
+
+    async def summarize(self, request: SummarizeRequest) -> SummarizeResult:
+        self.seen.append(request)
+        return SummarizeResult(
+            summary="registry summarizer used",
+            retained_facts=list(request.must_retain_facts),
+            source_memory_ids=list(request.source_memory_ids),
+            source_event_ids=list(request.source_event_ids),
+            source_state_node_ids=list(request.source_state_node_ids),
+            pre_tokens=3,
+            post_tokens=3,
+            provider=CompactionProvider.llm,
+        )
 
 
 def _request() -> SummarizeRequest:
@@ -72,3 +91,25 @@ async def test_summarizer_timeout_falls_back_to_rule_with_no_info_loss():
     assert result.provider == CompactionProvider.fallback_rule
     assert {(f.key, f.value) for f in result.retained_facts} == {("project.runtime", "bun")}
     assert "summarizer fallback" in "; ".join(result.warnings)
+
+
+async def test_runtime_uses_registry_summarizer_when_explicit_provider_is_omitted():
+    provider = _RegistrySummarizer()
+    registry = ProviderRegistry()
+    registry.register(
+        ProviderKind.summarizer,
+        provider,
+        ProviderCapabilities(
+            provider_id="summarizer.registry_test.v1",
+            kind=ProviderKind.summarizer,
+            deterministic=True,
+            requires_network=False,
+        ),
+    )
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_test", provider_registry=registry)
+
+    result = await runtime._summarize(_request(), deadline_ms=100)
+
+    assert provider.seen
+    assert result.summary == "registry summarizer used"
+    assert result.provider == CompactionProvider.llm

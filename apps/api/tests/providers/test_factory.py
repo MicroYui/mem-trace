@@ -84,6 +84,23 @@ def test_build_provider_registry_degrades_llm_summarizer_without_key():
     assert snapshot["summarizer"]["deterministic"] is True
 
 
+def test_summarizer_provider_instances_expose_capabilities_for_runtime_overrides():
+    rule = RuleSummarizerProvider()
+    llm = LLMSummarizerProvider(
+        api_key="sk-llm-secret",
+        base_url="https://llm.example.test/v1",
+        model="gpt-test",
+    )
+
+    assert rule.capabilities.snapshot()["provider_id"] == "summarizer.rule.v1"
+    llm_snapshot = llm.capabilities.snapshot()
+    assert llm_snapshot["provider_id"] == "summarizer.openai_compatible.v1"
+    assert llm_snapshot["model"] == "gpt-test"
+    assert llm_snapshot["fallback_provider_id"] == "summarizer.rule.v1"
+    assert llm_snapshot["metadata"] == {"base_url_host": "llm.example.test"}
+    assert "sk-llm-secret" not in str(llm_snapshot)
+
+
 def test_build_provider_registry_marks_embedding_fallback_when_openai_key_missing():
     registry = build_provider_registry(Settings(embedding_provider="openai", embedding_api_key=""))
 

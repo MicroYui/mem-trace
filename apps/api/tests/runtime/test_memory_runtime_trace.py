@@ -10,6 +10,7 @@ import asyncio
 import pytest
 
 from app.providers import ProviderCapabilities, ProviderKind, ProviderRegistry
+from app.memory.llm_extractor import ExtractionCandidate
 from app.retrieval.similarity import stable_embedding
 from app.runtime.memory_runtime import MemoryRuntime, StateTreeError, StepNotFoundError
 from app.runtime.models import (
@@ -55,6 +56,17 @@ class _RecordingEmbeddingProvider:
         if self.fail:
             raise RuntimeError("embedding provider unavailable")
         return list(self.vector)
+
+
+class _RegistryExtractionProvider:
+    async def extract(self, event):
+        return [
+            ExtractionCandidate(
+                key="project.language",
+                value="python",
+                supersede=True,
+            )
+        ]
 
 
 def _runtime_with_embedding_provider(provider: _RecordingEmbeddingProvider) -> tuple[MemoryRuntime, InMemoryRepository]:
@@ -108,6 +120,38 @@ async def test_runtime_write_paths_prepare_embeddings_with_provider_before_repos
     assert "这个项目使用 Bun" in provider.calls
     assert "bun test passed" in provider.calls
     assert "done with bun" in provider.calls
+
+
+async def test_runtime_uses_registry_extraction_provider_when_explicit_provider_is_omitted():
+    registry = ProviderRegistry()
+    provider = _RegistryExtractionProvider()
+    registry.register(
+        ProviderKind.extraction,
+        provider,
+        ProviderCapabilities(
+            provider_id="extraction.registry_test.v1",
+            kind=ProviderKind.extraction,
+            deterministic=True,
+            requires_network=False,
+        ),
+    )
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_registry_extraction", provider_registry=registry)
+    run = await runtime.start_run(StartRunRequest(session_id="s_registry_extraction", task="setup"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="capture preference"))
+
+    result = await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="remember my project language",
+        )
+    )
+
+    assert len(result.created_memory_ids) == 1
+    memories = await runtime.list_memories(workspace_id="ws_registry_extraction")
+    assert [(memory.key, memory.value) for memory in memories] == [("project.language", "python")]
 
 
 async def test_runtime_same_identity_actives_match_historical_alias_keys():

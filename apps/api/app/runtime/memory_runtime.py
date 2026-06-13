@@ -133,11 +133,17 @@ class MemoryRuntime:
         self._embedding_provider = (
             provider_registry.get(ProviderKind.embedding) if provider_registry is not None else None
         )
+        registry_extraction_provider = (
+            provider_registry.get(ProviderKind.extraction) if provider_registry is not None else None
+        )
+        registry_summarizer_provider = (
+            provider_registry.get(ProviderKind.summarizer) if provider_registry is not None else None
+        )
         # C3 summarizer seam. Always keep a deterministic provider available so
         # C4 can degrade to rule summaries without losing retained facts.
-        self._summarizer_provider = summarizer_provider or RuleSummarizerProvider()
+        self._summarizer_provider = summarizer_provider or registry_summarizer_provider or RuleSummarizerProvider()
         provider_snapshot = provider_registry.snapshot() if provider_registry is not None else None
-        summarizer_capabilities = getattr(self._summarizer_provider, "capabilities", None)
+        summarizer_capabilities = getattr(summarizer_provider, "capabilities", None) if summarizer_provider is not None else None
         if summarizer_capabilities is not None:
             provider_snapshot = dict(provider_snapshot or {})
             provider_snapshot[ProviderKind.summarizer.value] = summarizer_capabilities.snapshot()
@@ -154,7 +160,7 @@ class MemoryRuntime:
         # Optional config-gated LLM extraction (P2). When set, user-message
         # extraction goes through the provider instead of the rule-based writer;
         # ``None`` (default) keeps the deterministic writer path.
-        self._extraction_provider = extraction_provider
+        self._extraction_provider = extraction_provider if extraction_provider is not None else registry_extraction_provider
         self._compaction_enabled = settings.compaction_enabled
         self._compaction_history_token_threshold = settings.compaction_history_token_threshold
         self._compaction_summary_budget_tokens = settings.compaction_summary_budget_tokens

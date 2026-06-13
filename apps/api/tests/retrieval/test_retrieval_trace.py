@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from app.runtime.memory_runtime import MemoryRuntime
+from app.memory.summarizer_provider import RuleSummarizerProvider
 from app.providers import ProviderCapabilities, ProviderKind, ProviderRegistry
 from app.retrieval.similarity import stable_embedding
 from app.runtime.models import (
@@ -380,6 +381,50 @@ async def test_policy_snapshot_reflects_explicit_summarizer_provider_override():
     assert providers["embedding"]["provider_id"] == "embedding.test_query.v1"
     assert providers["summarizer"]["provider_id"] == "summarizer.custom_test.v1"
     assert "judge" not in providers
+
+
+@pytest.mark.asyncio
+async def test_policy_snapshot_preserves_registry_summarizer_capabilities_for_registry_provider():
+    registry = ProviderRegistry()
+    registry.register(
+        ProviderKind.summarizer,
+        RuleSummarizerProvider(),
+        ProviderCapabilities(
+            provider_id="summarizer.registry_authoritative.v1",
+            kind=ProviderKind.summarizer,
+            deterministic=True,
+            requires_network=False,
+            metadata={"source": "registry"},
+        ),
+    )
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(
+        repo,
+        default_workspace_id="ws_registry_summarizer_snapshot",
+        provider_registry=registry,
+    )
+    run = await runtime.start_run(
+        StartRunRequest(
+            session_id="s_registry_summarizer_snapshot",
+            task="provider policy",
+            workspace_id="ws_registry_summarizer_snapshot",
+        )
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="inspect providers"))
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="anything",
+            strategy=RetrievalStrategy.baseline_0,
+        )
+    )
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    assert access.policy_snapshot["providers"]["summarizer"]["provider_id"] == "summarizer.registry_authoritative.v1"
+    assert access.policy_snapshot["providers"]["summarizer"]["metadata"] == {"source": "registry"}
 
 
 @pytest.mark.asyncio

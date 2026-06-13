@@ -15,6 +15,7 @@ import httpx
 from pydantic import ConfigDict, Field
 
 from app.memory.llm_extractor import _strip_code_fences
+from app.providers.base import ProviderCapabilities, ProviderKind
 from app.retrieval.packer import estimate_tokens
 from app.runtime.models import CompactionKind, CompactionProvider, ContextBlock, RetainedFact, _Base
 
@@ -152,6 +153,14 @@ def _render_rule_summary(facts: list[RetainedFact], *, max_tokens: int) -> tuple
 class RuleSummarizerProvider:
     """Deterministic summarizer used by default and as the fallback path."""
 
+    capabilities = ProviderCapabilities(
+        provider_id="summarizer.rule.v1",
+        kind=ProviderKind.summarizer,
+        deterministic=True,
+        requires_network=False,
+        metadata={"algorithm": "structured_must_retain_facts"},
+    )
+
     async def summarize(self, request: SummarizeRequest) -> SummarizeResult:
         facts = _dedupe_facts(list(request.must_retain_facts))
         summary, warnings = _render_rule_summary(facts, max_tokens=request.summary_budget_tokens)
@@ -198,6 +207,16 @@ class LLMSummarizerProvider:
         self._max_tokens = max_tokens
         self._use_json_response_format = use_json_response_format
         self._client = client
+        self.capabilities = ProviderCapabilities(
+            provider_id="summarizer.openai_compatible.v1",
+            kind=ProviderKind.summarizer,
+            deterministic=False,
+            requires_network=True,
+            endpoint_types=("openai_chat_completions",),
+            model=model,
+            fallback_provider_id="summarizer.rule.v1",
+            metadata={"base_url_host": _host_label(base_url)},
+        )
 
     async def summarize(self, request: SummarizeRequest) -> SummarizeResult:
         payload: dict[str, Any] = {
@@ -258,6 +277,13 @@ def _request_payload(request: SummarizeRequest) -> str:
         "kind": request.kind.value,
     }
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+
+def _host_label(base_url: str) -> str:
+    try:
+        return httpx.URL(base_url).host or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def _allowed_fact_keys(request: SummarizeRequest) -> set[tuple[str, str]]:

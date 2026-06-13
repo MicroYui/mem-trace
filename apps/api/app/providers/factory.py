@@ -118,16 +118,7 @@ def _build_summarizer_provider(settings: Settings) -> tuple[RuleSummarizerProvid
                 max_tokens=settings.llm_max_tokens,
                 use_json_response_format=settings.llm_use_json_response_format,
             )
-            return provider, ProviderCapabilities(
-                provider_id="summarizer.openai_compatible.v1",
-                kind=ProviderKind.summarizer,
-                deterministic=False,
-                requires_network=True,
-                endpoint_types=("openai_chat_completions",),
-                model=settings.llm_model,
-                fallback_provider_id="summarizer.rule.v1",
-                metadata={"base_url_host": _host_label(settings.llm_base_url)},
-            )
+            return provider, provider.capabilities
         logger.warning(
             "MEMTRACE_LLM_SUMMARIZER_ENABLED is set but MEMTRACE_LLM_API_KEY is empty; "
             "using deterministic RuleSummarizerProvider."
@@ -136,13 +127,7 @@ def _build_summarizer_provider(settings: Settings) -> tuple[RuleSummarizerProvid
 
 
 def _rule_summarizer_capabilities() -> ProviderCapabilities:
-    return ProviderCapabilities(
-        provider_id="summarizer.rule.v1",
-        kind=ProviderKind.summarizer,
-        deterministic=True,
-        requires_network=False,
-        metadata={"algorithm": "structured_must_retain_facts"},
-    )
+    return RuleSummarizerProvider.capabilities
 
 
 def _host_label(base_url: str) -> str:
