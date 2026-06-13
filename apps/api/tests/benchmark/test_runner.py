@@ -17,6 +17,8 @@ from app.benchmark.runner import (
     _summarize,
     run_benchmark,
 )
+from app.config import get_settings
+from app.providers.base import ProviderKind
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     FinishStepRequest,
@@ -337,6 +339,80 @@ async def test_run_case_restores_access_counts_before_each_strategy(monkeypatch)
     await _run_case(BenchmarkCase("case_access_restore", "Access restore", "Fairness isolation", seed), "ws_case", repo=repo)
 
     assert observed_counts == [5, 5]
+
+
+async def test_run_case_forces_explicit_deterministic_provider_registry(monkeypatch):
+    repo = InMemoryRepository()
+    captured_snapshots: list[dict] = []
+    deterministic_registry = benchmark_runner.deterministic_provider_registry()
+    registry_calls = 0
+
+    def deterministic_registry_spy():
+        nonlocal registry_calls
+        registry_calls += 1
+        return deterministic_registry
+
+    async def seed(rt: MemoryRuntime, ws: str) -> SeedResult:
+        run = await rt.start_run(StartRunRequest(session_id="s", task="provider isolation", workspace_id=ws))
+        step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+        await repo.add_memory(MemoryItem(workspace_id=ws, memory_type=MemoryType.episodic, content="provider marker"))
+        return SeedResult(run.run_id, step.step_id, "provider marker", ws)
+
+    original_init = MemoryRuntime.__init__
+
+    def recording_init(self, *args, **kwargs):
+        registry = kwargs.get("provider_registry")
+        assert registry is not None
+        captured_snapshots.append(registry.snapshot())
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(benchmark_runner, "ALL_STRATEGIES", [RetrievalStrategy.variant_2])
+    monkeypatch.setattr(benchmark_runner, "deterministic_provider_registry", deterministic_registry_spy)
+    monkeypatch.setattr(MemoryRuntime, "__init__", recording_init)
+
+    await _run_case(BenchmarkCase("case_provider_isolation", "Provider isolation", "Provider isolation", seed), "ws_provider", repo=repo)
+
+    assert registry_calls == 1
+    assert captured_snapshots
+    snapshot = captured_snapshots[0]
+    assert snapshot[ProviderKind.embedding.value]["provider_id"] == "embedding.deterministic_hash.v1"
+    assert snapshot[ProviderKind.embedding.value]["deterministic"] is True
+    assert snapshot[ProviderKind.summarizer.value]["provider_id"] == "summarizer.rule.v1"
+    assert snapshot[ProviderKind.judge.value]["provider_id"] == "judge.noop.v1"
+    assert ProviderKind.extraction.value not in snapshot
+
+
+async def test_benchmark_policy_snapshot_records_deterministic_providers_under_real_env(monkeypatch):
+    get_settings.cache_clear()
+    monkeypatch.setenv("MEMTRACE_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("MEMTRACE_EMBEDDING_API_KEY", "sk-test-should-not-render")
+    monkeypatch.setenv("MEMTRACE_LLM_SUMMARIZER_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_LLM_API_KEY", "sk-test-should-not-render")
+
+    repo = InMemoryRepository()
+
+    async def seed(rt: MemoryRuntime, ws: str) -> SeedResult:
+        run = await rt.start_run(StartRunRequest(session_id="s", task="provider policy", workspace_id=ws))
+        step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+        await repo.add_memory(MemoryItem(workspace_id=ws, memory_type=MemoryType.episodic, content="provider marker"))
+        return SeedResult(run.run_id, step.step_id, "provider marker", ws)
+
+    monkeypatch.setattr(benchmark_runner, "ALL_STRATEGIES", [RetrievalStrategy.variant_2])
+
+    try:
+        await _run_case(BenchmarkCase("case_provider_policy", "Provider policy", "Provider policy", seed), "ws_provider", repo=repo)
+    finally:
+        get_settings.cache_clear()
+
+    access_logs = await repo.list_access_logs(workspace_id="ws_provider")
+    assert len(access_logs) == 1
+    providers = access_logs[0].policy_snapshot["providers"]
+    assert providers["embedding"]["provider_id"] == "embedding.deterministic_hash.v1"
+    assert providers["embedding"]["deterministic"] is True
+    assert providers["summarizer"]["provider_id"] == "summarizer.rule.v1"
+    assert providers["summarizer"]["deterministic"] is True
+    assert "judge" not in providers
+    assert "sk-test-should-not-render" not in json.dumps(access_logs[0].policy_snapshot, sort_keys=True)
 
 
 def test_evaluator_keeps_negative_evidence_out_of_positive_contamination_and_action():

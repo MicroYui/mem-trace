@@ -4,6 +4,8 @@ from __future__ import annotations
 import pytest
 
 from app.runtime.memory_runtime import MemoryRuntime
+from app.providers import ProviderCapabilities, ProviderKind, ProviderRegistry
+from app.retrieval.similarity import stable_embedding
 from app.runtime.models import (
     BranchStatus,
     MemoryItem,
@@ -14,6 +16,35 @@ from app.runtime.models import (
     StartStepRequest,
 )
 from app.runtime.repository import InMemoryRepository
+
+
+class _CustomSummarizerForSnapshot:
+    capabilities = ProviderCapabilities(
+        provider_id="summarizer.custom_test.v1",
+        kind=ProviderKind.summarizer,
+        deterministic=True,
+        requires_network=False,
+    )
+
+
+class _QueryEmbeddingProvider:
+    def __init__(self, vector: list[float], *, fail: bool = False) -> None:
+        self.vector = vector
+        self.fail = fail
+        self.calls: list[str | None] = []
+        self.capabilities = ProviderCapabilities(
+            provider_id="embedding.test_query.v1",
+            kind=ProviderKind.embedding,
+            deterministic=False,
+            requires_network=False,
+            metadata={"dim": len(vector)},
+        )
+
+    async def embed_text(self, text: str | None) -> list[float]:
+        self.calls.append(text)
+        if self.fail:
+            raise RuntimeError("query embedding unavailable")
+        return list(self.vector)
 
 
 async def _seed_runtime_with_project_memory() -> tuple[MemoryRuntime, InMemoryRepository, str, str, str]:
@@ -202,13 +233,16 @@ async def test_access_log_persists_retrieval_policy_snapshot():
 
     access = await repo.get_access_log(ctx.access_id)
     assert access is not None
-    assert access.policy_version == "retrieval-policy-v1"
+    assert access.policy_version == "retrieval-policy-v2"
     assert access.policy_snapshot["strategy"] == "variant_2"
     assert access.policy_snapshot["top_k"] == 4
     assert access.policy_snapshot["token_budget"] == 123
     assert access.policy_snapshot["gate_config"]["enable_failure_learning"] is True
     assert access.policy_snapshot["retrieval"]["lifecycle_filter_version"] == "retrievable-statuses-v1"
     assert access.policy_snapshot["packer"]["token_estimator_version"] == "regex-stopword-cjk-v1"
+    assert access.policy_snapshot["providers"]["embedding"]["provider_id"] == "embedding.deterministic_hash.v1"
+    assert access.policy_snapshot["providers"]["summarizer"]["provider_id"] == "summarizer.rule.v1"
+    assert "judge" not in access.policy_snapshot["providers"]
     assert access.policy_hash.startswith("sha256:")
 
 
@@ -236,12 +270,116 @@ async def test_timeout_access_log_persists_policy_snapshot(monkeypatch):
 
     access = await repo.get_access_log(ctx.access_id)
     assert access is not None
-    assert access.policy_version == "retrieval-policy-v1"
+    assert access.policy_version == "retrieval-policy-v2"
     assert access.policy_snapshot["strategy"] == "long_context"
     assert access.policy_snapshot["top_k"] == 6
     assert access.policy_snapshot["token_budget"] == 77
     assert access.policy_snapshot["retrieval"]["include_all"] is True
     assert access.policy_hash.startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_policy_snapshot_reflects_explicit_provider_override_and_inspection_fields():
+    registry = ProviderRegistry()
+    embedding_caps = ProviderCapabilities(
+        provider_id="embedding.test_override.v1",
+        kind=ProviderKind.embedding,
+        deterministic=False,
+        requires_network=True,
+        endpoint_types=("test_embeddings",),
+        model="test-embedding-model",
+        metadata={"dim": 256, "api_key": "must-not-render"},
+    )
+    summarizer_caps = ProviderCapabilities(
+        provider_id="summarizer.test_override.v1",
+        kind=ProviderKind.summarizer,
+        deterministic=False,
+        requires_network=True,
+        model="test-summary-model",
+    )
+    judge_caps = ProviderCapabilities(
+        provider_id="judge.test_override.v1",
+        kind=ProviderKind.judge,
+        deterministic=False,
+        requires_network=True,
+    )
+    registry.register(ProviderKind.embedding, object(), embedding_caps)
+    registry.register(ProviderKind.summarizer, object(), summarizer_caps)
+    registry.register(ProviderKind.judge, object(), judge_caps)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_provider_override", provider_registry=registry)
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_provider_override", task="provider policy", workspace_id="ws_provider_override")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="inspect providers"))
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="anything",
+            strategy=RetrievalStrategy.baseline_0,
+        )
+    )
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    providers = access.policy_snapshot["providers"]
+    assert providers["embedding"]["provider_id"] == "embedding.test_override.v1"
+    assert providers["embedding"]["model"] == "test-embedding-model"
+    assert providers["embedding"]["metadata"] == {"dim": 256}
+    assert providers["summarizer"]["provider_id"] == "summarizer.test_override.v1"
+    assert "judge" not in providers
+    assert "must-not-render" not in str(access.policy_snapshot)
+
+    inspection = await runtime.inspect_access(ctx.access_id)
+    assert inspection.policy_version == access.policy_version
+    assert inspection.policy_hash == access.policy_hash
+    assert inspection.policy_snapshot == access.policy_snapshot
+
+
+@pytest.mark.asyncio
+async def test_policy_snapshot_reflects_explicit_summarizer_provider_override():
+    registry = ProviderRegistry()
+    embedding_provider = _QueryEmbeddingProvider([1.0] + [0.0] * 255)
+    registry.register(ProviderKind.embedding, embedding_provider, embedding_provider.capabilities)
+    registry.register(
+        ProviderKind.summarizer,
+        object(),
+        ProviderCapabilities(
+            provider_id="summarizer.registry_value.v1",
+            kind=ProviderKind.summarizer,
+            deterministic=True,
+            requires_network=False,
+        ),
+    )
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(
+        repo,
+        default_workspace_id="ws_summarizer_override",
+        provider_registry=registry,
+        summarizer_provider=_CustomSummarizerForSnapshot(),
+    )
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_summarizer_override", task="provider policy", workspace_id="ws_summarizer_override")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="inspect providers"))
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="anything",
+            strategy=RetrievalStrategy.baseline_0,
+        )
+    )
+
+    access = await repo.get_access_log(ctx.access_id)
+    assert access is not None
+    providers = access.policy_snapshot["providers"]
+    assert providers["embedding"]["provider_id"] == "embedding.test_query.v1"
+    assert providers["summarizer"]["provider_id"] == "summarizer.custom_test.v1"
+    assert "judge" not in providers
 
 
 @pytest.mark.asyncio
@@ -265,3 +403,166 @@ async def test_trace_exposes_lexical_and_vector_components():
     expected = round(0.75 * candidate.lexical_score + 0.25 * candidate.vector_score, 6)
     assert candidate.relevance_score == expected
     assert candidate.state_match_score == trace.gate_outcomes[0].state_match_score
+
+
+@pytest.mark.asyncio
+async def test_retrieval_query_vector_uses_embedding_provider():
+    provider = _QueryEmbeddingProvider([1.0] + [0.0] * 255)
+    registry = ProviderRegistry()
+    registry.register(ProviderKind.embedding, provider, provider.capabilities)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_query_provider", provider_registry=registry)
+    runtime._retrieval._use_vector = True  # noqa: SLF001
+    runtime._retrieval._vector_weight = 1.0  # noqa: SLF001
+    run = await runtime.start_run(StartRunRequest(session_id="s_query_provider", task="query provider", workspace_id="ws_query_provider"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+    close = await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_query_provider",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            content="provider-selected memory",
+            embedding_vector=[1.0] + [0.0] * 255,
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_query_provider",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            content="other memory",
+            embedding_vector=[0.0, 1.0] + [0.0] * 254,
+            branch_status=BranchStatus.completed,
+        )
+    )
+
+    trace = await runtime._retrieval.trace(  # noqa: SLF001
+        RetrievalRequest(run_id=run.run_id, step_id=step.step_id, query="opaque query", strategy=RetrievalStrategy.variant_2),
+        workspace_id="ws_query_provider",
+    )
+
+    assert provider.calls == ["opaque query"]
+    assert trace.candidates[0].memory.memory_id == close.memory_id
+    assert trace.candidates[0].vector_score == 1.0
+
+
+@pytest.mark.asyncio
+async def test_retrieval_query_vector_falls_back_when_embedding_provider_fails():
+    provider = _QueryEmbeddingProvider([1.0] + [0.0] * 255, fail=True)
+    registry = ProviderRegistry()
+    registry.register(ProviderKind.embedding, provider, provider.capabilities)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_query_fallback", provider_registry=registry)
+    runtime._retrieval._use_vector = True  # noqa: SLF001
+    runtime._retrieval._vector_weight = 1.0  # noqa: SLF001
+    run = await runtime.start_run(StartRunRequest(session_id="s_query_fallback", task="query fallback", workspace_id="ws_query_fallback"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+    memory = await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_query_fallback",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            content="run tests with bun",
+            embedding_vector=stable_embedding("run tests with bun", 256),
+            branch_status=BranchStatus.completed,
+        )
+    )
+
+    trace = await runtime._retrieval.trace(  # noqa: SLF001
+        RetrievalRequest(run_id=run.run_id, step_id=step.step_id, query="run tests with bun", strategy=RetrievalStrategy.variant_2),
+        workspace_id="ws_query_fallback",
+    )
+
+    assert provider.calls == ["run tests with bun"]
+    assert trace.candidates[0].memory.memory_id == memory.memory_id
+    assert trace.candidates[0].vector_score > 0.0
+
+
+@pytest.mark.asyncio
+async def test_retrieval_query_vector_falls_back_when_embedding_provider_returns_wrong_dimension():
+    provider = _QueryEmbeddingProvider([1.0, 0.0])
+    registry = ProviderRegistry()
+    registry.register(ProviderKind.embedding, provider, provider.capabilities)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_query_bad_dim", provider_registry=registry)
+    runtime._retrieval._use_vector = True  # noqa: SLF001
+    runtime._retrieval._vector_weight = 1.0  # noqa: SLF001
+    run = await runtime.start_run(StartRunRequest(session_id="s_query_bad_dim", task="query bad dimension", workspace_id="ws_query_bad_dim"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+    memory = await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_query_bad_dim",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            content="run tests with bun",
+            embedding_vector=stable_embedding("run tests with bun", 256),
+            branch_status=BranchStatus.completed,
+        )
+    )
+
+    trace = await runtime._retrieval.trace(  # noqa: SLF001
+        RetrievalRequest(run_id=run.run_id, step_id=step.step_id, query="run tests with bun", strategy=RetrievalStrategy.variant_2),
+        workspace_id="ws_query_bad_dim",
+    )
+
+    assert provider.calls == ["run tests with bun"]
+    assert trace.candidates[0].memory.memory_id == memory.memory_id
+    assert trace.candidates[0].vector_score > 0.0
+
+
+@pytest.mark.asyncio
+async def test_retrieval_query_vector_falls_back_when_embedding_provider_returns_non_finite_vector():
+    provider = _QueryEmbeddingProvider([float("inf")] + [0.0] * 255)
+    registry = ProviderRegistry()
+    registry.register(ProviderKind.embedding, provider, provider.capabilities)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_query_non_finite", provider_registry=registry)
+    runtime._retrieval._use_vector = True  # noqa: SLF001
+    runtime._retrieval._vector_weight = 1.0  # noqa: SLF001
+    run = await runtime.start_run(StartRunRequest(session_id="s_query_non_finite", task="query non-finite", workspace_id="ws_query_non_finite"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="retrieve"))
+    memory = await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_query_non_finite",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            content="run tests with bun",
+            embedding_vector=stable_embedding("run tests with bun", 256),
+            branch_status=BranchStatus.completed,
+        )
+    )
+
+    trace = await runtime._retrieval.trace(  # noqa: SLF001
+        RetrievalRequest(run_id=run.run_id, step_id=step.step_id, query="run tests with bun", strategy=RetrievalStrategy.variant_2),
+        workspace_id="ws_query_non_finite",
+    )
+
+    assert provider.calls == ["run tests with bun"]
+    assert trace.candidates[0].memory.memory_id == memory.memory_id
+    assert trace.candidates[0].vector_score > 0.0
+
+
+@pytest.mark.asyncio
+async def test_retrieval_provider_snapshot_is_frozen_with_cached_embedding_provider():
+    old_provider = _QueryEmbeddingProvider([1.0] + [0.0] * 255)
+    old_caps = old_provider.capabilities
+    registry = ProviderRegistry()
+    registry.register(ProviderKind.embedding, old_provider, old_caps)
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_provider_frozen", provider_registry=registry)
+    new_provider = _QueryEmbeddingProvider([0.0, 1.0] + [0.0] * 254)
+    registry.register(
+        ProviderKind.embedding,
+        new_provider,
+        ProviderCapabilities(
+            provider_id="embedding.new_after_runtime_init.v1",
+            kind=ProviderKind.embedding,
+            deterministic=False,
+            requires_network=False,
+        ),
+    )
+
+    snapshot = runtime._retrieval.provider_snapshot  # noqa: SLF001
+
+    assert snapshot is not None
+    assert snapshot["embedding"]["provider_id"] == old_caps.provider_id

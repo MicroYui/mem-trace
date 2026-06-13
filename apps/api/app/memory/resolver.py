@@ -28,25 +28,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.memory.key_ontology import canonical_memory_key, is_single_valued_key
 from app.runtime.models import MemoryItem, MemoryStatus
-
-# Keys whose value is single-valued (mutually exclusive). A different value for
-# such a key is a conflict. Everything else (e.g. project.runtime.excluded) has
-# set semantics where distinct values coexist. This set mirrors the controlled
-# single-valued concepts in the LLM extractor system prompt
-# (llm_extractor._SYSTEM_PROMPT); keep them in sync so the resolver can detect a
-# conflicting later value even when the model forgets to set supersede=true.
-_SINGLE_VALUED_KEYS = frozenset(
-    {
-        "project.runtime",
-        "project.package_manager",
-        "project.language",
-        "project.database",
-        "project.test_framework",
-        "project.test_command",
-        "project.formatting",
-    }
-)
 
 
 def _now() -> datetime:
@@ -95,6 +78,13 @@ def _strongest(memories: list[MemoryItem]) -> MemoryItem:
     )
 
 
+def _promote_to_canonical_key(memory: MemoryItem, key: str | None) -> None:
+    canonical_key = canonical_memory_key(key)
+    if canonical_key is not None and memory.key != canonical_key:
+        memory.key = canonical_key
+        memory.summary = f"{canonical_key}={memory.value}" if memory.value is not None else memory.summary
+
+
 def _neg_id(memory_id: str) -> tuple[int, ...]:
     # Invert codepoints so that `max` prefers the lexicographically smaller id.
     return tuple(-ord(c) for c in memory_id)
@@ -121,6 +111,7 @@ def resolve(incoming: MemoryItem, existing_active: list[MemoryItem]) -> ResolveR
         primary.importance = max(m.importance for m in group)
         primary.trust_score = max(m.trust_score for m in group)
         primary.value_score = max(m.value_score for m in group)
+        _promote_to_canonical_key(primary, incoming.key)
         primary.updated_at = _now()
         updates[primary.memory_id] = primary
         for m in same:
@@ -135,8 +126,10 @@ def resolve(incoming: MemoryItem, existing_active: list[MemoryItem]) -> ResolveR
         add = incoming
 
     # ---- conflict: different value for a single-valued key ------------------- #
-    if incoming.key in _SINGLE_VALUED_KEYS and diff:
+    if is_single_valued_key(incoming.key) and diff:
         candidates = [primary] + diff
+        for m in candidates:
+            _promote_to_canonical_key(m, incoming.key)
         top = max((m.trust_score, m.updated_at) for m in candidates)
         tied = [m for m in candidates if (m.trust_score, m.updated_at) == top]
         if len(tied) == 1:

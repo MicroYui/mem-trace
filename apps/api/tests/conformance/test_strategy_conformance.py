@@ -1,6 +1,8 @@
 """Strategy-level conformance tests for non-bypassable retrieval invariants."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.runtime.memory_runtime import MemoryRuntime
@@ -172,6 +174,24 @@ async def test_memory_using_strategies_reject_destructive_and_tool_sensitive_can
     assert "TOOL_SENSITIVE_MARKER" not in rendered
     assert gate_by_id[memory_ids["destructive"]].reject_reason == "destructive_command"
     assert gate_by_id[memory_ids["tool_sensitive"]].reject_reason == "tool_sensitive"
+
+
+@pytest.mark.asyncio
+async def test_access_policy_provider_snapshot_is_non_secret_and_retrieval_relevant():
+    runtime, ctx, _ = await _seed_strategy_fixture(RetrievalStrategy.variant_2)
+
+    inspection = await runtime.inspect_access(ctx.access_id)
+    providers = inspection.policy_snapshot["providers"]
+    snapshot_text = json.dumps(providers, sort_keys=True)
+
+    assert set(providers) == {"embedding", "summarizer"}
+    assert providers["embedding"]["provider_id"]
+    assert providers["summarizer"]["provider_id"]
+    assert "judge" not in providers
+    assert "api_key" not in snapshot_text
+    assert "authorization" not in snapshot_text
+    assert "sk-" not in snapshot_text
+    assert "secret" not in snapshot_text
 
 
 @pytest.mark.asyncio

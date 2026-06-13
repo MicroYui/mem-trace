@@ -1,18 +1,21 @@
 """Stable retrieval policy snapshots for replay/drift classification."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import asdict
 from typing import Any
 
+from app.providers.base import ProviderKind
 from app.retrieval.gate import GateConfig
 from app.runtime.models import RetrievalRequest, RetrievalStrategy
 
 
-POLICY_VERSION = "retrieval-policy-v1"
+POLICY_VERSION = "retrieval-policy-v2"
 LIFECYCLE_FILTER_VERSION = "retrievable-statuses-v1"
 TOKEN_ESTIMATOR_VERSION = "regex-stopword-cjk-v1"
+_RETRIEVAL_PROVIDER_KINDS = (ProviderKind.embedding.value, ProviderKind.summarizer.value)
 
 
 def build_policy_snapshot(
@@ -23,6 +26,7 @@ def build_policy_snapshot(
     vector_enabled: bool,
     vector_weight: float,
     compaction_notice_reserve_tokens: int,
+    provider_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-compatible, non-secret retrieval policy snapshot."""
     vector_active = bool(vector_enabled)
@@ -43,9 +47,43 @@ def build_policy_snapshot(
             "compaction_notice_reserve_tokens": compaction_notice_reserve_tokens,
             "negative_evidence_max_blocks": 3,
         },
-        "providers": {
-            "embedding": "deterministic_hash_default",
-            "summarizer": "persisted_or_config_gated",
+        "providers": _retrieval_provider_snapshot(provider_snapshot),
+    }
+
+
+def _retrieval_provider_snapshot(provider_snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    providers = _default_retrieval_provider_snapshot()
+    if provider_snapshot is None:
+        return providers
+    for kind in _RETRIEVAL_PROVIDER_KINDS:
+        if kind in provider_snapshot:
+            providers[kind] = copy.deepcopy(provider_snapshot[kind])
+    return providers
+
+
+def _default_retrieval_provider_snapshot() -> dict[str, Any]:
+    return {
+        "embedding": {
+            "provider_id": "embedding.deterministic_hash.v1",
+            "kind": "embedding",
+            "deterministic": True,
+            "requires_network": False,
+            "endpoint_types": [],
+            "model": None,
+            "configured": True,
+            "fallback_provider_id": None,
+            "metadata": {"algorithm": "blake2b_hash_bow", "dim": 256},
+        },
+        "summarizer": {
+            "provider_id": "summarizer.rule.v1",
+            "kind": "summarizer",
+            "deterministic": True,
+            "requires_network": False,
+            "endpoint_types": [],
+            "model": None,
+            "configured": True,
+            "fallback_provider_id": None,
+            "metadata": {"algorithm": "structured_must_retain_facts"},
         },
     }
 

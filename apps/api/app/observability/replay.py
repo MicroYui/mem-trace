@@ -289,10 +289,22 @@ class RetrievalReplayService:
             vector_enabled=self._retrieval._use_vector,
             vector_weight=self._retrieval._vector_weight,
             compaction_notice_reserve_tokens=self._retrieval._compaction_notice_reserve_tokens,
+            provider_snapshot=self._retrieval.provider_snapshot,
         )
         current_hash = policy_hash(current)
         if not access.policy_hash:
             return "policy_snapshot_missing", None
+        if not access.policy_snapshot:
+            return "policy_snapshot_missing", None
+        persisted_snapshot_hash = policy_hash(access.policy_snapshot)
+        if persisted_snapshot_hash != access.policy_hash:
+            return None, ReplayDiffItem(
+                kind="policy_snapshot_hash_mismatch",
+                field="policy_snapshot",
+                original=access.policy_hash,
+                replayed=persisted_snapshot_hash,
+                severity="warning",
+            )
         if access.policy_hash != current_hash:
             return None, ReplayDiffItem(
                 kind="policy_drift",

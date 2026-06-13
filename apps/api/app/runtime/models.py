@@ -572,6 +572,9 @@ class AccessInspection(_Base):
     context_blocks: list[ContextBlock] = Field(default_factory=list)
     profile: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    policy_version: Optional[str] = None
+    policy_hash: Optional[str] = None
+    policy_snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReplayCandidateView(_Base):

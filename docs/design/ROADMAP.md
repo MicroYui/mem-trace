@@ -229,18 +229,18 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 
 当前已有真实 `LLMExtractionProvider`；后续 embedding / summarizer / LLM-judge 都会引入外部模型，且与「benchmark 可复现」「LLM key 不稳定」存在张力。建议抽象一个统一的 provider 注册层，**一处解决「确定性 default ↔ 真实模型 ↔ 可复现」的冲突**：
 
-- [ ] **Provider 抽象族**：`LLMExtractionProvider`（已有）、`EmbeddingProvider`、`SummarizerProvider`、`JudgeProvider`，统一约定：deterministic fallback + config-gate 启用真实实现 + 失败降级（沿用 extraction 管线已验证的模式）。
-- [ ] **Provider capability metadata**：声明各 provider 是否确定性、是否需要网络、支持的端点类型，benchmark 据此自动选确定性路径以保可复现。
-- [ ] 关联：§0 真实 embedding 决策、§1 LLM key 风险、§9 可配置 summarizer 都落到这一层。
+- [x] **Provider 抽象族**：`LLMExtractionProvider`（已有）、`EmbeddingProvider`、`SummarizerProvider`、`JudgeProvider`，统一约定：deterministic fallback + config-gate 启用真实实现 + 失败降级（沿用 extraction 管线已验证的模式）。**完成（2026-06-13）：新增轻量 `app.providers` registry/base、deterministic/OpenAI-compatible embedding provider、contract-only no-op judge、settings-based `providers/factory.py`、FastAPI DI/runtime registry 注入；`MemoryRuntime._prepare_embedding(...)` 与 `RetrievalController._embed_query(...)` 已接入 embedding provider，并在 provider 失败、非 256 维、NaN/inf 时降级到 deterministic `stable_embedding(...)`；settings-derived embedding providers 固定使用 256-dim pgvector contract（即使 `MEMTRACE_EMBEDDING_DIM` 被误配为其他值）；repository-level `ensure_embedding(...)` backfill 保留；benchmark runtime 现在显式传入 `deterministic_provider_registry()`，不受真实 provider 环境变量影响。**
+- [x] **Provider capability metadata**：声明各 provider 是否确定性、是否需要网络、支持的端点类型，benchmark 据此自动选确定性路径以保可复现。**完成（2026-06-13）：`ProviderCapabilities.snapshot()` 已提供稳定、递归冻结、脱敏的 capability snapshot；retrieval-policy-v2 已纳入 retrieval-relevant `embedding`/`summarizer` snapshots 并排除 `judge`，显式 provider override（包括 `summarizer_provider=`）会反映实际 provider；replay policy drift 通过 public `RetrievalController.provider_snapshot` 与 hot-path retrieval 同源重建 hash；P8 conformance 覆盖 policy snapshot 非 secret、仅 retrieval-relevant provider、benchmark env isolation。**
+- [x] 关联：§0 真实 embedding 决策、§1 LLM key 风险、§9 可配置 summarizer 都落到这一层。**§10 Provider Registry 当前计划项已完成并通过 P10 full regression / benchmark / reproduce closeout；最终复审补齐 summarizer real/degraded factory wiring 测试；真实 LLM judge 行为、storage-backed ontology 管理和更大治理继续留在后续 roadmap。**
 
 ## 11. Controlled Memory Key Ontology（受控记忆 key 本体）
 
 §1 已记录「LLM key 不稳定破坏冲突解析」。当前缓解手段是系统提示里的 key 词表，建议升级为正式的 **key schema registry**（比「语义去重」更早、更实用、更可控）：
 
-- [ ] **受控 key 本体表**：如 `project.runtime` / `project.package_manager` / `project.test_command` / `project.database` / `tool.command.failed` / `endpoint.current` / `endpoint.deprecated` / `user.preference.*`，定义单值/多值语义与 supersede 规则。
-- [ ] **抽取侧校验/归一**：LLM 候选的 key 必须映射到本体（或显式标记为 free-form），不在本体内的同义概念归一到规范 key，根治 key 漂移。
-- [ ] **本体作为单一真相源**：当前单值语义分散在三处（`writer` supersede、`resolver._SINGLE_VALUED_KEYS`、`llm_extractor._SYSTEM_PROMPT`），靠人工保持同步。2026-06-13 审查已发现 `resolver._SINGLE_VALUED_KEYS` 落后于 LLM 受控 key 契约并临时补齐（见 §1.1）；本体落地后应让三处都从同一注册表派生，消除漂移根因。
-- [ ] 关联：§1 LLM key 风险、resolver 冲突解析、§10 ExtractionProvider。
+- [x] **受控 key 本体表**：如 `project.runtime` / `project.package_manager` / `project.test_command` / `project.database` / `tool.command.failed` / `endpoint.current` / `endpoint.deprecated` / `user.preference.*`，定义单值/多值语义与 supersede 规则。**进展（2026-06-13）：P5 已完成 `app.memory.key_ontology`，提供 canonical specs、alias、single/multi cardinality、默认 `MemoryType`/`MemoryScope`、安全 free-form 校验、wildcard 默认继承与稳定 LLM prompt rendering；最终复审已补齐 canonical schema 完整性测试，并锁定 `tool.command.failed` 存在但不可由 LLM 抽取。**
+- [x] **抽取侧校验/归一**：LLM 候选的 key 必须映射到本体（或显式标记为 free-form），不在本体内的同义概念归一到规范 key，根治 key 漂移。**进展（2026-06-13）：P7 已完成；`ExtractionCandidate.free_form`、ontology-rendered `_SYSTEM_PROMPT`、`build_results(...)` alias canonicalization、unknown non-free-form drop、unsafe free-form reject、controlled/free-form 默认 type/scope override 均已覆盖。**
+- [x] **本体作为单一真相源**：当前单值语义分散在三处（`writer` supersede、`resolver._SINGLE_VALUED_KEYS`、`llm_extractor._SYSTEM_PROMPT`），靠人工保持同步。2026-06-13 审查已发现 `resolver._SINGLE_VALUED_KEYS` 落后于 LLM 受控 key 契约并临时补齐（见 §1.1）；本体落地后应让三处都从同一注册表派生，消除漂移根因。**进展（2026-06-13）：P6 已迁移 writer runtime constants、resolver single-valued semantics、runtime active-memory identity 与 supersede matching 到 ontology；历史 alias（如 `project.pkg_manager`）会与 canonical `project.package_manager` 共享冲突/替换语义；最终复审修复 package-manager correction 上下文（如 `npm -> bun`）误写 `project.runtime` 的边界。**
+- [x] 关联：§1 LLM key 风险、resolver 冲突解析、§10 ExtractionProvider。**§11 当前 code-defined ontology slice 已完成并通过 final affected suite / full regression / reproducibility closeout；后续若需要 hosted/admin 可编辑 ontology，应作为 storage-backed governance/administration 独立设计，不属于本轮。**
 
 ## 12. Documentation & Showcase（展示资产）
 
@@ -305,8 +305,8 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
    - ~~**8b 一致性/并发（§13.2）**~~ ✅ **已完成 (2026-06-13)**：H4 后端 isomorphism、H5 `next_sequence_no` 原子化、H6 检索超时 split-brain、H7 gate log 确定性排序、H8 ORM/迁移 compaction 索引对齐均已完成。
    - ~~**8c 横切运行时保障 High（§13.4-A/B，★最高价值）**~~ ✅ **已完成 (2026-06-13)**：Retrieval Policy Contract / policy snapshot + Runtime Invariant & Conformance Suite 已完成，replay 现可区分 data drift vs policy drift，并把 lifecycle/workspace/secret/isomorphism 不变量聚成机器校验套件。
    - ~~**8d 精度/健壮性 + 其余横切（§13.3 + §13.4-C/D/E）**~~ ✅ **已完成 (2026-06-13)**：状态机边界 H13、token 估算独立化 H11、summarizer provenance 验证 H12、benchmark 公平性快照整体化 H14、H15 migration policy、H16 redacted trace bundle、H17 dogfood harness、H18 docs/project-memory closeout 均已完成并验证。§1.1 末条 Low 项保留为后续 opportunistic cleanup，不阻塞 §10/§11。
-9. **Provider Registry + Key Ontology**（§10 + §11）：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移，并消除 §11「本体作为单一真相源」记录的三处单值语义漂移）。
-10. **Phase 4 异步基建 + 生命周期 + 多租户治理**（§3 全段）：§3.1 Redis buffer/Celery（替换 §1 进程内 buffer）→ §3.2 Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志 → §3.3 memory_versions/conflicts 版本与冲突管理 → §3.4 API Key/JWT/quota/redaction 完整多租户治理。（托管 demo 所需的轻量 Hosted-Demo Safety Mode 可在此之前按需单独落地。）
+9. ~~**Provider Registry + Key Ontology**（§10 + §11）~~ ✅ **已完成 (2026-06-13)**：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移，并消除 §11「本体作为单一真相源」记录的三处单值语义漂移）；benchmark deterministic provider isolation + provider snapshot conformance + P10 closeout + final review hardening（fixed 256-dim provider boundary、`npm -> bun` correction、ontology schema coverage、summarizer factory wiring）均已完成。
+10. **待选择下一主线：Phase 4 异步基建 + 生命周期 + 多租户治理 / deferred I7 / TS-MCP-IDE integrations**：默认大项仍是 §3 全段（§3.1 Redis buffer/Celery → §3.2 Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志 → §3.3 memory_versions/conflicts → §3.4 API Key/JWT/quota/redaction 完整多租户治理），但也可显式先做 I7 compaction-negative retained facts 或 TypeScript/MCP/IDE adoption slice。
 11. **Phase 3-B 前端可视化**（§2）：Timeline → State Tree Viewer → Gate Analysis → Sankey。
 12. **Phase 5 高级存储**（§4）：ES/Neo4j 混合检索 + 图谱 provenance + 多路融合 + Query Planner + 多跳检索，**仅在触发条件满足时启动**。
 13. **远期 / scale-only**：§5 状态树其余能力（subgoal 自动推断 / 完整 node_type / MAGE 四操作）、§6 TS SDK / OTel exporter / MCP Server / IDE 插件 / Go-Rust 组件、§7 小规模 LoCoMo/MemoryArena。**均设触发条件，不主动排期。**

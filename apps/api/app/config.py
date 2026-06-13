@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     # Weight of the vector cosine signal in the blended relevance score; the
     # lexical signal gets the remaining weight.
     retrieval_vector_weight: float = 0.5
+    # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
+    # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
+    # hot paths use the configured embedding provider first, then degrade to the
+    # deterministic 256-dim pgvector-compatible embedding on failure/mismatch.
+    embedding_provider: str = "deterministic"
+    embedding_api_key: str = ""
+    embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_timeout_ms: int = 8000
 
 
 @lru_cache

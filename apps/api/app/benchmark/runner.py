@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from app.benchmark.cases import ALL_STRATEGIES, CASES, BenchmarkCase
 from app.benchmark.evaluator import CaseMetrics, evaluate_case
+from app.providers.factory import deterministic_provider_registry
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     BenchmarkCaseRecord,
@@ -146,7 +147,11 @@ async def _restore_workspace_memories(repo: Repository, workspace_id: str, snaps
 
 async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | None = None) -> list[CaseMetrics]:
     repo = repo or InMemoryRepository()
-    runtime = MemoryRuntime(repo, default_workspace_id=workspace_id)
+    runtime = MemoryRuntime(
+        repo,
+        default_workspace_id=workspace_id,
+        provider_registry=deterministic_provider_registry(),
+    )
     seed = await case.seed(runtime, workspace_id)
     memory_snapshot = await _snapshot_workspace_memories(repo, seed.workspace_id)
 

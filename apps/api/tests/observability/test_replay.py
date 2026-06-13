@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.providers import ProviderCapabilities, ProviderKind, ProviderRegistry
+from app.retrieval.policy import policy_hash
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     BranchStatus,
@@ -31,6 +33,19 @@ from app.runtime.models import (
     WriteEventRequest,
 )
 from app.runtime.repository import InMemoryRepository
+
+
+class _ReplayEmbeddingProvider:
+    capabilities = ProviderCapabilities(
+        provider_id="embedding.replay_test.v1",
+        kind=ProviderKind.embedding,
+        deterministic=True,
+        requires_network=False,
+        metadata={"dim": 256},
+    )
+
+    async def embed_text(self, text: str | None) -> list[float]:
+        return [1.0] + [0.0] * 255
 
 
 @pytest.mark.asyncio
@@ -157,7 +172,10 @@ async def test_replay_reports_policy_drift_when_persisted_policy_hash_differs():
 
     access = await runtime._repo.get_access_log(access_id)  # noqa: SLF001
     assert access is not None
-    access.policy_hash = "sha256:not-current"
+    assert access.policy_snapshot
+    access.policy_snapshot = dict(access.policy_snapshot)
+    access.policy_snapshot["token_budget"] = int(access.policy_snapshot["token_budget"]) + 1
+    access.policy_hash = policy_hash(access.policy_snapshot)
     await runtime._repo.add_access_log(access)  # noqa: SLF001
 
     replay = await runtime.replay_access(access_id)
@@ -166,9 +184,67 @@ async def test_replay_reports_policy_drift_when_persisted_policy_hash_differs():
     policy_diffs = [diff for diff in replay.diffs if diff.kind == "policy_drift"]
     assert len(policy_diffs) == 1
     assert policy_diffs[0].field == "policy_hash"
-    assert policy_diffs[0].original == "sha256:not-current"
+    assert policy_diffs[0].original == access.policy_hash
     assert policy_diffs[0].replayed.startswith("sha256:")
     assert policy_diffs[0].severity == "warning"
+
+
+@pytest.mark.asyncio
+async def test_replay_reports_policy_snapshot_hash_mismatch_before_current_policy_drift():
+    runtime, _, run_id, step_id, _ = await _seed_runtime()
+    access_id = await _retrieve_once(runtime, run_id, step_id)
+
+    access = await runtime._repo.get_access_log(access_id)  # noqa: SLF001
+    assert access is not None
+    assert access.policy_snapshot
+    access.policy_snapshot = dict(access.policy_snapshot)
+    access.policy_snapshot["providers"] = {}
+    await runtime._repo.add_access_log(access)  # noqa: SLF001
+
+    replay = await runtime.replay_access(access_id)
+
+    assert replay is not None
+    mismatch_diffs = [diff for diff in replay.diffs if diff.kind == "policy_snapshot_hash_mismatch"]
+    assert len(mismatch_diffs) == 1
+    assert mismatch_diffs[0].field == "policy_snapshot"
+    assert mismatch_diffs[0].original == access.policy_hash
+    assert str(mismatch_diffs[0].replayed).startswith("sha256:")
+    assert mismatch_diffs[0].severity == "warning"
+
+
+@pytest.mark.asyncio
+async def test_replay_policy_drift_uses_public_retrieval_provider_snapshot_property(monkeypatch):
+    provider = _ReplayEmbeddingProvider()
+    registry = ProviderRegistry()
+    registry.register(ProviderKind.embedding, provider, provider.capabilities)
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_replay_provider", provider_registry=registry)
+    seen = {"called": False}
+
+    def provider_snapshot(_controller):
+        seen["called"] = True
+        return {"embedding": provider.capabilities.snapshot()}
+
+    monkeypatch.setattr(type(runtime._retrieval), "provider_snapshot", property(provider_snapshot))  # noqa: SLF001
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_replay_provider", task="provider replay", workspace_id="ws_replay_provider")
+    )
+    access = MemoryAccessLog(
+        workspace_id="ws_replay_provider",
+        run_id=run.run_id,
+        query="q",
+        retrieval_strategy=RetrievalStrategy.baseline_0,
+        token_budget=64,
+        top_k=10,
+        policy_snapshot={"policy_version": "retrieval-policy-v1"},
+    )
+    access.policy_hash = policy_hash(access.policy_snapshot)
+    await runtime._repo.add_access_log(access)  # noqa: SLF001
+
+    replay = await runtime.replay_access(access.access_id)
+
+    assert replay is not None
+    assert seen["called"] is True
+    assert any(diff.kind == "policy_drift" for diff in replay.diffs)
 
 
 async def _seed_runtime() -> tuple[MemoryRuntime, InMemoryRepository, str, str, str]:

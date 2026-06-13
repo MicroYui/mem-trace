@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
 from app.memory import secrets, summarizer, writer
 from app.memory import llm_extractor, resolver
 from app.memory.candidate_buffer import CandidateBuffer
+from app.memory.key_ontology import canonical_memory_key, same_memory_key_identity
 from app.memory.llm_extractor import ExtractionProvider
 from app.config import get_settings
 from app.memory.summarizer_provider import (
@@ -39,8 +41,11 @@ from app.observability.trace_bundle import (
     export_run_bundle,
     validate_bundle_schema,
 )
+from app.providers.base import ProviderKind
+from app.providers.registry import ProviderRegistry
 from app.retrieval.controller import RetrievalController
 from app.retrieval.packer import estimate_tokens as _estimate_history_tokens
+from app.retrieval.similarity import stable_embedding
 from app.runtime import state_tree
 from app.runtime.models import (
     AgentEvent,
@@ -51,6 +56,7 @@ from app.runtime.models import (
     CompleteRunResult,
     DashboardTables,
     EventType,
+    EmbeddingStatus,
     ExtractionMode,
     FinishStepRequest,
     FinishStepResult,
@@ -84,7 +90,7 @@ from app.runtime.models import (
     Provenance,
     RetainedFact,
 )
-from app.runtime.repository import Repository
+from app.runtime.repository import EMBED_DIM, Repository
 
 
 def _now() -> datetime:
@@ -117,11 +123,30 @@ class MemoryRuntime:
         extraction_mode: ExtractionMode = ExtractionMode.sync,
         extraction_provider: Optional[ExtractionProvider] = None,
         summarizer_provider: Optional[SummarizerProvider] = None,
+        provider_registry: Optional[ProviderRegistry] = None,
     ):
         settings = get_settings()
         self._repo = repo
         self._default_ws = default_workspace_id
-        self._retrieval = RetrievalController(repo, default_token_budget=token_budget)
+        self._provider_registry = provider_registry
+        self._embedding_dim = EMBED_DIM
+        self._embedding_provider = (
+            provider_registry.get(ProviderKind.embedding) if provider_registry is not None else None
+        )
+        # C3 summarizer seam. Always keep a deterministic provider available so
+        # C4 can degrade to rule summaries without losing retained facts.
+        self._summarizer_provider = summarizer_provider or RuleSummarizerProvider()
+        provider_snapshot = provider_registry.snapshot() if provider_registry is not None else None
+        summarizer_capabilities = getattr(self._summarizer_provider, "capabilities", None)
+        if summarizer_capabilities is not None:
+            provider_snapshot = dict(provider_snapshot or {})
+            provider_snapshot[ProviderKind.summarizer.value] = summarizer_capabilities.snapshot()
+        self._retrieval = RetrievalController(
+            repo,
+            default_token_budget=token_budget,
+            provider_registry=provider_registry,
+            provider_snapshot=provider_snapshot,
+        )
         # Default freshness/latency policy (architecture.md §12.1). ``sync``
         # keeps the demo/benchmark inline-extracting; ``buffered`` defers
         # extraction to a flush. A per-event override can still force sync.
@@ -130,9 +155,6 @@ class MemoryRuntime:
         # extraction goes through the provider instead of the rule-based writer;
         # ``None`` (default) keeps the deterministic writer path.
         self._extraction_provider = extraction_provider
-        # C3 summarizer seam. Always keep a deterministic provider available so
-        # C4 can degrade to rule summaries without losing retained facts.
-        self._summarizer_provider = summarizer_provider or RuleSummarizerProvider()
         self._compaction_enabled = settings.compaction_enabled
         self._compaction_history_token_threshold = settings.compaction_history_token_threshold
         self._compaction_summary_budget_tokens = settings.compaction_summary_budget_tokens
@@ -329,7 +351,7 @@ class MemoryRuntime:
 
         created_ids: list[str] = []
         mem = writer.write_from_finish_step(step, summary=request.summary)
-        await self._repo.add_memory(mem)
+        await self._repo.add_memory(await self._prepare_embedding(mem))
         created_ids.append(mem.memory_id)
 
         return FinishStepResult(
@@ -442,7 +464,7 @@ class MemoryRuntime:
         # re-run of the cold path does not accumulate duplicates.
         for mem in result.created:
             await self._supersede_run_summary_key(run.workspace_id, mem.key)
-            await self._repo.add_memory(mem)
+            await self._repo.add_memory(await self._prepare_embedding(mem))
             created_ids.append(mem.memory_id)
 
         return CompleteRunResult(
@@ -500,6 +522,32 @@ class MemoryRuntime:
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+    async def _prepare_embedding(self, memory: MemoryItem) -> MemoryItem:
+        """Populate memory embeddings through the runtime provider boundary.
+
+        Repository.add_memory(...) still keeps deterministic ensure_embedding(...)
+        as the final backfill for direct seeded memories, tests, backfills, and
+        any future runtime path that misses this helper. Provider failures must
+        never block memory writes; they degrade to the deterministic embedding.
+        """
+        if memory.embedding_vector is not None or not memory.content:
+            return memory
+        if self._embedding_provider is not None:
+            try:
+                vector = list(await self._embedding_provider.embed_text(memory.content))
+                if len(vector) != self._embedding_dim:
+                    raise ValueError(f"embedding dimension mismatch: expected {self._embedding_dim}, got {len(vector)}")
+                if not all(isinstance(v, int | float) and math.isfinite(v) for v in vector):
+                    raise ValueError("embedding provider returned non-finite vector")
+                memory.embedding_vector = vector
+                memory.embedding_status = EmbeddingStatus.embedded
+                return memory
+            except Exception:  # noqa: BLE001 - embedding provider failure degrades to deterministic fallback
+                logger.warning("Embedding provider failed; using deterministic fallback", exc_info=True)
+        memory.embedding_vector = stable_embedding(memory.content, self._embedding_dim)
+        memory.embedding_status = EmbeddingStatus.embedded
+        return memory
+
     async def _maybe_fold_history(
         self, request: RetrievalRequest, *, workspace_id: str
     ) -> tuple[list[ContextBlock], list[PendingCompactionLog], list[str]]:
@@ -725,7 +773,7 @@ class MemoryRuntime:
         elif event.event_type == EventType.tool_result:
             mem = writer.write_from_tool_result(event)
             if mem is not None:
-                await self._repo.add_memory(mem)
+                await self._repo.add_memory(await self._prepare_embedding(mem))
                 created.append(mem.memory_id)
         return created
 
@@ -740,7 +788,7 @@ class MemoryRuntime:
         for mem in result.updates:
             await self._repo.update_memory(mem)
         if result.add is not None:
-            await self._repo.add_memory(result.add)
+            await self._repo.add_memory(await self._prepare_embedding(result.add))
             return result.add.memory_id
         return None
 
@@ -754,7 +802,7 @@ class MemoryRuntime:
             if (
                 mem.status == MemoryStatus.active
                 and mem.memory_id != incoming.memory_id
-                and mem.key == incoming.key
+                and same_memory_key_identity(mem.key, incoming.key)
                 and mem.scope.value == incoming.scope.value
             ):
                 out.append(mem)
@@ -763,11 +811,11 @@ class MemoryRuntime:
     async def _supersede_keys(self, workspace_id: str, keys: list[tuple[str, str]]) -> None:
         if not keys:
             return
-        wanted = set(keys)
+        wanted = {(canonical_memory_key(key), scope) for key, scope in keys}
         for mem in await self._repo.list_memories(workspace_id=workspace_id):
             if mem.status != MemoryStatus.active or mem.key is None:
                 continue
-            if (mem.key, mem.scope.value) in wanted:
+            if (canonical_memory_key(mem.key), mem.scope.value) in wanted:
                 mem.status = MemoryStatus.superseded
                 mem.updated_at = _now()
                 await self._repo.update_memory(mem)
@@ -991,6 +1039,9 @@ class MemoryRuntime:
             context_blocks=blocks,
             profile=profile,
             warnings=warnings,
+            policy_version=access.policy_version,
+            policy_hash=access.policy_hash,
+            policy_snapshot=access.policy_snapshot,
         )
 
 

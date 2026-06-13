@@ -6,16 +6,20 @@ profiler, then persists access/gate logs and returns a structured MemoryContext.
 from __future__ import annotations
 
 import asyncio
+import copy
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from app.providers.base import ProviderKind
 from app.retrieval import gate as gatemod
 from app.retrieval.negative_evidence import build_negative_evidence
 from app.retrieval.packer import pack_context
 from app.retrieval.policy import POLICY_VERSION, build_policy_snapshot, policy_hash
-from app.retrieval.similarity import cosine_similarity, lexical_similarity, stable_embedding
+from app.retrieval.similarity import lexical_similarity, stable_embedding
 from app.config import get_settings
+from app.providers.registry import ProviderRegistry
 from app.runtime.models import (
     BranchStatus,
     ContextBlock,
@@ -32,7 +36,7 @@ from app.runtime.models import (
     StateNode,
     StateNodeStatus,
 )
-from app.runtime.repository import Repository
+from app.runtime.repository import EMBED_DIM, Repository
 from app.runtime.state_tree import active_path_chain, active_path_node_ids
 
 # Lifecycle states that are eligible to be retrieval candidates. Superseded /
@@ -102,13 +106,28 @@ class RetrievalPipelineTrace:
 
 
 class RetrievalController:
-    def __init__(self, repo: Repository, *, default_token_budget: int = 512):
+    def __init__(
+        self,
+        repo: Repository,
+        *,
+        default_token_budget: int = 512,
+        provider_registry: ProviderRegistry | None = None,
+        provider_snapshot: dict[str, Any] | None = None,
+    ):
         self._repo = repo
         self._default_budget = default_token_budget
+        self._provider_registry = provider_registry
+        self._embedding_provider = (
+            provider_registry.get(ProviderKind.embedding) if provider_registry is not None else None
+        )
+        if provider_snapshot is not None:
+            self._provider_snapshot = copy.deepcopy(provider_snapshot)
+        else:
+            self._provider_snapshot = provider_registry.snapshot() if provider_registry is not None else None
         settings = get_settings()
         self._use_vector = settings.retrieval_use_vector
         self._vector_weight = settings.retrieval_vector_weight
-        self._embed_dim = settings.embedding_dim
+        self._embed_dim = EMBED_DIM
         self._timeout_ms = settings.retrieval_timeout_ms
         self._compaction_notice_reserve_tokens = settings.compaction_notice_reserve_tokens
 
@@ -224,10 +243,28 @@ class RetrievalController:
             vector_enabled=self._use_vector,
             vector_weight=self._vector_weight,
             compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
+            provider_snapshot=self.provider_snapshot,
         )
         access.policy_version = POLICY_VERSION
         access.policy_snapshot = snapshot
         access.policy_hash = policy_hash(snapshot)
+
+    @property
+    def provider_snapshot(self) -> dict[str, Any] | None:
+        return copy.deepcopy(self._provider_snapshot)
+
+    async def _embed_query(self, query: str | None) -> list[float]:
+        if self._embedding_provider is not None:
+            try:
+                vector = list(await self._embedding_provider.embed_text(query))
+                if len(vector) != self._embed_dim:
+                    raise ValueError(f"embedding dimension mismatch: expected {self._embed_dim}, got {len(vector)}")
+                if not all(isinstance(v, int | float) and math.isfinite(v) for v in vector):
+                    raise ValueError("embedding provider returned non-finite vector")
+                return vector
+            except Exception:  # noqa: BLE001 - retrieval must degrade to deterministic vector search
+                pass
+        return stable_embedding(query, self._embed_dim)
 
     def _timeout_context(
         self,
@@ -568,7 +605,7 @@ class RetrievalController:
         # retrieval is disabled or yields nothing (e.g. no embeddings stored).
         vector_scores: dict[str, float] = {}
         if self._use_vector:
-            q_vec = stable_embedding(query, self._embed_dim)
+            q_vec = await self._embed_query(query)
             knn = await self._repo.search_memories_by_vector(
                 embedding=q_vec, workspace_id=workspace_id, top_k=max(top_k * 2, top_k)
             )

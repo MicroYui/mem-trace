@@ -27,6 +27,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.memory.key_ontology import normalize_memory_key, render_llm_extraction_key_prompt
 from app.memory.writer import MemoryWriteResult, detect_risk_flags, write_from_user_message
 from app.runtime.models import (
     AgentEvent,
@@ -52,6 +53,7 @@ class ExtractionCandidate(BaseModel):
     scope: MemoryScope = MemoryScope.workspace
     supersede: bool = False
     confidence: float = Field(default=0.9, ge=0.0, le=1.0)
+    free_form: bool = False
 
 
 @runtime_checkable
@@ -89,35 +91,25 @@ class FakeExtractionProvider:
         return candidates
 
 
-_SYSTEM_PROMPT = """You extract durable memory facts from a single user message in an AI coding-agent session.
+_SYSTEM_PROMPT = f"""You extract durable memory facts from a single user message in an AI coding-agent session.
 
 Return ONLY a JSON object with a single key "candidates" whose value is a JSON array.
 Each array item is an object with exactly these fields:
 - "key": a stable dotted identifier (see the controlled key rules below).
 - "value": the extracted value, lowercased and normalized, e.g. "bun", "npm", "postgres".
 - "memory_type": one of "project", "episodic", "procedural", "working_state". Default "project".
-- "scope": one of "workspace", "session", "run", "global". Default "workspace".
+- "scope": one of "workspace", "session", "user". Default "workspace".
 - "supersede": true if this fact explicitly corrects/replaces a previous preference, else false.
 - "confidence": a float in [0,1].
+- "free_form": true only when no controlled key matches and the key is a safe durable dotted key.
 
-Controlled keys (ALWAYS reuse the SAME key for the SAME concept so later
-preferences can override earlier ones; do NOT invent a synonym key):
-- The JavaScript/package runtime or package manager (npm, pnpm, yarn, bun, node,
-  deno) -> ALWAYS key "project.runtime". Things to NOT use for the runtime ->
-  key "project.runtime.excluded".
-- Programming language -> "project.language" (excluded -> "project.language.excluded").
-- Database -> "project.database" (excluded -> "project.database.excluded").
-- Test framework -> "project.test_framework".
-- Formatting/lint tool -> "project.formatting".
-- For any other durable concept, use a stable "project.<concept>" key and reuse
-  it verbatim for that concept across turns.
+Controlled keys:
+{render_llm_extraction_key_prompt()}
 
 Rules:
 - Extract only durable preferences, project constraints, and explicit corrections.
-- When the user switches to a different choice for the same concept (e.g. "use
-  pnpm" then later "use bun"), emit the controlled key with the new value and set
-  "supersede": true so the old value is retired.
-- Do NOT invent facts. If the message contains nothing durable, return {"candidates": []}.
+- When the user switches to a different choice for the same concept, emit the controlled key with the new value and set "supersede": true so the old value is retired.
+- Do NOT invent facts. If the message contains nothing durable, return {{"candidates": []}}.
 - Output JSON only, no prose, no markdown fences."""
 
 
@@ -254,7 +246,22 @@ def build_results(event: AgentEvent, candidates: list[object]) -> list[MemoryWri
     ``supersede=True`` retires same-(key, scope) actives, matching the explicit
     correction semantics in ``writer.write_from_user_message``.
     """
-    validated = [c for c in (_validate(raw) for raw in candidates) if c is not None]
+    validated: list[ExtractionCandidate] = []
+    for raw in candidates:
+        candidate = _validate(raw)
+        if candidate is None:
+            continue
+        normalized = normalize_memory_key(candidate.key, free_form=candidate.free_form)
+        if normalized.spec is None and not normalized.free_form:
+            continue
+        updates = {"key": normalized.key, "free_form": normalized.free_form}
+        if normalized.spec is not None:
+            updates["memory_type"] = normalized.spec.memory_type
+            updates["scope"] = normalized.spec.scope
+        elif normalized.free_form:
+            updates["memory_type"] = MemoryType.project
+            updates["scope"] = MemoryScope.workspace
+        validated.append(candidate.model_copy(update=updates))
     validated.sort(key=_sort_key)
 
     results: list[MemoryWriteResult] = []

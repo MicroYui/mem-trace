@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from app.memory.key_ontology import PROJECT_PACKAGE_MANAGER, PROJECT_RUNTIME, PROJECT_RUNTIME_EXCLUDED
 from app.runtime.models import (
     AgentEvent,
     AgentStep,
@@ -40,13 +41,15 @@ _RUNTIME_TOKENS = {
     "node.js": "nodejs",
     "nodejs": "nodejs",
     "node": "nodejs",
+    "deno": "deno",
+    "python": "python",
+}
+_PACKAGE_MANAGER_TOKENS = {
     "npm": "npm",
     "pnpm": "pnpm",
     "yarn": "yarn",
-    "deno": "deno",
-    "python": "python",
-    "pytest": "pytest",
 }
+_EXECUTION_TOKENS = {**_RUNTIME_TOKENS, **_PACKAGE_MANAGER_TOKENS, "pytest": "pytest"}
 
 # correction: "不是 X，是 Y" / "不是X 是Y" / "不用 X，用 Y"
 _CORRECTION_PATTERNS = [
@@ -86,6 +89,30 @@ def _norm_runtime(token: str) -> Optional[str]:
     return _RUNTIME_TOKENS.get(token.strip().lower())
 
 
+def _norm_execution_token(token: str) -> Optional[str]:
+    return _EXECUTION_TOKENS.get(token.strip().lower())
+
+
+def _norm_project_key_value(token: str) -> Optional[tuple[str, str]]:
+    cleaned = token.strip().lower()
+    if cleaned in _PACKAGE_MANAGER_TOKENS:
+        return PROJECT_PACKAGE_MANAGER, _PACKAGE_MANAGER_TOKENS[cleaned]
+    if cleaned in _RUNTIME_TOKENS:
+        return PROJECT_RUNTIME, _RUNTIME_TOKENS[cleaned]
+    return None
+
+
+def _norm_correction_key_value(old_token: str, new_token: str) -> Optional[tuple[str, str]]:
+    new_key_value = _norm_project_key_value(new_token)
+    if new_key_value is None:
+        return None
+    old_key_value = _norm_project_key_value(old_token)
+    cleaned_new = new_token.strip().lower()
+    if old_key_value is not None and old_key_value[0] == PROJECT_PACKAGE_MANAGER and cleaned_new == "bun":
+        return PROJECT_PACKAGE_MANAGER, "bun"
+    return new_key_value
+
+
 def detect_risk_flags(content: str | None) -> RiskFlags:
     text = content or ""
     destructive = any(p.search(text) for p in _DESTRUCTIVE_PATTERNS)
@@ -121,21 +148,23 @@ def write_from_user_message(event: AgentEvent) -> list[MemoryWriteResult]:
         m = pat.search(content)
         if not m:
             continue
-        new_rt = _norm_runtime(m.group("new"))
-        if not new_rt:
+        key_value = _norm_correction_key_value(m.group("old"), m.group("new"))
+        if key_value is None:
             continue
-        mem = _project_memory(event, key="project.runtime", value=new_rt, content=content)
-        results.append(MemoryWriteResult(mem, supersede_keys=[("project.runtime", MemoryScope.workspace.value)]))
+        key, value = key_value
+        mem = _project_memory(event, key=key, value=value, content=content)
+        results.append(MemoryWriteResult(mem, supersede_keys=[(key, MemoryScope.workspace.value)]))
         return results  # correction is decisive; skip generic positive/negative
 
     # Positive constraint
     for pat in _POSITIVE_PATTERNS:
         for m in pat.finditer(content):
-            rt = _norm_runtime(m.group("rt"))
-            if rt:
+            key_value = _norm_project_key_value(m.group("rt"))
+            if key_value is not None:
+                key, value = key_value
                 results.append(
                     MemoryWriteResult(
-                        _project_memory(event, key="project.runtime", value=rt, content=content)
+                        _project_memory(event, key=key, value=value, content=content)
                     )
                 )
                 break
@@ -145,13 +174,13 @@ def write_from_user_message(event: AgentEvent) -> list[MemoryWriteResult]:
     # Negative constraint
     for pat in _NEGATIVE_PATTERNS:
         for m in pat.finditer(content):
-            rt = _norm_runtime(m.group("rt"))
+            rt = _norm_execution_token(m.group("rt"))
             if rt:
                 results.append(
                     MemoryWriteResult(
                         _project_memory(
                             event,
-                            key="project.runtime.excluded",
+                            key=PROJECT_RUNTIME_EXCLUDED,
                             value=rt,
                             content=content,
                         )
@@ -163,12 +192,12 @@ def write_from_user_message(event: AgentEvent) -> list[MemoryWriteResult]:
     # can match BOTH a positive pattern ("use X") and a negative pattern, yielding
     # a self-contradictory project.runtime=X plus project.runtime.excluded=X. When
     # the same runtime is excluded, the positive constraint is spurious — drop it.
-    excluded = {r.memory.value for r in results if r.memory.key == "project.runtime.excluded"}
+    excluded = {r.memory.value for r in results if r.memory.key == PROJECT_RUNTIME_EXCLUDED}
     if excluded:
         results = [
             r
             for r in results
-            if not (r.memory.key == "project.runtime" and r.memory.value in excluded)
+            if not (r.memory.key == PROJECT_RUNTIME and r.memory.value in excluded)
         ]
 
     return results

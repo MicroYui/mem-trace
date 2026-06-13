@@ -9,6 +9,7 @@ Agent / demo loop
      -> Trace Collector
      -> Execution State Tree
      -> Rule-based Write Pipeline
+     -> Provider Registry + Key Ontology (§10/§11 P10 complete boundary)
      -> Retrieval Controller
      -> Admission Gate
      -> Profiler
@@ -24,6 +25,8 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 - **Agent Trace Collector:** records raw agent events before extraction; source for state tree, memories, and profiler.
 - **Execution State Tree:** organizes runs into active/completed/failed/rolled_back paths; isolates failed branches from prompt context.
 - **Write Pipeline:** converts selected events into memory items; P0 uses deterministic rules, P2 may add LLM extraction and buffering.
+- **Provider Registry (§10 complete slice):** unified boundary for extraction, embedding, summarizer, and contract-only judge providers. P1/P2/P9 provider-only infrastructure exists under `app.providers`; P3 factory/DI/runtime registry injection is complete; P4 runtime/retrieval/replay integration is complete with `retrieval-policy-v2`, retrieval-relevant provider snapshots, flat `AccessInspection` policy fields, runtime write-path embedding provider fallback, retrieval query embedding provider fallback, repository-level deterministic backfill preservation, and replay policy drift using public `RetrievalController.provider_snapshot`; P8 forces deterministic benchmark registries and adds provider snapshot conformance. Settings-derived embedding providers are fixed to the 256-dim pgvector contract even if `MEMTRACE_EMBEDDING_DIM` is configured differently.
+- **Key Ontology (§11 complete slice):** code-defined source of truth for canonical memory keys, aliases, cardinality, default memory type/scope, LLM prompt rendering, and candidate normalization. P5-P7 completed `app.memory.key_ontology`, writer/resolver/runtime canonical identity migration, and LLM extraction normalization with safe `free_form` handling; final review verifies ontology schema coverage, package-manager correction semantics (`npm -> bun`), summarizer provider wiring, and the whole provider/ontology/runtime/replay/benchmark path.
 - **Retrieval Controller:** plans retrieval using query, step intent, active state, workspace scope, and memory metadata.
 - **Admission Gate:** policy engine before prompt injection; hard policies precede risk policy and soft ranking.
 - **Context Packer:** emits structured blocks: active state, tool evidence, project constraints, profile/procedural/episodic memory, warnings.
@@ -45,6 +48,7 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 - **Rollback/recovery:** failed step becomes failed/rolled_back; recovery node attaches to failed step's parent, not under the failed node.
 - **Write:** raw event persists first; deterministic P0 rules create project/tool/working-state memory.
 - **Retrieve:** load active state -> retrieve candidates -> gate -> pack context -> write access/gate/profile logs.
+- **Provider/key-ontology plan:** P1/P2/P9, P3 provider factory/DI, P4 runtime/retrieval/replay embedding provider integration, P5-P7 key ontology/write-conflict/LLM-extraction migration, P8 benchmark deterministic registry + provider conformance, and P10 full closeout are complete.
 - **Demo:** user states Bun constraint -> npm failed branch -> rollback -> retrieval rejects failed npm memory -> recommends Bun path.
 
 ## Boundaries
@@ -54,6 +58,8 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 - Gate is mandatory before prompt injection.
 - Profiler failures must not block the hot path.
 - P0 write rules must not become a general NLP/extraction system by accident.
+- Provider capability snapshots and retrieval policy snapshots must stay non-secret.
+- Benchmarks must force deterministic providers even when real-provider env vars are set.
 
 ## Persistence / Storage Design
 
@@ -64,4 +70,3 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 
 - P0: OpenAI-compatible LLM client only if demo generation needs it; retrieval benchmark can use rule evaluator.
 - Later: LangGraph adapter, TypeScript SDK, OpenTelemetry/OpenInference exporter, frontend dashboard.
-

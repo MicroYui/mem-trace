@@ -9,12 +9,21 @@ import asyncio
 
 import pytest
 
-from app.runtime.memory_runtime import StateTreeError, StepNotFoundError
+from app.providers import ProviderCapabilities, ProviderKind, ProviderRegistry
+from app.retrieval.similarity import stable_embedding
+from app.runtime.memory_runtime import MemoryRuntime, StateTreeError, StepNotFoundError
 from app.runtime.models import (
     AgentStep,
+    BranchStatus,
+    CompleteRunRequest,
+    EmbeddingStatus,
     EventRole,
     EventType,
     FinishStepRequest,
+    MemoryItem,
+    MemoryScope,
+    MemoryStatus,
+    MemoryType,
     RetrievalRequest,
     RollbackRequest,
     RunStatus,
@@ -25,10 +34,236 @@ from app.runtime.models import (
     StepStatus,
     WriteEventRequest,
 )
+from app.runtime.repository import InMemoryRepository
+
+
+class _RecordingEmbeddingProvider:
+    def __init__(self, vector: list[float] | None = None, *, fail: bool = False) -> None:
+        self.vector = vector or [1.0, 0.0]
+        self.fail = fail
+        self.calls: list[str | None] = []
+        self.capabilities = ProviderCapabilities(
+            provider_id="embedding.test_runtime.v1",
+            kind=ProviderKind.embedding,
+            deterministic=False,
+            requires_network=False,
+            metadata={"dim": len(self.vector)},
+        )
+
+    async def embed_text(self, text: str | None) -> list[float]:
+        self.calls.append(text)
+        if self.fail:
+            raise RuntimeError("embedding provider unavailable")
+        return list(self.vector)
+
+
+def _runtime_with_embedding_provider(provider: _RecordingEmbeddingProvider) -> tuple[MemoryRuntime, InMemoryRepository]:
+    registry = ProviderRegistry()
+    registry.register(ProviderKind.embedding, provider, provider.capabilities)
+    repo = InMemoryRepository()
+    return MemoryRuntime(repo, default_workspace_id="ws_embed_runtime", provider_registry=registry), repo
 
 
 async def _start(runtime):
     return await runtime.start_run(StartRunRequest(session_id="s1", task="t"))
+
+
+async def test_runtime_write_paths_prepare_embeddings_with_provider_before_repository_backfill():
+    provider_vector = [0.25] + [0.0] * 255
+    provider = _RecordingEmbeddingProvider(provider_vector)
+    runtime, repo = _runtime_with_embedding_provider(provider)
+    run = await runtime.start_run(StartRunRequest(session_id="s_embed_runtime", task="provider embedding"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="capture memory"))
+
+    user_write = await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="这个项目使用 Bun",
+        )
+    )
+    tool_write = await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.tool,
+            event_type=EventType.tool_result,
+            status="success",
+            content="bun test passed",
+        )
+    )
+    finish = await runtime.finish_step(
+        FinishStepRequest(run_id=run.run_id, step_id=step.step_id, status=StepStatus.completed, summary="done with bun")
+    )
+    complete = await runtime.complete_run(CompleteRunRequest(run_id=run.run_id))
+
+    created_ids = [*user_write.created_memory_ids, *tool_write.created_memory_ids, *finish.created_memory_ids, *complete.created_memory_ids]
+    assert len(created_ids) >= 5
+    memories = [await repo.get_memory(memory_id) for memory_id in created_ids]
+    assert all(memory is not None for memory in memories)
+    assert all(memory.embedding_vector == provider_vector for memory in memories if memory is not None)
+    assert all(memory.embedding_status == EmbeddingStatus.embedded for memory in memories if memory is not None)
+    assert "这个项目使用 Bun" in provider.calls
+    assert "bun test passed" in provider.calls
+    assert "done with bun" in provider.calls
+
+
+async def test_runtime_same_identity_actives_match_historical_alias_keys():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo)
+    run = await runtime.start_run(StartRunRequest(workspace_id="ws", session_id="s", task="setup"))
+    await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="setup"))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws",
+            session_id="s",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            key="project.pkg_manager",
+            value="npm",
+            scope=MemoryScope.workspace,
+            content="project.package_manager=npm",
+            branch_status=BranchStatus.completed,
+            trust_score=0.6,
+        )
+    )
+
+    await runtime._resolve_and_persist(  # noqa: SLF001 - locks runtime identity behavior
+        "ws",
+        MemoryItem(
+            workspace_id="ws",
+            session_id="s",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            key="project.package_manager",
+            value="pnpm",
+            scope=MemoryScope.workspace,
+            content="project.package_manager=pnpm",
+            branch_status=BranchStatus.completed,
+            trust_score=0.9,
+        ),
+    )
+
+    memories = await runtime.list_memories(workspace_id="ws")
+    old = next(mem for mem in memories if mem.value == "npm")
+    assert old.key == "project.package_manager"
+    assert old.status == MemoryStatus.superseded
+
+
+async def test_runtime_keeps_runtime_and_package_manager_as_distinct_active_keys():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo)
+    run = await runtime.start_run(StartRunRequest(workspace_id="ws_pkg", session_id="s", task="setup"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="setup"))
+
+    await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="这个项目使用 Node.js",
+        )
+    )
+    await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="这个项目使用 pnpm",
+        )
+    )
+
+    active = {(mem.key, mem.value) for mem in await runtime.list_memories(workspace_id="ws_pkg") if mem.status == MemoryStatus.active}
+    assert ("project.runtime", "nodejs") in active
+    assert ("project.package_manager", "pnpm") in active
+
+
+async def test_runtime_prepare_embedding_falls_back_without_blocking_memory_write():
+    provider = _RecordingEmbeddingProvider(fail=True)
+    runtime, repo = _runtime_with_embedding_provider(provider)
+    run = await runtime.start_run(StartRunRequest(session_id="s_embed_fallback", task="provider fallback"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="capture fallback"))
+
+    write = await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="这个项目使用 Bun",
+        )
+    )
+
+    assert write.created_memory_ids
+    memory = await repo.get_memory(write.created_memory_ids[0])
+    assert memory is not None
+    assert provider.calls == ["这个项目使用 Bun"]
+    assert memory.embedding_vector == stable_embedding("这个项目使用 Bun", 256)
+    assert memory.embedding_status == EmbeddingStatus.embedded
+
+
+async def test_prepare_embedding_skips_existing_vectors_and_empty_content():
+    provider = _RecordingEmbeddingProvider([0.25] + [0.0] * 255)
+    runtime, _ = _runtime_with_embedding_provider(provider)
+    existing = MemoryItem(workspace_id="ws_embed_runtime", memory_type=MemoryType.episodic, content="already embedded", embedding_vector=[0.1, 0.9])
+    empty = MemoryItem(workspace_id="ws_embed_runtime", memory_type=MemoryType.episodic, content="")
+
+    assert await runtime._prepare_embedding(existing) is existing  # noqa: SLF001
+    assert await runtime._prepare_embedding(empty) is empty  # noqa: SLF001
+
+    assert existing.embedding_vector == [0.1, 0.9]
+    assert empty.embedding_vector is None
+    assert provider.calls == []
+
+
+async def test_runtime_prepare_embedding_falls_back_when_provider_returns_wrong_dimension():
+    provider = _RecordingEmbeddingProvider([0.25, 0.75])
+    runtime, repo = _runtime_with_embedding_provider(provider)
+    run = await runtime.start_run(StartRunRequest(session_id="s_embed_bad_dim", task="provider bad dimension"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="capture bad dimension"))
+
+    write = await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="这个项目使用 Bun",
+        )
+    )
+
+    memory = await repo.get_memory(write.created_memory_ids[0])
+    assert memory is not None
+    assert provider.calls == ["这个项目使用 Bun"]
+    assert memory.embedding_vector == stable_embedding("这个项目使用 Bun", 256)
+    assert memory.embedding_status == EmbeddingStatus.embedded
+
+
+async def test_runtime_prepare_embedding_falls_back_when_provider_returns_non_finite_vector():
+    provider = _RecordingEmbeddingProvider([float("nan")] + [0.0] * 255)
+    runtime, repo = _runtime_with_embedding_provider(provider)
+    run = await runtime.start_run(StartRunRequest(session_id="s_embed_nan", task="provider non-finite vector"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="capture non-finite"))
+
+    write = await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="这个项目使用 Bun",
+        )
+    )
+
+    memory = await repo.get_memory(write.created_memory_ids[0])
+    assert memory is not None
+    assert provider.calls == ["这个项目使用 Bun"]
+    assert memory.embedding_vector == stable_embedding("这个项目使用 Bun", 256)
+    assert memory.embedding_status == EmbeddingStatus.embedded
 
 
 async def test_start_run_creates_running_run_and_active_root_node(runtime):

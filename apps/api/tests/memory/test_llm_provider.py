@@ -122,6 +122,15 @@ async def test_extract_ignores_extra_fields():
     assert not hasattr(candidates[0], "evil")
 
 
+async def test_extract_preserves_free_form_flag():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _chat_response([{"key": "user.preference.editor", "value": "vim", "free_form": True}])
+
+    provider = _provider(handler)
+    candidates = await provider.extract(_user_event("prefer vim"))
+    assert candidates[0].free_form is True
+
+
 async def test_extract_empty_content_skips_call():
     called = False
 

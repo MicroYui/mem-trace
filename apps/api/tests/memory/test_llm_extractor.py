@@ -81,3 +81,68 @@ def test_build_results_is_deterministically_ordered():
     keys = [r.memory.key for r in llm_extractor.build_results(event, unordered)]
     # sorted by (scope, key, value): project.runtime < project.runtime.excluded
     assert keys == ["project.runtime", "project.runtime.excluded"]
+
+
+def test_build_results_normalizes_alias_key_to_canonical_package_manager():
+    results = llm_extractor.build_results(
+        _user_event("use pnpm"),
+        [ExtractionCandidate(key="project.pkg_manager", value="pnpm")],
+    )
+    assert len(results) == 1
+    assert results[0].memory.key == "project.package_manager"
+    assert results[0].memory.value == "pnpm"
+
+
+def test_build_results_uses_ontology_type_and_scope_for_controlled_key():
+    results = llm_extractor.build_results(
+        _user_event("current endpoint is /v2/users"),
+        [ExtractionCandidate(key="endpoint.current", value="/v2/users", memory_type="episodic", scope="session")],
+    )
+    assert len(results) == 1
+    assert results[0].memory.memory_type.value == "project"
+    assert results[0].memory.scope.value == "workspace"
+
+
+def test_build_results_drops_unknown_non_free_form_key():
+    results = llm_extractor.build_results(
+        _user_event("remember custom"),
+        [ExtractionCandidate(key="project.unknown_concept", value="x")],
+    )
+    assert results == []
+
+
+def test_build_results_allows_safe_explicit_free_form_key():
+    results = llm_extractor.build_results(
+        _user_event("prefer vim"),
+        [ExtractionCandidate(key="user.preference.editor", value="vim", free_form=True, memory_type="episodic", scope="session")],
+    )
+    assert len(results) == 1
+    assert results[0].memory.key == "user.preference.editor"
+    assert results[0].memory.value == "vim"
+    assert results[0].memory.memory_type.value == "project"
+    assert results[0].memory.scope.value == "workspace"
+
+
+def test_build_results_forces_defaults_for_project_free_form_key():
+    results = llm_extractor.build_results(
+        _user_event("framework is fastapi"),
+        [ExtractionCandidate(key="project.framework", value="fastapi", free_form=True, memory_type="episodic", scope="session")],
+    )
+    assert len(results) == 1
+    assert results[0].memory.key == "project.framework"
+    assert results[0].memory.memory_type == MemoryType.project
+    assert results[0].memory.scope == MemoryScope.workspace
+
+
+def test_build_results_rejects_secret_like_free_form_key():
+    results = llm_extractor.build_results(
+        _user_event("secret"),
+        [ExtractionCandidate(key="project.api_key", value="abc", free_form=True)],
+    )
+    assert results == []
+
+
+def test_system_prompt_contains_ontology_rendered_controlled_keys():
+    assert '"project.runtime"' in llm_extractor._SYSTEM_PROMPT
+    assert '"endpoint.current"' in llm_extractor._SYSTEM_PROMPT
+    assert "free_form" in llm_extractor._SYSTEM_PROMPT

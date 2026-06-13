@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.memory import secrets, writer
+from app.memory.key_ontology import PROJECT_PACKAGE_MANAGER, PROJECT_RUNTIME, PROJECT_RUNTIME_EXCLUDED
 from app.memory.writer import detect_risk_flags
 from app.runtime.models import (
     AgentEvent,
@@ -31,8 +32,39 @@ def _tool_event(content: str, status: str) -> AgentEvent:
 def test_positive_and_negative_project_constraints():
     results = writer.write_from_user_message(_user_event("这个项目使用 Bun，不用 Node.js"))
     keys = {r.memory.key: r.memory.value for r in results}
-    assert keys.get("project.runtime") == "bun"
-    assert keys.get("project.runtime.excluded") == "nodejs"
+    assert keys.get(PROJECT_RUNTIME) == "bun"
+    assert keys.get(PROJECT_RUNTIME_EXCLUDED) == "nodejs"
+
+
+def test_writer_uses_ontology_runtime_keys():
+    results = writer.write_from_user_message(_user_event("这个项目使用 Bun，不用 Node.js"))
+    keys = {r.memory.key: r.memory.value for r in results}
+    assert keys[PROJECT_RUNTIME] == "bun"
+    assert keys[PROJECT_RUNTIME_EXCLUDED] == "nodejs"
+
+
+def test_writer_writes_package_manager_to_ontology_key():
+    results = writer.write_from_user_message(_user_event("这个项目使用 pnpm"))
+    keys = {r.memory.key: r.memory.value for r in results}
+    assert keys[PROJECT_PACKAGE_MANAGER] == "pnpm"
+    assert PROJECT_RUNTIME not in keys
+
+
+def test_package_manager_correction_supersedes_package_manager_key():
+    results = writer.write_from_user_message(_user_event("不是 npm，是 pnpm"))
+    assert len(results) == 1
+    assert results[0].memory.key == PROJECT_PACKAGE_MANAGER
+    assert results[0].memory.value == "pnpm"
+    assert (PROJECT_PACKAGE_MANAGER, "workspace") in results[0].supersede_keys
+
+
+def test_package_manager_correction_to_bun_stays_package_manager_key():
+    for text in ("不是 npm，是 bun", "不用 npm，用 bun"):
+        results = writer.write_from_user_message(_user_event(text))
+        assert len(results) == 1
+        assert results[0].memory.key == PROJECT_PACKAGE_MANAGER
+        assert results[0].memory.value == "bun"
+        assert (PROJECT_PACKAGE_MANAGER, "workspace") in results[0].supersede_keys
 
 
 def test_english_uses_constraint():
