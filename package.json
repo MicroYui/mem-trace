@@ -1,0 +1,17 @@
+{
+  "name": "memtrace-workspace",
+  "private": true,
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "packages/ts-sdk",
+    "packages/mcp-server"
+  ],
+  "scripts": {
+    "test": "bun test packages/ts-sdk/test packages/mcp-server/test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["bun"]
+  },
+  "include": [
+    "packages/ts-sdk/src/**/*.ts",
+    "packages/ts-sdk/test/**/*.ts",
+    "packages/mcp-server/src/**/*.ts",
+    "packages/mcp-server/test/**/*.ts",
+    "examples/ts-simple-agent/src/**/*.ts"
+  ]
+}

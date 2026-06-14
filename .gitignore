@@ -18,6 +18,9 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
+node_modules/
+.bun/
+*.tsbuildinfo
 
 # Generated demo / benchmark reports
 reports/

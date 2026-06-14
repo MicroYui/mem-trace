@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `subagent-driven-development` (recommended) or `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status (2026-06-14): completed / superseded umbrella plan.** The streams originally sketched here have been delivered through their dedicated, source-refreshed plans: I7 compaction-negative retained metadata is complete via `docs/design/I7_COMPACTION_NEGATIVE_RETENTION_PLAN.md`; Phase 4 P4-A/P4-B/P4-C/P4-D is complete via `docs/design/PHASE4_PLATFORM_PLAN.md`; integrations INT-A TypeScript SDK, INT-B MCP Server, and INT-C MCP config templates / IDE thin-layer decision are complete via `docs/design/INTEGRATIONS_PLAN.md`. The unchecked checklist items below are historical planning detail unless explicitly marked complete/superseded; do not use this umbrella file as the current next-action source. Current remaining roadmap candidates are OpenTelemetry/OpenInference exporter, advanced UI/dashboard, admin/manual governance depth, or advanced retrieval/storage work; dedicated IDE package remains deferred until MCP adoption feedback.
+
 **Goal:** Move MemTrace from a deterministic single-process/runtime prototype into a production-oriented agent memory platform with async cold-path infrastructure, durable memory lifecycle/governance, retained negative lessons through compaction, and external ecosystem entrypoints.
 
 **Architecture:** This is intentionally a portfolio plan split into independently testable streams. The implementation order is: shared contracts and migration discipline first; I7 negative-retention safety next because it is small and protects current behavior; Phase 4 async infrastructure before lifecycle/governance because Redis/Celery are required for distributed buffering, retries, quota, and scheduler locks; TypeScript/MCP/IDE integrations last because they should consume the stable HTTP/SDK contract rather than create alternate runtime paths.
@@ -634,11 +636,13 @@ To keep delivery reviewable, this plan treats them as one umbrella roadmap with 
 
 ### INT-B2 MCP examples and docs
 
+**Status (2026-06-14):** ✅ superseded by and completed in `docs/design/INTEGRATIONS_PLAN.md` INT-B/INT-C. Root README now contains MCP config docs, and concrete Claude Code/Cursor JSON templates live in `examples/mcp/`.
+
 **Files:**
 - Create: `examples/mcp/README.md` only if explicitly accepted during implementation closeout; otherwise keep docs in root README section.
 - Modify: `README.md`
 
-- [ ] **Step 1: Minimal config snippets**
+- [x] **Step 1: Minimal config snippets**
   - Claude Code/Cursor-style server config examples.
   - Keep examples no-secret and use env var placeholders.
 
@@ -648,15 +652,17 @@ To keep delivery reviewable, this plan treats them as one umbrella roadmap with 
 
 ### INT-C1 Decide IDE packaging after MCP is stable
 
+**Status (2026-06-14):** ✅ complete as a scope decision in `docs/design/INTEGRATIONS_PLAN.md` INT-C2. No dedicated IDE package is created yet; wait for MCP adoption feedback and editor-specific requirements.
+
 **Files:**
 - Create only after review: `packages/ide/`
 - Test: package-specific smoke tests
 
-- [ ] **Step 1: Scope decision**
+- [x] **Step 1: Scope decision**
   - Prefer MCP config templates and command palette wrappers before building full VS Code extension.
   - If a VS Code extension is selected, it should call MCP/TS SDK and expose: start run, record event, retrieve context, replay access, export redacted bundle.
 
-- [ ] **Step 2: No semantic duplication**
+- [x] **Step 2: No semantic duplication**
   - IDE layer must not implement retrieval, gate, packing, summarization, or auth logic.
 
 ---

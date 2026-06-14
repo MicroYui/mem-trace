@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "memtrace": {
+      "command": "bun",
+      "args": ["packages/mcp-server/src/server.ts"],
+      "env": {
+        "MEMTRACE_BASE_URL": "${MEMTRACE_BASE_URL}",
+        "MEMTRACE_API_KEY": "${MEMTRACE_API_KEY}"
+      }
+    }
+  }
+}
