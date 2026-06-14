@@ -32,26 +32,34 @@ def build_policy_snapshot(
     scheduler_signal_memory_ids: list[str] | None = None,
     fallback_lite_memory_ids: list[str] | None = None,
     retention_policy_versions: list[str] | None = None,
+    fusion: str = "linear",
+    rrf_k: int | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-compatible, non-secret retrieval policy snapshot."""
     vector_active = bool(vector_enabled)
+    retrieval: dict[str, Any] = {
+        "vector_enabled": vector_active,
+        "vector_weight": float(vector_weight) if vector_active else 0.0,
+        "include_all": request.strategy == RetrievalStrategy.long_context,
+        "lifecycle_filter_version": LIFECYCLE_FILTER_VERSION,
+        "reflection_signal_source": reflection_signal_source,
+        "retention_policy_version": retention_policy_version,
+        "scheduler_signal_memory_ids": sorted(scheduler_signal_memory_ids or []),
+        "fallback_lite_memory_ids": sorted(fallback_lite_memory_ids or []),
+        "retention_policy_versions": sorted(retention_policy_versions or ([] if retention_policy_version is None else [retention_policy_version])),
+    }
+    # Only emit fusion fields for the non-default mode so existing linear-mode
+    # policy hashes and replay snapshots stay byte-stable.
+    if fusion and fusion != "linear":
+        retrieval["fusion"] = fusion
+        retrieval["rrf_k"] = rrf_k
     return {
         "policy_version": POLICY_VERSION,
         "strategy": request.strategy.value,
         "top_k": request.top_k,
         "token_budget": effective_token_budget,
         "gate_config": asdict(gate_config),
-        "retrieval": {
-            "vector_enabled": vector_active,
-            "vector_weight": float(vector_weight) if vector_active else 0.0,
-            "include_all": request.strategy == RetrievalStrategy.long_context,
-            "lifecycle_filter_version": LIFECYCLE_FILTER_VERSION,
-            "reflection_signal_source": reflection_signal_source,
-            "retention_policy_version": retention_policy_version,
-            "scheduler_signal_memory_ids": sorted(scheduler_signal_memory_ids or []),
-            "fallback_lite_memory_ids": sorted(fallback_lite_memory_ids or []),
-            "retention_policy_versions": sorted(retention_policy_versions or ([] if retention_policy_version is None else [retention_policy_version])),
-        },
+        "retrieval": retrieval,
         "packer": {
             "token_estimator_version": TOKEN_ESTIMATOR_VERSION,
             "compaction_notice_reserve_tokens": compaction_notice_reserve_tokens,

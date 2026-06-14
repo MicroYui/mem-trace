@@ -130,6 +130,8 @@ class RetrievalController:
         settings = get_settings()
         self._use_vector = settings.retrieval_use_vector
         self._vector_weight = settings.retrieval_vector_weight
+        self._fusion = (settings.retrieval_fusion or "linear").lower()
+        self._rrf_k = max(1, settings.retrieval_rrf_k)
         self._embed_dim = EMBED_DIM
         self._timeout_ms = settings.retrieval_timeout_ms
         self._compaction_notice_reserve_tokens = settings.compaction_notice_reserve_tokens
@@ -257,6 +259,8 @@ class RetrievalController:
             scheduler_signal_memory_ids=scheduler_signal_memory_ids,
             fallback_lite_memory_ids=fallback_lite_memory_ids,
             retention_policy_versions=retention_policy_versions,
+            fusion=self._fusion,
+            rrf_k=self._rrf_k if self._fusion == "rrf" else None,
         )
         access.policy_version = POLICY_VERSION
         access.policy_snapshot = snapshot
@@ -659,17 +663,36 @@ class RetrievalController:
         w_vec = self._vector_weight if (self._use_vector and vector_scores) else 0.0
         w_lex = 1.0 - w_vec
 
-        scored: list[RetrievalCandidateTrace] = []
+        # First pass: compute raw lexical/vector signals for retrievable memories.
+        raw: list[tuple[MemoryItem, float, float]] = []
         for m in memories:
             if m.status not in _RETRIEVABLE_STATUSES:
                 continue  # skip superseded/archived/dormant/deleted lifecycle states
             lex = lexical_similarity(query, m.content)
             vec = vector_scores.get(m.memory_id, 0.0)
-            rel = round(w_lex * lex + w_vec * vec, 6)
+            raw.append((m, lex, vec))
+
+        # Fusion: blend the two signals into a single relevance score. "linear"
+        # is the default weighted blend; "rrf" uses Reciprocal Rank Fusion over
+        # each signal's ranking, which is robust when lexical/vector scores live
+        # on different scales (ROADMAP §4 multi-signal fusion).
+        rrf_scores: dict[str, float] = {}
+        if self._fusion == "rrf" and w_vec > 0.0:
+            rrf_scores = self._rrf_scores(raw)
+
+        scored: list[RetrievalCandidateTrace] = []
+        for m, lex, vec in raw:
+            if self._fusion == "rrf" and w_vec > 0.0:
+                rel = round(rrf_scores.get(m.memory_id, 0.0), 6)
+                positive = rel > 0.0
+            else:
+                rel = round(w_lex * lex + w_vec * vec, 6)
+                positive = rel > 0.0
             # project constraints are always relevant to coding queries
-            if m.memory_type.value == "project" and rel == 0.0:
-                rel = 0.2
-            if rel > 0.0 or include_all:
+            if m.memory_type.value == "project" and not positive:
+                rel = 0.2 if self._fusion != "rrf" else round(0.2 / (self._rrf_k + 1), 6)
+                positive = True
+            if positive or include_all:
                 scored.append(
                     RetrievalCandidateTrace(
                         memory=m,
@@ -682,6 +705,27 @@ class RetrievalController:
         if include_all:
             return scored
         return scored[:top_k]
+
+    def _rrf_scores(self, raw: list[tuple[MemoryItem, float, float]]) -> dict[str, float]:
+        """Reciprocal Rank Fusion of the lexical and vector signals.
+
+        Each signal contributes ``1 / (k + rank)`` for memories with a positive
+        score in that signal. Ranks are deterministic: sort by descending score,
+        tie-break by ``memory_id``. Memories absent from a signal (score 0)
+        contribute nothing for that signal, so a memory unseen by both stays 0.
+        """
+        k = self._rrf_k
+
+        def ranked(score_index: int) -> list[str]:
+            present = [(m, s) for (m, lex, vec) in raw for s in (((lex, vec)[score_index]),) if s > 0.0]
+            present.sort(key=lambda pair: (-pair[1], pair[0].memory_id))
+            return [m.memory_id for m, _ in present]
+
+        scores: dict[str, float] = {}
+        for score_index in (0, 1):  # 0 = lexical, 1 = vector
+            for rank, memory_id in enumerate(ranked(score_index)):
+                scores[memory_id] = scores.get(memory_id, 0.0) + 1.0 / (k + rank + 1)
+        return scores
 
     @staticmethod
     def _state_match(mem: MemoryItem, active_ids: set[str]) -> float:

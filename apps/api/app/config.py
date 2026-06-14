@@ -110,6 +110,14 @@ class Settings(BaseSettings):
     # Weight of the vector cosine signal in the blended relevance score; the
     # lexical signal gets the remaining weight.
     retrieval_vector_weight: float = 0.5
+    # Multi-signal candidate fusion mode (ROADMAP §4). "linear" keeps the
+    # default weighted blend of lexical/vector scores. "rrf" uses Reciprocal
+    # Rank Fusion over the lexical and vector rankings, which is robust to the
+    # two signals living on different score scales. Default stays "linear" so
+    # existing demos/benchmarks are unchanged.
+    retrieval_fusion: str = "linear"
+    # RRF damping constant; larger values flatten the contribution of top ranks.
+    retrieval_rrf_k: int = 60
     # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
     # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
     # hot paths use the configured embedding provider first, then degrade to the
