@@ -87,3 +87,19 @@ def test_dogfood_destructive_failure_scenario_sanitizes_raw_command() -> None:
 
     assert "destructive_failure_sanitized: true" in result.stdout
     assert "rm -rf" not in result.stdout + result.stderr
+
+
+def test_release_readiness_smoke_script_runs_canonical_no_network_demo() -> None:
+    result = subprocess.run(
+        ["bash", "scripts/smoke-release-readiness.sh"],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    output = result.stdout.lower()
+    assert "baseline_1 action: npm test" in result.stdout
+    assert "variant_2 action: bun test" in result.stdout
+    assert "contamination eliminated: true" in output
+    assert "release readiness smoke passed" in output

@@ -24,7 +24,7 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 - **MemoryRuntime facade:** stable external API; hides storage, indexing, policy, profiling, and future async work.
 - **Agent Trace Collector:** records raw agent events before extraction; source for state tree, memories, and profiler.
 - **Execution State Tree:** organizes runs into active/completed/failed/rolled_back paths; isolates failed branches from prompt context.
-- **Write Pipeline:** converts selected events into memory items; P0 uses deterministic rules, P2 may add LLM extraction and buffering.
+- **Write Pipeline:** converts selected events into memory items; deterministic rules, config-gated LLM extraction, buffering, resolver, compaction, and provider/key-ontology boundaries are implemented.
 - **Provider Registry (§10 complete slice):** unified boundary for extraction, embedding, summarizer, and contract-only judge providers. P1/P2/P9 provider-only infrastructure exists under `app.providers`; P3 factory/DI/runtime registry injection is complete; P4 runtime/retrieval/replay integration is complete with `retrieval-policy-v2`, retrieval-relevant provider snapshots, flat `AccessInspection` policy fields, runtime write-path embedding provider fallback, retrieval query embedding provider fallback, repository-level deterministic backfill preservation, and replay policy drift using public `RetrievalController.provider_snapshot`; P8 forces deterministic benchmark registries and adds provider snapshot conformance. Settings-derived embedding providers are fixed to the 256-dim pgvector contract even if `MEMTRACE_EMBEDDING_DIM` is configured differently.
 - **Key Ontology (§11 complete slice):** code-defined source of truth for canonical memory keys, aliases, cardinality, default memory type/scope, LLM prompt rendering, and candidate normalization. P5-P7 completed `app.memory.key_ontology`, writer/resolver/runtime canonical identity migration, and LLM extraction normalization with safe `free_form` handling; final review verifies ontology schema coverage, package-manager correction semantics (`npm -> bun`), summarizer provider wiring, and the whole provider/ontology/runtime/replay/benchmark path.
 - **Retrieval Controller:** plans retrieval using query, step intent, active state, workspace scope, and memory metadata.
@@ -68,5 +68,5 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 
 ## External Integrations
 
-- P0: OpenAI-compatible LLM client only if demo generation needs it; retrieval benchmark can use rule evaluator.
-- Later: LangGraph adapter, TypeScript SDK, OpenTelemetry/OpenInference exporter, frontend dashboard.
+- Implemented: Python SDK/CLI/LangGraph adapter, TypeScript SDK, MCP server, and MCP config templates.
+- Future: OpenTelemetry/OpenInference exporter, React dashboard, and dedicated IDE extension if MCP adoption feedback shows editor-specific needs.

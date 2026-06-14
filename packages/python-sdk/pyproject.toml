@@ -1,12 +1,28 @@
 [project]
 name = "memtrace-sdk"
 version = "0.1.0"
+description = "Python SDK, CLI, and LangGraph adapter for the MemTrace state-aware agent memory runtime"
+readme = { text = "Python SDK, CLI, and LangGraph adapter for the MemTrace trace-first, state-aware agent memory runtime. See the repository README for full documentation.", content-type = "text/markdown" }
 requires-python = ">=3.12"
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
-    "memtrace",
+    "memtrace>=0.1.0,<0.2.0",
     "pydantic>=2.9",
     "httpx>=0.27",
 ]
+
+[project.urls]
+Homepage = "https://github.com/MicroYui/mem-trace#readme"
+Repository = "https://github.com/MicroYui/mem-trace"
+Issues = "https://github.com/MicroYui/mem-trace/issues"
 
 [project.optional-dependencies]
 langgraph = ["langgraph>=0.2"]

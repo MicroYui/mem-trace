@@ -228,3 +228,48 @@ Sources:
 - **Decision:** Complete INT-C by shipping MCP configuration templates and documentation only. Add Claude Code and Cursor-style template fixtures under `examples/mcp/`, export the same structures from `@memtrace/mcp-server` for testability, and keep all config examples using `${MEMTRACE_BASE_URL}` and `${MEMTRACE_API_KEY}` placeholders rather than real secrets. Do not create `packages/ide/` in this slice.
 - **Consequences:** IDE/agent users get copy-paste integration immediately while all runtime semantics still flow through MCP → TypeScript SDK → HTTP `/v1` → `MemoryRuntime`. Dedicated IDE extension work remains deferred until MCP adoption feedback identifies editor-specific needs. Future template changes should update `packages/mcp-server/src/templates.ts`, `examples/mcp/*.json`, README snippets, and `packages/mcp-server/test/config.test.ts` together.
 - **Sources:** `docs/design/INTEGRATIONS_PLAN.md` INT-C, `README.md` MCP config snippets, `packages/mcp-server/src/templates.ts`, `packages/mcp-server/test/config.test.ts`.
+
+### ADR-026: Select Release Readiness before the next feature-heavy roadmap slice
+
+- **Date:** 2026-06-14
+- **Status:** accepted; implemented through R1-C2
+- **Context:** After Phase 4 and INT-A/INT-B/INT-C, MemTrace has substantial runtime/platform and integration capability: state-aware memory runtime, context compaction, failure-aware negative evidence, provider registry/key ontology, async/lifecycle/governance foundations, Python SDK/CLI/LangGraph adapter, TypeScript SDK, MCP server, MCP config templates, benchmark, replay, and reports. Remaining roadmap candidates such as OpenTelemetry/OpenInference exporter, advanced retrieval/storage, admin conflict workflow, and React dashboard are useful but either add new feature surfaces or assume public adoption paths already exist.
+- **Decision:** Select `docs/design/RELEASE_READINESS_PLAN.md` as the next implementation plan. R1 focuses on public adoption readiness: command inventory, README/user-doc rewrite, 5-minute demo/smoke consolidation, package metadata and package-shape checks, CI, release-hygiene guards, release checklist, verification, and ROADMAP/`.ai` closeout. R1 must not add runtime retrieval/gate/context-packing semantics. It must keep JS packages `private: true` unless publication is explicitly approved, avoid introducing a `dist/` build pipeline by default, use `oven-sh/setup-bun` in CI while documenting local temporary-Bun fallback, and make service/provider-dependent paths opt-in.
+- **Consequences:** R1 is now complete: public onboarding, user docs, smoke script, package metadata/package-shape checks, CI, release hygiene, release checklist, benchmark/reproduce closeout, and ROADMAP/`.ai` sync are in place. OpenTelemetry/OpenInference exporter becomes the recommended next feature slice, but README/public docs must not advertise OTel/LangSmith/Phoenix/Langfuse support as available until an exporter exists. Phase 5 retrieval/storage, admin/manual governance workflow, React dashboard, dedicated IDE extension, and automatic npm/PyPI publishing remain out of scope until explicitly selected.
+- **Sources:** `docs/design/RELEASE_READINESS_PLAN.md`, `.ai/PROJECT_STATE.md`, `.ai/IMPLEMENTATION_PLAN.md`, `.ai/OPEN_QUESTIONS.md`.
+
+### ADR-027: Public docs classify quickstarts by runtime requirement
+
+- **Date:** 2026-06-14
+- **Status:** accepted; implemented through R1-A2
+- **Context:** R1-A0 command inventory showed that MemTrace has both deterministic no-network entrypoints and service-dependent integration entrypoints. The CLI in-process demo and Python SDK example emit stable failed-branch contrast markers without Docker or a live server, while the TypeScript SDK example and MCP server are HTTP clients that require a running MemTrace service. Treating all examples as unconditional quickstarts would make first-time onboarding brittle.
+- **Decision:** README and user docs must classify commands by runtime requirement. Only no-network commands may appear as unconditional first-run quickstarts. HTTP, TypeScript SDK, MCP, Docker/PostgreSQL, Redis/Celery, and real-provider paths must state preconditions next to the command. R1-A1/R1-A2 implement this with a README command table and dedicated getting-started/MCP/deployment docs.
+- **Consequences:** Public onboarding is honest and reproducible: new users can run the CLI/Python demo immediately, while service-backed paths remain discoverable without overclaiming default pass behavior. Future release-readiness work should preserve these labels and keep optional smoke tests env-gated.
+- **Sources:** `docs/design/RELEASE_READINESS_PLAN.md`, `README.md`, `docs/getting-started.md`, `docs/mcp.md`, `docs/deployment.md`.
+
+### ADR-028: R1 package readiness uses private source-entry packages before publication
+
+- **Date:** 2026-06-14
+- **Status:** accepted; implemented through R1-B2
+- **Context:** R1-B1/B2 prepares MemTrace for public adoption, but maintainers have not approved npm/PyPI publication or a JS build-output pipeline. The current TypeScript packages are Bun workspace packages consumed from source during local development, while Python packaging already uses the uv workspace and Hatchling.
+- **Decision:** Keep `@memtrace/sdk` and `@memtrace/mcp-server` as `private: true` source-entry packages for R1. Add release-ready metadata, `exports`, explicit `files`, and package-shape tests, but do not introduce `dist/`, bundlers, declaration emit, or automatic publishing. For Python, update root and SDK metadata to describe the current platform/SDK and test README/license/URLs/classifiers plus the `memtrace` console script.
+- **Consequences:** Package manifests become reviewable and launch-ready without creating an unsupported publication contract. R1-B3/R1-C can add CI/release hygiene around the same shape; actual package publishing remains a future explicit decision.
+- **Sources:** `docs/design/RELEASE_READINESS_PLAN.md`, `packages/ts-sdk/package.json`, `packages/mcp-server/package.json`, `pyproject.toml`, `packages/python-sdk/pyproject.toml`.
+
+### ADR-029: R1 default CI is deterministic and service-free by default
+
+- **Date:** 2026-06-14
+- **Status:** accepted; implemented through R1-B3 / R1-C2 Step 4
+- **Context:** R1 needs CI and release hygiene for public adoption, but the repository has optional Postgres/Redis/LLM/live HTTP paths that should not be required for default PR checks. Local development may also contain untracked `node_modules/`, generated `reports/`, `dist/`, and TypeScript build-info files that should not break hygiene checks unless they are tracked.
+- **Decision:** Add a default GitHub Actions workflow with separate Python, Bun, and release-hygiene jobs. Python CI runs uv compileall and full pytest; JS CI uses `oven-sh/setup-bun` and runs Bun typecheck/tests; hygiene runs `scripts/check-release-hygiene.sh`. The hygiene guard checks tracked files via `git ls-files` for generated/local artifacts and scans only public docs/examples for obvious real secret/destructive/raw-payload markers, excluding internal design/superpowers plans that intentionally contain synthetic fixtures.
+- **Consequences:** PR CI verifies the default deterministic path without requiring service credentials or external infrastructure. Release hygiene catches accidentally tracked artifacts and public-doc leaks while avoiding false positives from local untracked outputs and internal test/design fixtures. Full benchmark/reproduce was completed in R1-C2 closeout and remains a maintainer release-checklist command rather than a mandatory default PR workflow.
+- **Sources:** `.github/workflows/ci.yml`, `scripts/check-release-hygiene.sh`, `docs/design/RELEASE_READINESS_PLAN.md` R1-B3 / R1-C2 Step 4.
+
+### ADR-030: R1 release checklist is manual and non-publishing by default
+
+- **Date:** 2026-06-14
+- **Status:** accepted; implemented through R1-C1/R1-C2
+- **Context:** R1 prepares MemTrace for public adoption, but maintainers have not approved automatic PyPI/npm publishing or a JavaScript build-output pipeline. Release readiness needs a concrete maintainer checklist without turning package metadata work into irreversible publication automation.
+- **Decision:** Add `docs/release-checklist.md` as a manual maintainer checklist covering release scope selection, required verification, Python/JS package dry-run checks, artifact and secret hygiene, tagging notes, explicit publish decision gates, and rollback guidance. Keep `@memtrace/sdk` and `@memtrace/mcp-server` private by default; no automatic package publishing, `dist/` build pipeline, bundler, or declaration-emission workflow is added in R1.
+- **Consequences:** Maintainers have a repeatable release process while publication remains an explicit future decision. Release closeout can verify benchmark/reproduce and hygiene without creating package registry side effects.
+- **Sources:** `docs/release-checklist.md`, `README.md`, `docs/design/RELEASE_READINESS_PLAN.md` R1-C1/R1-C2.

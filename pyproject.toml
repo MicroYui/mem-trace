@@ -1,8 +1,18 @@
 [project]
 name = "memtrace"
 version = "0.1.0"
-description = "MemTrace: state-aware memory runtime and profiler for long-horizon LLM agents (P0 MVP)"
+description = "MemTrace: trace-first, state-aware memory runtime and profiler for long-horizon LLM agents"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -18,6 +28,11 @@ dependencies = [
     "celery>=5.4",
     "redis>=5.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/MicroYui/mem-trace#readme"
+Repository = "https://github.com/MicroYui/mem-trace"
+Issues = "https://github.com/MicroYui/mem-trace/issues"
 
 [project.optional-dependencies]
 dev = [
