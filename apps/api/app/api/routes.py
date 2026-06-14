@@ -4,7 +4,9 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
+from app.api.dashboard_ui import render_dashboard_html
 from app.api.deps import get_quota_service, get_runtime, get_telemetry_service, require_api_key
 from app.config import get_settings
 from app.governance.admin import require_admin_owner
@@ -503,6 +505,19 @@ async def dashboard_tables(
         except HTTPException:
             include_admin = False
     return await rt.dashboard_tables(workspace_id=workspace_id, include_admin=include_admin)
+
+
+@router.get("/dashboard/ui", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard_ui() -> HTMLResponse:
+    """Serve the self-contained read-only Dashboard UI.
+
+    The page itself is a static shell with no embedded data; it calls the
+    authenticated read-only APIs (``/v1/dashboard/tables`` and
+    ``/v1/observability/summary``) from the browser. Auth, when enabled, is still
+    enforced on those data endpoints, so serving the shell unauthenticated does
+    not expose any workspace data.
+    """
+    return HTMLResponse(content=render_dashboard_html())
 
 
 __all__ = ["router"]

@@ -166,6 +166,8 @@ uv run python -m app.observability.reports --output-dir reports
 
 Replay data is also available through the HTTP API, including `/v1/replay/access/{access_id}` when the local service is running.
 
+When the HTTP service is running you can also open the built-in read-only **Dashboard UI** at `/v1/dashboard/ui`. It is a single self-contained HTML page (no build step, no external JS/CDN) that calls `/v1/dashboard/tables` and `/v1/observability/summary` from the browser to show runs, access logs, profiler events, the observability summary, and per-strategy benchmark metrics. If auth is enabled, paste the token into the page's token field (sent as `Authorization: Bearer` / `X-API-Key`).
+
 Generated report artifacts are intentionally ignored by git and can be regenerated:
 
 - `reports/demo_report.{md,json}`
@@ -223,4 +225,4 @@ Default local/dev/benchmark behavior keeps auth, quotas, Redis/Celery, live Post
 
 The completed MVP, observability, compaction, failure-aware negative evidence, SDK/CLI/LangGraph, six-strategy benchmark, security/consistency hardening, provider registry/key ontology, Phase 4 platform foundations, TypeScript SDK, MCP server, release-readiness work, and the core OpenTelemetry/OpenInference exporter are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview, read [Why agent memory is not just RAG](docs/blog/why-agent-memory-is-not-just-rag.md).
 
-Advanced retrieval/storage, admin workflow depth, a React dashboard, richer telemetry backfill/CLI surfaces, and a dedicated IDE extension remain future work; the IDE package is deferred until MCP adoption feedback shows editor-specific needs.
+Advanced retrieval/storage, admin workflow depth, richer telemetry backfill/CLI surfaces, and a dedicated IDE extension remain future work; the IDE package is deferred until MCP adoption feedback shows editor-specific needs. A built-in read-only Dashboard UI is available at `/v1/dashboard/ui`; a richer interactive/React dashboard remains optional future work.

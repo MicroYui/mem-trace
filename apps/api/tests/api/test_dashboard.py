@@ -454,3 +454,26 @@ async def test_dashboard_admin_tables_hidden_from_anonymous_and_unscoped():
     assert unscoped_body["maintenance_runs"] == []
     assert unscoped_body["admin_action_audits"] == []
     assert unscoped_body["quota_limits"] == []
+
+
+async def test_dashboard_ui_route_serves_self_contained_html():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="dash_ws")
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_runtime] = lambda: runtime
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/v1/dashboard/ui")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    body = resp.text
+    # Self-contained: a single HTML doc with no external JS/CDN dependency.
+    assert "<!doctype html>" in body.lower()
+    assert "MemTrace Dashboard" in body
+    assert "/v1/dashboard/tables" in body  # the page fetches the data API
+    assert "http://" not in body.replace("http://test", "")  # no external CDN/script src
+    assert "<script src=" not in body  # no external script tag
