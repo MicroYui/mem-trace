@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.memory.secrets import redact
+from app.memory.secrets import is_secret_like_key, redact
 from app.observability.metrics import build_access_observability_metrics, build_observability_summary
 from app.observability.replay import RetrievalReplayService
 from app.retrieval.negative_evidence import SANITIZED_TEMPLATES
@@ -69,7 +69,7 @@ async def write_observability_report(
             {
                 "access_id": access.access_id,
                 "run_id": access.run_id,
-                "query": access.query,
+                "query": _safe_observability_text(access.query),
                 "strategy": access.retrieval_strategy.value,
                 "metrics": _sorted_metrics(metrics),
                 "critical_drift_count": _critical_drift_count(replay),
@@ -184,25 +184,26 @@ def _context_block_count(replay: ReplayRetrievalResult | None, access: MemoryAcc
 def _compaction_rows(access: MemoryAccessLog, logs: list[ContextCompactionLog]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for log in sorted(logs, key=lambda item: (item.created_at, item.compaction_id)):
+        safe_log = _safe_compaction_log(log)
         rows.append(
             {
-                "compaction_id": log.compaction_id,
+                "compaction_id": safe_log.compaction_id,
                 "access_id": access.access_id,
-                "run_id": log.run_id,
-                "kind": log.kind.value,
-                "provider": log.provider.value,
-                "pre_tokens": log.pre_tokens,
-                "post_tokens": log.post_tokens,
-                "dropped_block_count": log.dropped_block_count,
-                "compression_ratio": log.compression_ratio,
-                "summary_text": log.summary_text,
-                "retained_facts": [fact.model_dump(mode="json") for fact in log.retained_facts],
+                "run_id": safe_log.run_id,
+                "kind": safe_log.kind.value,
+                "provider": safe_log.provider.value,
+                "pre_tokens": safe_log.pre_tokens,
+                "post_tokens": safe_log.post_tokens,
+                "dropped_block_count": safe_log.dropped_block_count,
+                "compression_ratio": safe_log.compression_ratio,
+                "summary_text": safe_log.summary_text,
+                "retained_facts": [fact.model_dump(mode="json") for fact in safe_log.retained_facts],
                 "retained_negative_evidence": [
                     _safe_retained_negative_evidence(item).model_dump(mode="json")
-                    for item in log.retained_negative_evidence
+                    for item in safe_log.retained_negative_evidence
                 ],
-                "source_memory_ids": list(log.source_memory_ids),
-                "warnings": list(log.warnings),
+                "source_memory_ids": list(safe_log.source_memory_ids),
+                "warnings": list(safe_log.warnings),
             }
         )
     return rows
@@ -224,17 +225,30 @@ def _safe_replay_dump(replay: ReplayRetrievalResult) -> dict[str, Any]:
 def _safe_compaction_log(log: ContextCompactionLog) -> ContextCompactionLog:
     return log.model_copy(
         update={
-            "summary_text": redact(log.summary_text),
+            "summary_text": _safe_observability_text(log.summary_text),
             "retained_facts": [
-                fact.model_copy(update={"key": redact(fact.key), "value": redact(fact.value)})
+                fact.model_copy(
+                    update={
+                        "key": redact(fact.key),
+                        "value": "[REDACTED]" if is_secret_like_key(fact.key) else _safe_observability_text(fact.value),
+                    }
+                )
                 for fact in log.retained_facts
             ],
             "retained_negative_evidence": [
                 _safe_retained_negative_evidence(item) for item in log.retained_negative_evidence
             ],
-            "warnings": [redact(warning) for warning in log.warnings],
+            "warnings": [_safe_observability_text(warning) for warning in log.warnings],
         }
     )
+
+
+def _safe_observability_text(text: str | None) -> str:
+    redacted = redact(text)
+    lowered = redacted.lower()
+    if any(marker in lowered for marker in ("password", "authorization", "credential", "private key")):
+        return "[REDACTED]"
+    return redacted
 
 
 def _safe_retained_negative_text(item: RetainedNegativeEvidence) -> str:

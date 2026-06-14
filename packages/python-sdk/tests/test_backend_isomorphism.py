@@ -14,6 +14,7 @@ from memtrace_sdk.types import (
     EventRole,
     EventType,
     FinishStepRequest,
+    ExtractionMode,
     RetrievalRequest,
     StartRunRequest,
     StartStepRequest,
@@ -95,6 +96,68 @@ async def test_backends_are_isomorphic_for_golden_path_and_read_shapes() -> None
                 await client.inspect_access("acc_missing")
             with pytest.raises(NotFoundError):
                 await client.get_step("step_missing")
+    finally:
+        await http_client.aclose()
+
+
+async def test_write_event_result_shape_isomorphic_for_new_extraction_modes() -> None:
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_iso_modes")
+    in_process = MemTrace.in_process(runtime)
+    http_client = await _http_client_for(runtime)
+
+    try:
+        run = await in_process.start_run(StartRunRequest(session_id="iso-modes", task="mode matrix"))
+        step = await in_process.start_step(StartStepRequest(run_id=run.run_id, intent="record constraint"))
+
+        http_result = await http_client.write_event(
+            WriteEventRequest(
+                run_id=run.run_id,
+                step_id=step.step_id,
+                role=EventRole.user,
+                event_type=EventType.message,
+                content="这个项目使用 Bun",
+                extraction_mode=ExtractionMode.no_extract,
+            )
+        )
+        in_process_result = await in_process.write_event(
+            WriteEventRequest(
+                run_id=run.run_id,
+                step_id=step.step_id,
+                role=EventRole.user,
+                event_type=EventType.message,
+                content="这个项目使用 Bun",
+                extraction_mode=ExtractionMode.no_extract,
+            )
+        )
+
+        assert http_result.created_memory_ids == in_process_result.created_memory_ids == []
+        assert http_result.buffered == in_process_result.buffered is False
+        assert http_result.queued == in_process_result.queued is False
+        assert http_result.task_id == in_process_result.task_id is None
+        assert http_result.warnings == in_process_result.warnings == []
+    finally:
+        await http_client.aclose()
+
+
+async def test_retrieve_workspace_mismatch_maps_to_bad_request_for_both_backends() -> None:
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_owner")
+    in_process = MemTrace.in_process(runtime)
+    http_client = await _http_client_for(runtime)
+
+    try:
+        run = await in_process.start_run(StartRunRequest(session_id="iso-workspace", task="workspace guard"))
+        step = await in_process.start_step(StartStepRequest(run_id=run.run_id, intent="guard"))
+
+        for client in (in_process, http_client):
+            with pytest.raises(BadRequestError):
+                await client.retrieve_context(
+                    RetrievalRequest(
+                        run_id=run.run_id,
+                        step_id=step.step_id,
+                        workspace_id="ws_other",
+                        query="runtime",
+                    )
+                )
     finally:
         await http_client.aclose()
 

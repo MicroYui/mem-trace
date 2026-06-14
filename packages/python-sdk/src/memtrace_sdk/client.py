@@ -19,7 +19,9 @@ from memtrace_sdk.types import (
     FinishStepResult,
     FlushResult,
     MemoryContext,
+    MemoryConflictRecord,
     MemoryItem,
+    MemoryVersionRecord,
     ObservabilityReportRequest,
     ObservabilityReportResult,
     ObservabilitySummary,
@@ -139,3 +141,19 @@ class MemTrace:
 
     async def dashboard_tables(self, *, workspace_id: Optional[str] = None) -> DashboardTables:
         return await self._backend.dashboard_tables(workspace_id=workspace_id)
+
+    async def list_memory_versions(self, memory_id: str) -> list[MemoryVersionRecord]:
+        return await self._backend.list_memory_versions(memory_id)
+
+    async def list_memory_conflicts(
+        self,
+        *,
+        workspace_id: str,
+        memory_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[MemoryConflictRecord]:
+        return await self._backend.list_memory_conflicts(
+            workspace_id=workspace_id,
+            memory_id=memory_id,
+            status=status,
+        )

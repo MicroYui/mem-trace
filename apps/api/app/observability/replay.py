@@ -5,11 +5,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from app.memory.secrets import is_secret_like_key, redact
 from app.retrieval import gate as gatemod
 from app.retrieval.controller import RetrievalCandidateTrace, RetrievalController, RetrievalPipelineTrace
-from app.retrieval.negative_evidence import build_negative_evidence, safe_observability_content, safe_observability_key_value
+from app.retrieval.negative_evidence import (
+    SANITIZED_TEMPLATES,
+    build_negative_evidence,
+    safe_observability_content,
+    safe_observability_key_value,
+)
 from app.retrieval.packer import pack_context
-from app.retrieval.policy import build_policy_snapshot, policy_hash
+from app.retrieval.policy import policy_hash
 from app.runtime.models import (
     BranchStatus,
     CompactionKind,
@@ -25,7 +31,9 @@ from app.runtime.models import (
     ReplayDiffItem,
     ReplayGateDecisionView,
     ReplayRetrievalResult,
+    RetainedNegativeEvidence,
     RetrievalRequest,
+    RetrievalStrategy,
     RiskFlags,
     RunReplayResult,
     StateNode,
@@ -82,11 +90,6 @@ class RetrievalReplayService:
         original = await self._build_original_view(access, gate_logs, prelude_blocks=history_prelude)
         warnings: list[str] = []
         diffs = self._integrity_diffs(original.missing_memory_ids)
-        policy_warning, policy_diff = self._policy_drift(access)
-        if policy_warning is not None:
-            warnings.append(policy_warning)
-        if policy_diff is not None:
-            diffs.append(policy_diff)
         warnings.extend(
             f"negative evidence source memory {memory_id} is missing; raw failed-attempt text was not reconstructed"
             for memory_id in original.missing_negative_evidence_memory_ids
@@ -133,6 +136,12 @@ class RetrievalReplayService:
                 pending_compaction_logs=history_pending,
             )
 
+        policy_warning, policy_diff = self._policy_drift(access, replay_trace.access_record)
+        if policy_warning is not None:
+            warnings.append(policy_warning)
+        if policy_diff is not None:
+            diffs.append(policy_diff)
+
         replay_gate_decisions = [_gate_from_outcome(o) for o in replay_trace.gate_outcomes]
         replay_outcomes_by_id = {outcome.memory.memory_id: outcome for outcome in replay_trace.gate_outcomes}
         replay_candidates = [_candidate_from_trace(c, replay_outcomes_by_id.get(c.memory.memory_id)) for c in replay_trace.candidates]
@@ -152,7 +161,7 @@ class RetrievalReplayService:
             run_id=access.run_id,
             step_id=access.step_id,
             workspace_id=access.workspace_id,
-            query=access.query,
+            query=_safe_observability_text(access.query),
             strategy=access.retrieval_strategy,
             token_budget=access.token_budget,
             top_k=access.top_k or 10,
@@ -162,7 +171,7 @@ class RetrievalReplayService:
             replayed_candidates=replay_candidates,
             replayed_gate_decisions=replay_gate_decisions,
             replayed_context_blocks=replay_trace.context_blocks,
-            compaction_logs=compaction_logs,
+            compaction_logs=[_safe_compaction_log(log) for log in compaction_logs],
             diffs=diffs,
             metrics=metrics,
             warnings=_dedupe_preserve_order(warnings),
@@ -280,18 +289,11 @@ class RetrievalReplayService:
             top_k=access.top_k or 10,
         )
 
-    def _policy_drift(self, access: MemoryAccessLog) -> tuple[str | None, ReplayDiffItem | None]:
-        request = self._request_from_access(access)
-        current = build_policy_snapshot(
-            request,
-            gate_config=gatemod.GateConfig.for_strategy(request.strategy),
-            effective_token_budget=access.token_budget or self._retrieval._default_budget,
-            vector_enabled=self._retrieval._use_vector,
-            vector_weight=self._retrieval._vector_weight,
-            compaction_notice_reserve_tokens=self._retrieval._compaction_notice_reserve_tokens,
-            provider_snapshot=self._retrieval.provider_snapshot,
-        )
-        current_hash = policy_hash(current)
+    @staticmethod
+    def _policy_drift(
+        access: MemoryAccessLog,
+        replay_access: MemoryAccessLog,
+    ) -> tuple[str | None, ReplayDiffItem | None]:
         if not access.policy_hash:
             return "policy_snapshot_missing", None
         if not access.policy_snapshot:
@@ -305,6 +307,7 @@ class RetrievalReplayService:
                 replayed=persisted_snapshot_hash,
                 severity="warning",
             )
+        current_hash = replay_access.policy_hash or policy_hash(replay_access.policy_snapshot)
         if access.policy_hash != current_hash:
             return None, ReplayDiffItem(
                 kind="policy_drift",
@@ -629,6 +632,52 @@ def _sort_diffs(diffs: Iterable[ReplayDiffItem]) -> list[ReplayDiffItem]:
         diffs,
         key=lambda d: (_SEVERITY_RANK.get(d.severity, 99), d.kind, d.memory_id or "", d.field or ""),
     )
+
+
+def _safe_compaction_log(log: ContextCompactionLog) -> ContextCompactionLog:
+    return log.model_copy(
+        update={
+            "summary_text": _safe_observability_text(log.summary_text),
+            "retained_facts": [
+                fact.model_copy(
+                    update={
+                        "key": redact(fact.key),
+                        "value": "[REDACTED]" if is_secret_like_key(fact.key) else _safe_observability_text(fact.value),
+                    }
+                )
+                for fact in log.retained_facts
+            ],
+            "retained_negative_evidence": [
+                _safe_retained_negative_evidence(item) for item in log.retained_negative_evidence
+            ],
+            "warnings": [_safe_observability_text(warning) for warning in log.warnings],
+        }
+    )
+
+
+def _safe_retained_negative_evidence(item: RetainedNegativeEvidence) -> RetainedNegativeEvidence:
+    safe_text = _safe_retained_negative_text(item)
+    return item.model_copy(update={"reason": redact(item.reason), "safe_text": safe_text})
+
+
+def _safe_retained_negative_text(item: RetainedNegativeEvidence) -> str:
+    if item.risk_kind in SANITIZED_TEMPLATES:
+        return SANITIZED_TEMPLATES[item.risk_kind]
+    redacted = redact(item.safe_text)
+    lowered = redacted.lower()
+    if any(marker in lowered for marker in ("rm -rf", "/prod", "sk-", "password", "authorization")):
+        return SANITIZED_TEMPLATES["unknown"]
+    if item.mode == "sanitized_risk_notice":
+        return SANITIZED_TEMPLATES["unknown"]
+    return redacted
+
+
+def _safe_observability_text(text: str | None) -> str:
+    redacted = redact(text)
+    lowered = redacted.lower()
+    if any(marker in lowered for marker in ("password", "authorization", "credential", "private key")):
+        return "[REDACTED]"
+    return redacted
 
 
 def _access_metrics(

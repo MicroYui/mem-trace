@@ -33,30 +33,52 @@ class CandidateBuffer:
         # session-less event is still buffered (and flushable) under a stable key.
         return event.session_id or event.run_id
 
-    def append(self, event: AgentEvent) -> None:
+    async def append(self, event: AgentEvent) -> None:
         """Append a candidate event to its session's pending queue."""
         self._by_session.setdefault(self._key(event), []).append(event.model_copy(deep=True))
 
-    def pending(self, session_id: str) -> list[AgentEvent]:
+    async def pending(self, session_id: str, workspace_id: str | None = None) -> list[AgentEvent]:
         """Return (a copy of) the pending events for a session, in write order."""
-        return [e.model_copy(deep=True) for e in self._by_session.get(session_id, [])]
+        return [
+            e.model_copy(deep=True)
+            for e in self._by_session.get(session_id, [])
+            if workspace_id is None or e.workspace_id == workspace_id
+        ]
 
-    def size(self, session_id: str) -> int:
-        return len(self._by_session.get(session_id, []))
+    async def size(self, session_id: str, workspace_id: str | None = None) -> int:
+        return len(await self.pending(session_id, workspace_id=workspace_id))
 
-    def total_size(self) -> int:
-        return sum(len(v) for v in self._by_session.values())
+    async def total_size(self, workspace_id: str | None = None) -> int:
+        if workspace_id is None:
+            return sum(len(v) for v in self._by_session.values())
+        return sum(1 for events in self._by_session.values() for event in events if event.workspace_id == workspace_id)
 
-    def drain(self, session_id: str) -> list[AgentEvent]:
+    async def drain(self, session_id: str, workspace_id: str | None = None) -> list[AgentEvent]:
         """Remove and return all pending events for a session, in write order.
 
         Draining before extraction makes flush idempotent: a second flush of an
         already-drained session finds nothing to process.
         """
-        return self._by_session.pop(session_id, [])
+        events = self._by_session.get(session_id, [])
+        if workspace_id is None:
+            self._by_session.pop(session_id, None)
+            return [event.model_copy(deep=True) for event in events]
+        drained = [event for event in events if event.workspace_id == workspace_id]
+        remaining = [event for event in events if event.workspace_id != workspace_id]
+        if remaining:
+            self._by_session[session_id] = remaining
+        else:
+            self._by_session.pop(session_id, None)
+        return [event.model_copy(deep=True) for event in drained]
 
-    def sessions(self) -> list[str]:
-        return list(self._by_session.keys())
+    async def sessions(self, workspace_id: str | None = None) -> list[str]:
+        if workspace_id is None:
+            return list(self._by_session.keys())
+        return [
+            session_id
+            for session_id, events in self._by_session.items()
+            if any(event.workspace_id == workspace_id for event in events)
+        ]
 
 
 __all__ = ["CandidateBuffer"]

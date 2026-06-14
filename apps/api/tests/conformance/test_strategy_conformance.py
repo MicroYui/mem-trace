@@ -40,6 +40,18 @@ async def _seed_strategy_fixture(strategy: RetrievalStrategy):
         )
     )
     memory_ids["active"] = active.memory_id
+    pinned = await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_conf_strategy",
+            run_id=run.run_id,
+            memory_id="mem_pinned_marker",
+            memory_type=MemoryType.episodic,
+            content="PINNED_ALLOWED_MARKER marker",
+            status=MemoryStatus.pinned,
+            branch_status=BranchStatus.completed,
+        )
+    )
+    memory_ids["pinned"] = pinned.memory_id
     for status, marker in (
         (MemoryStatus.superseded, "SUPERSEDED_MARKER"),
         (MemoryStatus.archived, "ARCHIVED_MARKER"),
@@ -140,12 +152,14 @@ async def test_all_strategies_apply_workspace_lifecycle_and_safety_floors(strate
         return
 
     assert "ACTIVE_ALLOWED_MARKER" in rendered
+    assert "PINNED_ALLOWED_MARKER" in rendered
 
     access = await runtime.inspect_access(ctx.access_id)
     candidate_ids = {candidate.memory_id for candidate in access.candidates}
     gate_by_id = {gate.memory_id: gate for gate in access.gate_decisions}
 
     assert memory_ids["active"] in candidate_ids
+    assert memory_ids["pinned"] in candidate_ids
     assert memory_ids["other_workspace"] not in candidate_ids
     for status in ("superseded", "archived", "dormant", "deleted"):
         assert memory_ids[status] not in candidate_ids

@@ -21,6 +21,7 @@ from app.runtime.models import (
     MemoryAccessLog,
     MemoryGateLog,
     MemoryItem,
+    MemoryRetentionSignal,
     MemoryStatus,
     MemoryType,
     RetrievalRequest,
@@ -30,6 +31,7 @@ from app.runtime.models import (
     StartRunRequest,
     StartStepRequest,
     StepStatus,
+    RetainedNegativeEvidence,
     WriteEventRequest,
 )
 from app.runtime.repository import InMemoryRepository
@@ -213,6 +215,49 @@ async def test_replay_reports_policy_snapshot_hash_mismatch_before_current_polic
 
 
 @pytest.mark.asyncio
+async def test_replay_redacts_retained_negative_evidence_from_compaction_logs():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_retained_negative")
+    access = await repo.add_access_log(
+        MemoryAccessLog(
+            workspace_id="ws_replay_retained_negative",
+            query="Authorization: Bearer sk-1234567890abcdef",
+            retrieval_strategy=RetrievalStrategy.variant_2,
+            token_budget=128,
+        )
+    )
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=access.access_id,
+            workspace_id=access.workspace_id,
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            pre_tokens=200,
+            post_tokens=100,
+            dropped_block_count=1,
+            retained_negative_evidence=[
+                    RetainedNegativeEvidence(
+                        safe_text="do not run rm -rf /prod with Authorization sk-1234567890abcdef",
+                        source_memory_id="mem_bad",
+                        mode="sanitized_risk_notice",
+                        risk_kind="destructive_command",
+                        reason="unsafe failed command",
+                    )
+            ],
+        )
+    )
+
+    replay = await runtime.replay_access(access.access_id)
+
+    assert replay is not None
+    rendered = replay.model_dump_json()
+    assert "rm -rf" not in rendered
+    assert "/prod" not in rendered
+    assert "sk-1234567890abcdef" not in rendered
+    assert "Authorization" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_replay_policy_drift_uses_public_retrieval_provider_snapshot_property(monkeypatch):
     provider = _ReplayEmbeddingProvider()
     registry = ProviderRegistry()
@@ -244,6 +289,65 @@ async def test_replay_policy_drift_uses_public_retrieval_provider_snapshot_prope
 
     assert replay is not None
     assert seen["called"] is True
+    assert any(diff.kind == "policy_drift" for diff in replay.diffs)
+
+
+@pytest.mark.asyncio
+async def test_replay_policy_drift_uses_current_trace_signal_source():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_signal_source")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_replay_signal", task="recall", workspace_id="ws_replay_signal_source")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="recall"))
+    await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_original_fallback",
+            workspace_id="ws_replay_signal_source",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="signal replay original marker",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="signal replay marker",
+            strategy=RetrievalStrategy.variant_3,
+            token_budget=96,
+            top_k=5,
+        )
+    )
+    original_access = await repo.get_access_log(ctx.access_id)
+    assert original_access.policy_snapshot["retrieval"]["reflection_signal_source"] == "fallback_lite"
+
+    signaled = await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_replay_scheduler_signal",
+            workspace_id="ws_replay_signal_source",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="signal replay scheduler marker",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.upsert_retention_signal(
+        MemoryRetentionSignal(
+            memory_id=signaled.memory_id,
+            workspace_id="ws_replay_signal_source",
+            retention_score=0.99,
+            reflection_priority=0.99,
+            reason={"source": "test_scheduler"},
+            policy_version="retention-policy-v1",
+        )
+    )
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    assert any(diff.kind == "candidate_added" and diff.memory_id == signaled.memory_id for diff in replay.diffs)
     assert any(diff.kind == "policy_drift" for diff in replay.diffs)
 
 
@@ -839,6 +943,57 @@ async def test_replay_access_returns_none_for_missing_access():
     runtime, _, _, _, _ = await _seed_runtime()
 
     assert await runtime.replay_access("acc_missing") is None
+
+
+@pytest.mark.asyncio
+async def test_replay_redacts_query_and_persisted_compaction_logs():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_replay_secret")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_replay_secret", task="secret replay", workspace_id="ws_replay_secret")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="secret query"))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_replay_secret",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            key="project.runtime",
+            value="bun",
+            content="This project uses Bun",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="debug Authorization: Bearer sk-1234567890abcdef password is hunter2",
+            strategy=RetrievalStrategy.variant_2,
+        )
+    )
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=ctx.access_id,
+            workspace_id="ws_replay_secret",
+            run_id=run.run_id,
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            pre_tokens=40,
+            post_tokens=10,
+            dropped_block_count=1,
+            compression_ratio=0.25,
+            summary_text="summary kept sk-1234567890abcdef and password hunter2",
+            warnings=["warning Authorization: Bearer sk-1234567890abcdef"],
+        )
+    )
+
+    replay = await runtime.replay_access(ctx.access_id)
+
+    assert replay is not None
+    serialized = replay.model_dump_json()
+    for marker in ("sk-1234567890abcdef", "hunter2", "Authorization: Bearer"):
+        assert marker not in serialized
 
 
 @pytest.mark.asyncio

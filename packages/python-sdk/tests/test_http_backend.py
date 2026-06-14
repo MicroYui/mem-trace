@@ -5,17 +5,23 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.api.deps import get_runtime
+from app.api.deps import app_state, get_repository, get_runtime
 from app.config import get_settings
 from app.main import app
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.repository import InMemoryRepository
-from memtrace_sdk import BadRequestError, MemTrace, NotFoundError
+from memtrace_sdk import BadRequestError, ForbiddenError, MemTrace, NotFoundError
 from memtrace_sdk.backends import HttpBackend
 from memtrace_sdk.types import (
     EventRole,
     EventType,
     FinishStepRequest,
+    MemoryConflictRecord,
+    MemoryItem,
+    MemoryScope,
+    MemoryStatus,
+    MemoryType,
+    MemoryVersionRecord,
     ObservabilityReportRequest,
     RetrievalRequest,
     StartRunRequest,
@@ -27,6 +33,8 @@ from memtrace_sdk.types import (
 
 def _override_runtime(runtime: MemoryRuntime) -> None:
     app.dependency_overrides[get_runtime] = lambda: runtime
+    app_state.repository = runtime._repo  # noqa: SLF001 - test dependency override must match runtime storage
+    app.dependency_overrides[get_repository] = lambda: runtime._repo  # noqa: SLF001
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +43,7 @@ def _clear_overrides():
     yield
     get_settings.cache_clear()
     app.dependency_overrides.clear()
+    app_state.repository = None
 
 
 async def _http_client_for(runtime: MemoryRuntime) -> MemTrace:
@@ -121,6 +130,85 @@ async def test_http_backend_maps_404_and_400_to_sdk_errors(tmp_path: Path) -> No
             await client.write_observability_report(ObservabilityReportRequest(output_dir=str(outside)))
     finally:
         await client.aclose()
+
+
+async def test_http_backend_maps_403_to_forbidden_error(monkeypatch) -> None:
+    monkeypatch.setenv("MEMTRACE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_API_KEY", "dev-secret")
+    get_settings.cache_clear()
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_http_auth")
+    _override_runtime(runtime)
+    http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+    client = MemTrace.http("http://test", api_key="wrong-secret", client=http_client)
+
+    try:
+        with pytest.raises(ForbiddenError):
+            await client.start_run(StartRunRequest(session_id="http-auth-s1", task="auth smoke"))
+    finally:
+        await client.aclose()
+        await http_client.aclose()
+
+
+async def test_http_backend_maps_missing_api_key_401_to_forbidden_error(monkeypatch) -> None:
+    monkeypatch.setenv("MEMTRACE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_API_KEY", "dev-secret")
+    get_settings.cache_clear()
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_http_auth")
+    _override_runtime(runtime)
+    http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+    client = MemTrace.http("http://test", client=http_client)
+
+    try:
+        with pytest.raises(ForbiddenError):
+            await client.start_run(StartRunRequest(session_id="http-auth-s1", task="auth smoke"))
+    finally:
+        await client.aclose()
+        await http_client.aclose()
+
+
+async def test_http_backend_exposes_memory_versions_and_conflicts() -> None:
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_http_phase4")
+    memory = await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_sdk_versioned",
+            workspace_id="ws_http_phase4",
+            memory_type=MemoryType.project,
+            key="project.runtime",
+            value="bun",
+            scope=MemoryScope.workspace,
+            content="project.runtime=bun",
+            status=MemoryStatus.active,
+        )
+    )
+    await repo.add_memory_version(
+        MemoryVersionRecord(
+            memory_id=memory.memory_id,
+            workspace_id=memory.workspace_id,
+            version_no=1,
+            snapshot={"value": "bun"},
+            change_reason="test",
+        )
+    )
+    await repo.upsert_memory_conflict(
+        MemoryConflictRecord(
+            conflict_id="mconf_sdk",
+            workspace_id="ws_http_phase4",
+            subject_key="project.runtime",
+            memory_ids=[memory.memory_id, "mem_other"],
+            status="open",
+        )
+    )
+    client = await _http_client_for(runtime)
+
+    try:
+        versions = await client.list_memory_versions(memory.memory_id)
+        conflicts = await client.list_memory_conflicts(workspace_id="ws_http_phase4")
+    finally:
+        await client.aclose()
+
+    assert [version.version_no for version in versions] == [1]
+    assert [conflict.conflict_id for conflict in conflicts] == ["mconf_sdk"]
 
 
 async def test_http_backend_closes_only_owned_clients() -> None:

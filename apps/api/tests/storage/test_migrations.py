@@ -10,7 +10,20 @@ from pathlib import Path
 
 import pytest
 
-from app.storage.orm import AccessLogORM, Base, ContextCompactionORM, EvalCaseORM, EvalResultORM, EvalRunORM
+from app.storage.orm import (
+    AccessLogORM,
+    ApiKeyORM,
+    Base,
+    ContextCompactionORM,
+    EvalCaseORM,
+    EvalResultORM,
+    EvalRunORM,
+    MemoryLifecycleAuditORM,
+    MemoryConflictORM,
+    MemoryORM,
+    MemoryRetentionSignalORM,
+    MemoryVersionORM,
+)
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -18,6 +31,10 @@ MIGRATION_PATH = ROOT / "migrations" / "versions" / "0004_phase3a_observability.
 COMPACTION_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0005_context_compaction.py"
 HARDENING_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0006_security_consistency_hardening.py"
 I7_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0007_i7_retained_negative_evidence.py"
+LIFECYCLE_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0008_phase4_lifecycle.py"
+RETENTION_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0009_memory_retention_signals.py"
+VERSIONS_CONFLICTS_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0010_memory_versions_conflicts.py"
+GOVERNANCE_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0011_governance.py"
 
 
 def _migration_files() -> list[Path]:
@@ -113,6 +130,42 @@ def _load_i7_migration():
     return module
 
 
+def _load_lifecycle_migration():
+    spec = importlib.util.spec_from_file_location("migration_0008_phase4_lifecycle", LIFECYCLE_MIGRATION_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_retention_migration():
+    spec = importlib.util.spec_from_file_location("migration_0009_memory_retention_signals", RETENTION_MIGRATION_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_versions_conflicts_migration():
+    spec = importlib.util.spec_from_file_location("migration_0010_memory_versions_conflicts", VERSIONS_CONFLICTS_MIGRATION_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_governance_migration():
+    spec = importlib.util.spec_from_file_location("migration_0011_governance", GOVERNANCE_MIGRATION_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_orm_metadata_contains_access_top_k_and_eval_tables():
     assert AccessLogORM.__table__.c.top_k.default.arg == 10
     assert "policy_version" in AccessLogORM.__table__.c
@@ -197,6 +250,106 @@ def test_orm_metadata_contains_unique_run_local_event_sequence_constraint():
         if constraint.__class__.__name__ == "UniqueConstraint"
     }
     assert constraints["uq_event_run_seq"] == ("run_id", "sequence_no")
+
+
+def test_phase4_lifecycle_and_retention_orm_tables_match_plan():
+    assert "lifecycle_metadata" in MemoryORM.__table__.c
+    assert str(MemoryORM.__table__.c.lifecycle_metadata.server_default.arg) == "'{}'::jsonb"
+    assert Base.metadata.tables["memory_lifecycle_audits"] is MemoryLifecycleAuditORM.__table__
+    assert Base.metadata.tables["memory_retention_signals"] is MemoryRetentionSignalORM.__table__
+    lifecycle_indexes = {index.name: tuple(column.name for column in index.columns) for index in MemoryLifecycleAuditORM.__table__.indexes}
+    retention_indexes = {index.name: tuple(column.name for column in index.columns) for index in MemoryRetentionSignalORM.__table__.indexes}
+    assert lifecycle_indexes["ix_memory_lifecycle_audits_workspace_memory_created"] == (
+        "workspace_id",
+        "memory_id",
+        "created_at",
+    )
+    assert retention_indexes["ix_memory_retention_signals_workspace_reflection"] == (
+        "workspace_id",
+        "reflection_priority",
+    )
+
+
+def test_phase4_memory_versions_and_conflicts_orm_tables_match_plan():
+    assert Base.metadata.tables["memory_versions"] is MemoryVersionORM.__table__
+    assert Base.metadata.tables["memory_conflicts"] is MemoryConflictORM.__table__
+    version_constraints = {
+        constraint.name: tuple(constraint.columns.keys())
+        for constraint in MemoryVersionORM.__table__.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert version_constraints["uq_memory_versions_memory_version_no"] == ("memory_id", "version_no")
+    version_indexes = {index.name: tuple(column.name for column in index.columns) for index in MemoryVersionORM.__table__.indexes}
+    conflict_indexes = {index.name: tuple(column.name for column in index.columns) for index in MemoryConflictORM.__table__.indexes}
+    assert version_indexes["ix_memory_versions_workspace_memory_created"] == (
+        "workspace_id",
+        "memory_id",
+        "created_at",
+    )
+    assert conflict_indexes["ix_memory_conflicts_workspace_status_created"] == (
+        "workspace_id",
+        "status",
+        "created_at",
+    )
+
+
+def test_phase4_governance_api_key_orm_table_matches_plan():
+    assert Base.metadata.tables["api_keys"] is ApiKeyORM.__table__
+    assert ApiKeyORM.__table__.c.api_key_id.primary_key
+    assert str(ApiKeyORM.__table__.c.roles.server_default.arg) == "'[]'::jsonb"
+    constraints = {
+        constraint.name: tuple(constraint.columns.keys())
+        for constraint in ApiKeyORM.__table__.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert constraints["uq_api_keys_key_prefix"] == ("key_prefix",)
+    indexes = {index.name: tuple(column.name for column in index.columns) for index in ApiKeyORM.__table__.indexes}
+    assert indexes["ix_api_keys_key_prefix"] == ("key_prefix",)
+    assert indexes["ix_api_keys_workspace_id"] == ("workspace_id",)
+    assert indexes["ix_api_keys_principal_id"] == ("principal_id",)
+    assert indexes["ix_api_keys_prefix_revoked"] == ("key_prefix", "revoked_at")
+
+
+def test_phase4_lifecycle_and_retention_migrations_declare_chain_and_operations():
+    lifecycle = _load_lifecycle_migration()
+    retention = _load_retention_migration()
+    assert lifecycle.revision == "0008_phase4_lifecycle"
+    assert lifecycle.down_revision == "0007_i7_retained_negative_evidence"
+    assert retention.revision == "0009_memory_retention_signals"
+    assert retention.down_revision == "0008_phase4_lifecycle"
+    lifecycle_source = LIFECYCLE_MIGRATION_PATH.read_text()
+    retention_source = RETENTION_MIGRATION_PATH.read_text()
+    assert 'op.add_column(\n        "memory_items"' in lifecycle_source
+    assert '"memory_lifecycle_audits"' in lifecycle_source
+    assert "ix_memory_lifecycle_audits_workspace_memory_created" in lifecycle_source
+    assert '"memory_retention_signals"' in retention_source
+    assert "ix_memory_retention_signals_workspace_reflection" in retention_source
+
+
+def test_phase4_versions_conflicts_migration_declares_chain_and_operations():
+    migration = _load_versions_conflicts_migration()
+    assert migration.revision == "0010_memory_versions_conflicts"
+    assert migration.down_revision == "0009_memory_retention_signals"
+    source = VERSIONS_CONFLICTS_MIGRATION_PATH.read_text()
+    assert '"memory_versions"' in source
+    assert '"memory_conflicts"' in source
+    assert "uq_memory_versions_memory_version_no" in source
+    assert "ix_memory_versions_workspace_memory_created" in source
+    assert "ix_memory_conflicts_workspace_status_created" in source
+
+
+def test_phase4_governance_migration_declares_chain_and_operations():
+    migration = _load_governance_migration()
+    assert migration.revision == "0011_governance"
+    assert migration.down_revision == "0010_memory_versions_conflicts"
+    source = GOVERNANCE_MIGRATION_PATH.read_text()
+    assert '"api_keys"' in source
+    assert "uq_api_keys_key_prefix" in source
+    assert "ix_api_keys_key_prefix" in source
+    assert "ix_api_keys_workspace_id" in source
+    assert "ix_api_keys_principal_id" in source
+    assert "ix_api_keys_prefix_revoked" in source
+    assert "server_default=sa.text(\"'[]'::jsonb\")" in source
 
 
 def test_security_consistency_migration_adds_unique_run_local_event_sequence_index():

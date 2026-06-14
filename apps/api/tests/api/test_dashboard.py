@@ -10,6 +10,7 @@ from app.benchmark.runner import run_benchmark
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.memory_runtime import _benchmark_summary_from_records
 from app.runtime.models import (
+    AgentRun,
     BenchmarkResultRecord,
     EvalCaseRecord,
     EvalResultRecord,
@@ -17,9 +18,15 @@ from app.runtime.models import (
     GateDecisionType,
     GateLayer,
     MemoryAccessLog,
+    MemoryConflictRecord,
     MemoryGateLog,
     MemoryItem,
+    MemoryScope,
+    MemoryStatus,
     MemoryType,
+    ProfileEvent,
+    ProfilePhase,
+    MemoryVersionRecord,
     RetrievalStrategy,
 )
 from app.runtime.repository import InMemoryRepository
@@ -171,3 +178,123 @@ async def test_dashboard_tables_include_eval_rows_and_workspace_observability_su
     assert payload["observability_summary"]["candidate_count"] == 1
     assert payload["observability_summary"]["accepted_count"] == 1
     assert payload["observability_summary"]["by_strategy"]["variant_2"]["access_count"] == 1
+
+
+async def test_dashboard_workspace_filter_excludes_other_workspace_profile_events():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="dash_ws")
+    dash_run = await repo.add_run(
+        AgentRun(run_id="run_dash", workspace_id="dash_ws", session_id="sess_dash")
+    )
+    other_run = await repo.add_run(
+        AgentRun(run_id="run_other", workspace_id="other_ws", session_id="sess_other")
+    )
+    await repo.add_profile_event(ProfileEvent(run_id=dash_run.run_id, phase=ProfilePhase.retrieval, operation="dash"))
+    await repo.add_profile_event(ProfileEvent(run_id=other_run.run_id, phase=ProfilePhase.retrieval, operation="other"))
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_runtime] = lambda: runtime
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/v1/dashboard/tables?workspace_id=dash_ws")
+
+    assert resp.status_code == 200
+    assert [row["operation"] for row in resp.json()["profile_events"]] == ["dash"]
+
+
+async def test_memory_versions_and_conflicts_read_apis_and_dashboard_tables():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="dash_ws")
+    memory = await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_api_versioned",
+            workspace_id="dash_ws",
+            memory_type=MemoryType.project,
+            key="project.runtime",
+            value="bun",
+            scope=MemoryScope.workspace,
+            content="project.runtime=bun",
+            status=MemoryStatus.active,
+        )
+    )
+    await repo.add_memory_version(
+        MemoryVersionRecord(
+            memory_id=memory.memory_id,
+            workspace_id=memory.workspace_id,
+            version_no=1,
+            snapshot={"value": "bun"},
+            change_reason="test",
+        )
+    )
+    conflict = await repo.upsert_memory_conflict(
+        MemoryConflictRecord(
+            conflict_id="mconf_api",
+            workspace_id="dash_ws",
+            subject_key="project.runtime",
+            memory_ids=[memory.memory_id, "mem_other"],
+            status="open",
+            detected_by="test",
+            explanation="conflicting runtime values",
+        )
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_runtime] = lambda: runtime
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        versions_resp = await client.get(f"/v1/memories/{memory.memory_id}/versions")
+        missing_workspace_conflicts_resp = await client.get("/v1/memory-conflicts")
+        conflicts_resp = await client.get("/v1/memory-conflicts?workspace_id=dash_ws")
+        dashboard_resp = await client.get("/v1/dashboard/tables?workspace_id=dash_ws")
+
+    assert versions_resp.status_code == 200
+    assert versions_resp.json()[0]["version_no"] == 1
+    assert missing_workspace_conflicts_resp.status_code == 422
+    assert conflicts_resp.status_code == 200
+    assert conflicts_resp.json()[0]["conflict_id"] == conflict.conflict_id
+    assert dashboard_resp.status_code == 200
+    dashboard = dashboard_resp.json()
+    assert dashboard["memory_versions"][0]["memory_id"] == memory.memory_id
+    assert dashboard["memory_conflicts"][0]["subject_key"] == "project.runtime"
+
+
+async def test_dashboard_tables_include_versions_without_conflicts():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="dash_ws")
+    memory = await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_versioned_without_conflict",
+            workspace_id="dash_ws",
+            memory_type=MemoryType.project,
+            key="project.package_manager",
+            value="bun",
+            scope=MemoryScope.workspace,
+            content="project.package_manager=bun",
+            status=MemoryStatus.active,
+        )
+    )
+    await repo.add_memory_version(
+        MemoryVersionRecord(
+            memory_id=memory.memory_id,
+            workspace_id=memory.workspace_id,
+            version_no=1,
+            snapshot={"value": "bun"},
+            change_reason="test",
+        )
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_runtime] = lambda: runtime
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/v1/dashboard/tables?workspace_id=dash_ws")
+
+    assert resp.status_code == 200
+    assert [row["memory_id"] for row in resp.json()["memory_versions"]] == [memory.memory_id]
+    assert resp.json()["memory_conflicts"] == []

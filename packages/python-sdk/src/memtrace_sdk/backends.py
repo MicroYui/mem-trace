@@ -8,7 +8,7 @@ from pydantic import BaseModel, TypeAdapter
 from app.runtime.memory_runtime import MemoryRuntime, RunNotFoundError, StepNotFoundError, StateTreeError
 from app.runtime.repository import InMemoryRepository
 
-from memtrace_sdk.errors import BadRequestError, MemTraceError, NotFoundError
+from memtrace_sdk.errors import BadRequestError, ForbiddenError, MemTraceError, NotFoundError
 from memtrace_sdk.types import (
     AccessInspection,
     AgentEvent,
@@ -22,7 +22,9 @@ from memtrace_sdk.types import (
     FlushRequest,
     FlushResult,
     MemoryContext,
+    MemoryConflictRecord,
     MemoryItem,
+    MemoryVersionRecord,
     ObservabilityReportRequest,
     ObservabilityReportResult,
     ObservabilitySummary,
@@ -91,6 +93,16 @@ class Backend(Protocol):
 
     async def dashboard_tables(self, *, workspace_id: Optional[str] = None) -> DashboardTables: ...
 
+    async def list_memory_versions(self, memory_id: str) -> list[MemoryVersionRecord]: ...
+
+    async def list_memory_conflicts(
+        self,
+        *,
+        workspace_id: str,
+        memory_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[MemoryConflictRecord]: ...
+
 
 class InProcessBackend:
     """Backend that calls an existing :class:`MemoryRuntime` directly."""
@@ -148,6 +160,8 @@ class InProcessBackend:
             return await self._runtime.retrieve_context(request)
         except (RunNotFoundError, StepNotFoundError) as exc:
             raise NotFoundError(str(exc)) from exc
+        except StateTreeError as exc:
+            raise BadRequestError(str(exc)) from exc
 
     async def flush_session(self, session_id: str) -> FlushResult:
         return await self._runtime.flush_session(session_id)
@@ -212,6 +226,25 @@ class InProcessBackend:
     async def dashboard_tables(self, *, workspace_id: Optional[str] = None) -> DashboardTables:
         return await self._runtime.dashboard_tables(workspace_id=workspace_id)
 
+    async def list_memory_versions(self, memory_id: str) -> list[MemoryVersionRecord]:
+        result = await self._runtime.list_memory_versions(memory_id)
+        if result is None:
+            raise NotFoundError(f"memory not found: {memory_id}")
+        return result
+
+    async def list_memory_conflicts(
+        self,
+        *,
+        workspace_id: str,
+        memory_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[MemoryConflictRecord]:
+        return await self._runtime.list_memory_conflicts(
+            workspace_id=workspace_id,
+            memory_id=memory_id,
+            status=status,
+        )
+
 
 class HttpBackend:
     """Backend that talks to a MemTrace HTTP ``/v1`` API."""
@@ -265,6 +298,8 @@ class HttpBackend:
             raise NotFoundError(str(detail))
         if response.status_code == 400:
             raise BadRequestError(str(detail))
+        if response.status_code in {401, 403}:
+            raise ForbiddenError(str(detail))
         raise MemTraceError(f"HTTP {response.status_code}: {detail}")
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -363,4 +398,23 @@ class HttpBackend:
         params = {"workspace_id": workspace_id} if workspace_id is not None else None
         return DashboardTables.model_validate(
             await self._request("GET", "/v1/dashboard/tables", params=params)
+        )
+
+    async def list_memory_versions(self, memory_id: str) -> list[MemoryVersionRecord]:
+        return await self._get_list(f"/v1/memories/{memory_id}/versions", MemoryVersionRecord)
+
+    async def list_memory_conflicts(
+        self,
+        *,
+        workspace_id: str,
+        memory_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[MemoryConflictRecord]:
+        params = {"workspace_id": workspace_id, "memory_id": memory_id, "status": status}
+        return TypeAdapter(list[MemoryConflictRecord]).validate_python(
+            await self._request(
+                "GET",
+                "/v1/memory-conflicts",
+                params={key: value for key, value in params.items() if value is not None},
+            )
         )

@@ -17,10 +17,15 @@ import asyncio
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Optional
+from collections.abc import Awaitable, Callable
+from typing import Any, Optional
 
+from app.async_tasks.contracts import TaskEnvelope
 from app.memory import secrets, summarizer, writer
+from app.governance.redaction_policy import RedactionState, decide_redaction_state
 from app.memory import llm_extractor, resolver
+from app.memory.conflicts import detect_memory_conflicts
+from app.memory.buffer import CandidateBufferProtocol
 from app.memory.candidate_buffer import CandidateBuffer
 from app.memory.key_ontology import canonical_memory_key, same_memory_key_identity
 from app.memory.llm_extractor import ExtractionProvider
@@ -63,6 +68,8 @@ from app.runtime.models import (
     FlushResult,
     MemoryContext,
     MemoryItem,
+    MemoryVersionRecord,
+    MemoryConflictRecord,
     MemoryStatus,
     ObservabilitySummary,
     ObservabilityReportRequest,
@@ -97,7 +104,26 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _redact_metadata(value: Any, *, key_hint: str | None = None) -> Any:
+    """Recursively redact event metadata before persistence/buffering."""
+    if isinstance(value, str):
+        if secrets.is_secret_like_key(key_hint):
+            return "[REDACTED]"
+        return secrets.redact(value) if secrets.contains_secret(value) else value
+    if isinstance(value, list):
+        return [_redact_metadata(item, key_hint=key_hint) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_metadata(nested, key_hint=str(key))
+            for key, nested in value.items()
+        }
+    return value
+
+
 logger = logging.getLogger(__name__)
+
+
+TaskEnqueue = Callable[[TaskEnvelope], Awaitable[str] | str]
 
 
 class RunNotFoundError(Exception):
@@ -124,8 +150,11 @@ class MemoryRuntime:
         extraction_provider: Optional[ExtractionProvider] = None,
         summarizer_provider: Optional[SummarizerProvider] = None,
         provider_registry: Optional[ProviderRegistry] = None,
+        candidate_buffer: Optional[CandidateBufferProtocol] = None,
+        task_enqueue: TaskEnqueue | None = None,
     ):
         settings = get_settings()
+        self._settings = settings
         self._repo = repo
         self._default_ws = default_workspace_id
         self._provider_registry = provider_registry
@@ -165,7 +194,19 @@ class MemoryRuntime:
         self._compaction_history_token_threshold = settings.compaction_history_token_threshold
         self._compaction_summary_budget_tokens = settings.compaction_summary_budget_tokens
         self._compaction_timeout_ms = settings.compaction_timeout_ms
-        self._buffer = CandidateBuffer()
+        self._buffer = candidate_buffer or CandidateBuffer()
+        self._local_fallback_buffer = CandidateBuffer()
+        # ``sync_flush`` is explicit-flush-only even when mixed with per-request
+        # lazy/buffered overrides. Keep it out of the natural-boundary lazy
+        # buffer so retrieve/finish/complete can safely drain lazy candidates
+        # for every runtime without accidentally processing sync_flush events.
+        self._explicit_flush_buffer = CandidateBuffer()
+        self._explicit_local_fallback_buffer = CandidateBuffer()
+        self._task_enqueue = task_enqueue
+
+    @property
+    def default_workspace_id(self) -> str:
+        return self._default_ws
 
     # ------------------------------------------------------------------ #
     # Run / step / event lifecycle
@@ -270,13 +311,12 @@ class MemoryRuntime:
             if state_node is None or state_node.run_id != run.run_id:
                 raise StateTreeError(f"state node not found for step: {step.step_id}")
 
-        # Secret protection: redact content; do not create retrievable memory.
-        content = request.content
-        redaction_status = "none"
-        is_secret = secrets.contains_secret(content)
-        if is_secret:
-            content = secrets.redact(content)
-            redaction_status = "redacted"
+        # Secret protection: apply the governance redaction state machine; any
+        # non-none redaction state suppresses retrievable memory extraction.
+        decision = decide_redaction_state(request.content, self._settings)
+        content = decision.content
+        redaction_status = decision.state.value
+        is_secret = decision.state != RedactionState.none
 
         event = AgentEvent(
             workspace_id=run.workspace_id,
@@ -289,26 +329,55 @@ class MemoryRuntime:
             role=request.role,
             event_type=request.event_type,
             content=content,
+            content_digest=decision.content_digest,
+            raw_payload_ref=decision.raw_payload_ref,
             redaction_status=redaction_status,
             tool_name=request.tool_name,
             status=request.status,
             token_input=request.token_input,
             token_output=request.token_output,
             latency_ms=request.latency_ms,
-            metadata=request.metadata,
+            metadata=_redact_metadata(request.metadata),
         )
         event = await self._repo.append_event(event)
 
         created_ids: list[str] = []
         buffered = False
+        queued = False
+        task_id: str | None = None
+        warnings: list[str] = []
         if not is_secret:
             # Secret events never produce retrievable memory and are never
             # buffered. For non-secret events, honor the effective extraction
-            # mode: inline (sync) or defer to a flush (buffered).
+            # mode: inline, buffered/lazy, async, or no extraction.
             effective_mode = request.extraction_mode or self._extraction_mode
-            if effective_mode == ExtractionMode.buffered:
-                self._buffer.append(event)
+            if effective_mode in {ExtractionMode.buffered, ExtractionMode.lazy}:
+                extra_warning = await self._append_to_deferred_buffer(event)
                 buffered = True
+                if extra_warning is not None:
+                    warnings.append(extra_warning)
+            elif effective_mode == ExtractionMode.sync_flush:
+                extra_warning = await self._append_to_explicit_flush_buffer(event)
+                buffered = True
+                if extra_warning is not None:
+                    warnings.append(extra_warning)
+            elif effective_mode == ExtractionMode.no_extract:
+                pass
+            elif effective_mode == ExtractionMode.async_:
+                try:
+                    task_id = await self._enqueue_event_extraction(event)
+                    queued = True
+                except Exception:  # noqa: BLE001 - queue outage degrades to deterministic lazy buffer
+                    logger.warning(
+                        "Async extraction enqueue failed for event %s; falling back to lazy buffer",
+                        event.event_id,
+                        exc_info=True,
+                    )
+                    extra_warning = await self._append_to_deferred_buffer(event)
+                    buffered = True
+                    warnings.append("async enqueue failed; fell back to lazy buffer")
+                    if extra_warning is not None:
+                        warnings.append(extra_warning)
             else:
                 created_ids = await self._apply_write_rules(event)
 
@@ -318,7 +387,29 @@ class MemoryRuntime:
             state_node.updated_at = _now()
             await self._repo.update_state_node(state_node)
 
-        return WriteEventResult(event=event, created_memory_ids=created_ids, buffered=buffered)
+        return WriteEventResult(
+            event=event,
+            created_memory_ids=created_ids,
+            buffered=buffered,
+            queued=queued,
+            task_id=task_id,
+            warnings=warnings,
+        )
+
+    async def workspace_for_run(self, run_id: str) -> str | None:
+        return await self._repo.workspace_for_run(run_id)
+
+    async def workspace_for_step(self, step_id: str) -> str | None:
+        return await self._repo.workspace_for_step(step_id)
+
+    async def workspace_for_access(self, access_id: str) -> str | None:
+        return await self._repo.workspace_for_access(access_id)
+
+    async def workspace_for_memory(self, memory_id: str) -> str | None:
+        return await self._repo.workspace_for_memory(memory_id)
+
+    async def workspace_for_eval_run(self, eval_run_id: str) -> str | None:
+        return await self._repo.workspace_for_eval_run(eval_run_id)
 
     async def finish_step(self, request: FinishStepRequest) -> FinishStepResult:
         step = await self._repo.get_step(request.step_id)
@@ -337,11 +428,6 @@ class MemoryRuntime:
         if run is None:
             raise RunNotFoundError(request.run_id)
 
-        # finish_step is a natural window boundary: lazily flush any buffered
-        # candidates for this run's session so the step's working-state memory
-        # is written on top of an already-extracted buffer (architecture.md §12.1).
-        await self._flush_session(run.session_id)
-
         step.status = request.status
         step.error_message = request.error_message
         step.finished_at = _now()
@@ -354,6 +440,12 @@ class MemoryRuntime:
         if request.summary:
             node.summary = request.summary
         await self._repo.update_state_node(node)
+
+        # finish_step is a natural window boundary. Flush after terminal state is
+        # durable so failed/cancelled steps cannot be extracted as completed
+        # memories through the buffered path.
+        if self._flushes_at_window_boundary():
+            await self._flush_session(run.session_id, workspace_id=run.workspace_id)
 
         created_ids: list[str] = []
         mem = writer.write_from_finish_step(step, summary=request.summary)
@@ -389,7 +481,8 @@ class MemoryRuntime:
         # still be pending extraction. Materializing them first lets rollback
         # flip them to rolled_back, keeping failed-branch isolation identical to
         # sync mode (otherwise a later flush would resurrect them as completed).
-        await self._flush_session(run.session_id)
+        if self._flushes_at_window_boundary():
+            await self._flush_session(run.session_id, workspace_id=run.workspace_id)
 
         all_nodes = await self._repo.list_state_nodes(request.run_id)
         by_id = {n.node_id: n for n in all_nodes}
@@ -449,14 +542,16 @@ class MemoryRuntime:
         if run is None:
             raise RunNotFoundError(request.run_id)
 
-        # Drain any pending buffered candidates before summarizing so the run
-        # summary / procedural memory reflect every written event.
-        await self._flush_session(run.session_id)
-
         run.status = request.status
         run.finished_at = _now()
         run.updated_at = _now()
         await self._repo.update_run(run)
+
+        # Drain any pending buffered candidates after run status is durable: a
+        # failed/cancelled run must not have deferred events extracted as fresh
+        # completed memories, while completed runs remain extractable.
+        if self._flushes_at_window_boundary():
+            await self._flush_session(run.session_id, workspace_id=run.workspace_id)
 
         nodes = await self._repo.list_state_nodes(run.run_id)
         memories = await self._repo.list_memories(workspace_id=run.workspace_id)
@@ -488,10 +583,15 @@ class MemoryRuntime:
             step = await self._repo.get_step(request.step_id)
             if step is None or step.run_id != run.run_id:
                 raise StepNotFoundError(request.step_id)
+        if request.workspace_id is not None and request.workspace_id != run.workspace_id:
+            raise StateTreeError(
+                f"workspace mismatch for run {run.run_id}: expected {run.workspace_id}, got {request.workspace_id}"
+            )
         # Lazy flush: extraction is deferred in buffered mode, so before reading
         # context we drain this session's buffer so freshly-written events are
         # reflected in the retrieved memory (architecture.md §12.1 "lazy").
-        await self._flush_session(run.session_id)
+        if self._flushes_at_window_boundary():
+            await self._flush_session(run.session_id, workspace_id=run.workspace_id)
         ws = request.workspace_id or run.workspace_id
         prelude_blocks, pending_logs, prelude_warnings = await self._maybe_fold_history(request, workspace_id=ws)
         if prelude_blocks or pending_logs or prelude_warnings:
@@ -504,30 +604,140 @@ class MemoryRuntime:
             )
         return await self._retrieval.retrieve(request, workspace_id=ws)
 
-    async def flush_session(self, session_id: str) -> FlushResult:
+    async def flush_session(self, session_id: str, *, workspace_id: str | None = None) -> FlushResult:
         """Force extraction of all buffered candidates for a session.
 
         Backs ``POST /v1/sessions/{session_id}/flush`` (architecture.md §6 /
         explicit flush). Safe to call in any mode: with an empty buffer it is a
         no-op. Draining before extraction makes repeated flushes idempotent.
         """
-        events = self._buffer.drain(session_id)
+        events = await self._drain_session_buffers(session_id, include_explicit=True, workspace_id=workspace_id)
         created: list[str] = []
         for event in events:
-            created.extend(await self._apply_write_rules(event))
+            created.extend(await self.process_event_extraction(event.event_id))
         return FlushResult(
             session_id=session_id,
             processed_event_count=len(events),
             created_memory_ids=created,
         )
 
-    async def _flush_session(self, session_id: str) -> list[str]:
+    async def _flush_session(self, session_id: str, *, workspace_id: str | None = None) -> list[str]:
         """Lazy-flush a session at a window boundary; returns created ids."""
-        return (await self.flush_session(session_id)).created_memory_ids
+        events = await self._drain_session_buffers(session_id, include_explicit=False, workspace_id=workspace_id)
+        created: list[str] = []
+        for event in events:
+            created.extend(await self.process_event_extraction(event.event_id))
+        return created
 
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+    def _flushes_at_window_boundary(self) -> bool:
+        # Natural boundaries should always attempt a lazy-buffer drain. This is
+        # a no-op for the default sync/no_extract path, but it preserves
+        # per-request ``buffered`` / ``lazy`` / async-fallback semantics even
+        # when the runtime default is sync. Explicit ``sync_flush`` events are
+        # held in a separate buffer and are therefore not processed here.
+        return True
+
+    async def _enqueue_event_extraction(self, event: AgentEvent) -> str:
+        if self._task_enqueue is None:
+            raise RuntimeError("async extraction enqueue is not configured")
+        envelope = TaskEnvelope(
+            task_type="memory.extract_event",
+            workspace_id=event.workspace_id,
+            dedupe_key=f"memory.extract_event:{event.event_id}",
+            payload={
+                "event_id": event.event_id,
+                "run_id": event.run_id,
+                "workspace_id": event.workspace_id,
+                "session_id": event.session_id,
+            },
+        )
+        result = self._task_enqueue(envelope)
+        if hasattr(result, "__await__"):
+            return await result  # type: ignore[no-any-return]
+        return str(result)
+
+    async def _append_to_deferred_buffer(self, event: AgentEvent) -> str | None:
+        try:
+            await self._buffer.append(event)
+            return None
+        except Exception:  # noqa: BLE001 - Redis/broker shared outages should not lose persisted events
+            logger.warning(
+                "Primary candidate buffer failed for event %s; using local fallback buffer",
+                event.event_id,
+                exc_info=True,
+            )
+            await self._local_fallback_buffer.append(event)
+            return "primary lazy buffer failed; used local fallback buffer"
+
+    async def _append_to_explicit_flush_buffer(self, event: AgentEvent) -> str | None:
+        try:
+            await self._explicit_flush_buffer.append(event)
+            return None
+        except Exception:  # pragma: no cover - in-memory explicit buffer should not fail
+            logger.warning(
+                "Primary explicit candidate buffer failed for event %s; using local fallback buffer",
+                event.event_id,
+                exc_info=True,
+            )
+            await self._explicit_local_fallback_buffer.append(event)
+            return "primary sync_flush buffer failed; used local fallback buffer"
+
+    async def _drain_session_buffers(
+        self,
+        session_id: str,
+        *,
+        include_explicit: bool,
+        workspace_id: str | None = None,
+    ) -> list[AgentEvent]:
+        events = await self._drain_buffer_pair(
+            session_id,
+            workspace_id=workspace_id,
+            primary_buffer=self._buffer,
+            fallback_buffer=self._local_fallback_buffer,
+            primary_label="Primary candidate buffer",
+        )
+        if include_explicit:
+            events.extend(
+                await self._drain_buffer_pair(
+                    session_id,
+                    workspace_id=workspace_id,
+                    primary_buffer=self._explicit_flush_buffer,
+                    fallback_buffer=self._explicit_local_fallback_buffer,
+                    primary_label="Primary explicit candidate buffer",
+                )
+            )
+        deduped: dict[str, AgentEvent] = {}
+        for event in events:
+            deduped.setdefault(event.event_id, event)
+        ordered = list(deduped.values())
+        ordered.sort(key=lambda event: (event.sequence_no, event.created_at, event.event_id))
+        return ordered
+
+    async def _drain_buffer_pair(
+        self,
+        session_id: str,
+        *,
+        workspace_id: str | None,
+        primary_buffer: CandidateBufferProtocol,
+        fallback_buffer: CandidateBuffer,
+        primary_label: str,
+    ) -> list[AgentEvent]:
+        try:
+            primary = await primary_buffer.drain(session_id, workspace_id=workspace_id)
+        except Exception:  # noqa: BLE001 - Redis outage must not block local fallback recovery
+            logger.warning(
+                "%s drain failed for session %s; draining local fallback buffer only",
+                primary_label,
+                session_id,
+                exc_info=True,
+            )
+            primary = []
+        fallback = await fallback_buffer.drain(session_id, workspace_id=workspace_id)
+        return [*primary, *fallback]
+
     async def _prepare_embedding(self, memory: MemoryItem) -> MemoryItem:
         """Populate memory embeddings through the runtime provider boundary.
 
@@ -784,6 +994,56 @@ class MemoryRuntime:
                 created.append(mem.memory_id)
         return created
 
+    async def process_event_extraction(self, event_id: str) -> list[str]:
+        """Runtime-level worker entrypoint for extracting an already-persisted event."""
+        event = await self._repo.get_event(event_id)
+        if event is None:
+            raise ValueError(f"event not found: {event_id}")
+        if await self._event_already_extracted(event):
+            return []
+        if not await self._event_extraction_allowed(event):
+            return []
+        created = await self._apply_write_rules(event)
+        if created and not await self._event_extraction_allowed(event):
+            await self._isolate_created_event_memories(created, event)
+            return []
+        return created
+
+    async def _event_extraction_allowed(self, event: AgentEvent) -> bool:
+        run = await self._repo.get_run(event.run_id)
+        if run is None or run.status in {RunStatus.failed, RunStatus.cancelled}:
+            return False
+        if event.redaction_status != "none" or secrets.contains_secret(event.content):
+            return False
+        if event.state_node_id:
+            node = await self._repo.get_state_node(event.state_node_id)
+            if node is None or node.status in {StateNodeStatus.failed, StateNodeStatus.rolled_back}:
+                return False
+        step = await self._repo.get_step(event.step_id)
+        if step is None or step.status in {StepStatus.failed, StepStatus.rolled_back, StepStatus.cancelled}:
+            return False
+        return True
+
+    async def _event_already_extracted(self, event: AgentEvent) -> bool:
+        for mem in await self._repo.list_memories(workspace_id=event.workspace_id):
+            if mem.source_event_id == event.event_id:
+                return True
+            if event.event_id in (mem.source_event_ids or []):
+                return True
+        return False
+
+    async def _isolate_created_event_memories(self, memory_ids: list[str], event: AgentEvent) -> None:
+        for memory_id in memory_ids:
+            mem = await self._repo.get_memory(memory_id)
+            if mem is None:
+                continue
+            if event.state_node_id and mem.source_state_node_id == event.state_node_id:
+                mem.branch_status = BranchStatus.rolled_back
+            else:
+                mem.branch_status = BranchStatus.failed
+            mem.updated_at = _now()
+            await self._repo.update_memory(mem)
+
     async def _resolve_and_persist(self, workspace_id: str, incoming: MemoryItem) -> Optional[str]:
         """Dedup/merge + conflict-resolve ``incoming`` against same-identity actives.
 
@@ -796,7 +1056,10 @@ class MemoryRuntime:
             await self._repo.update_memory(mem)
         if result.add is not None:
             await self._repo.add_memory(await self._prepare_embedding(result.add))
+            await self._scan_and_persist_conflicts(workspace_id)
             return result.add.memory_id
+        if result.updates:
+            await self._scan_and_persist_conflicts(workspace_id)
         return None
 
     async def _same_identity_actives(
@@ -826,6 +1089,7 @@ class MemoryRuntime:
                 mem.status = MemoryStatus.superseded
                 mem.updated_at = _now()
                 await self._repo.update_memory(mem)
+        await self._scan_and_persist_conflicts(workspace_id)
 
     async def _supersede_run_summary_key(self, workspace_id: str, key: Optional[str]) -> None:
         """Supersede prior active memories with the same summary/procedural key.
@@ -841,6 +1105,22 @@ class MemoryRuntime:
                 mem.status = MemoryStatus.superseded
                 mem.updated_at = _now()
                 await self._repo.update_memory(mem)
+
+    async def _scan_and_persist_conflicts(self, workspace_id: str) -> None:
+        memories = await self._repo.list_memories(workspace_id=workspace_id)
+        current = detect_memory_conflicts(workspace_id, memories, detected_by="runtime_write_path")
+        current_ids = {conflict.conflict_id for conflict in current}
+        for conflict in current:
+            await self._repo.upsert_memory_conflict(conflict)
+        for conflict in await self._repo.list_memory_conflicts(
+            workspace_id=workspace_id,
+            status="open",
+        ):
+            if conflict.detected_by != "runtime_write_path" or conflict.conflict_id in current_ids:
+                continue
+            await self._repo.upsert_memory_conflict(
+                conflict.model_copy(update={"status": "resolved", "resolved_at": _now()})
+            )
 
     @staticmethod
     def _find_root(nodes) -> Optional[StateNode]:
@@ -872,6 +1152,24 @@ class MemoryRuntime:
     ) -> list[MemoryItem]:
         return await self._repo.list_memories(workspace_id=workspace_id, run_id=run_id)
 
+    async def list_memory_versions(self, memory_id: str) -> list[MemoryVersionRecord] | None:
+        if await self._repo.get_memory(memory_id) is None:
+            return None
+        return await self._repo.list_memory_versions(memory_id)
+
+    async def list_memory_conflicts(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[MemoryConflictRecord]:
+        return await self._repo.list_memory_conflicts(
+            workspace_id=workspace_id,
+            memory_id=memory_id,
+            status=status,
+        )
+
     async def dashboard_tables(self, *, workspace_id: Optional[str] = None) -> DashboardTables:
         """Return minimal table payload for the P1 dashboard/API view."""
         runs = await self._repo.list_runs(workspace_id=workspace_id)
@@ -882,9 +1180,23 @@ class MemoryRuntime:
         eval_cases = await self._repo.list_eval_cases()
         eval_runs = await self._repo.list_eval_runs(workspace_id=workspace_id)
         eval_results = await self._repo.list_eval_results()
+        memory_conflicts = await self._repo.list_memory_conflicts(workspace_id=workspace_id)
+        memory_versions: list[MemoryVersionRecord] = []
+        version_memory_ids = sorted(
+            {memory.memory_id for memory in await self._repo.list_memories(workspace_id=workspace_id)}
+        )
+        for memory_id in version_memory_ids:
+            memory_versions.extend(await self._repo.list_memory_versions(memory_id))
         if workspace_id is not None:
             eval_run_ids = {run.eval_run_id for run in eval_runs}
             eval_results = [result for result in eval_results if result.eval_run_id in eval_run_ids]
+            run_ids = {run.run_id for run in runs}
+            access_ids = {access.access_id for access in accesses}
+            profile_events = [
+                event for event in profile_events
+                if (event.run_id is not None and event.run_id in run_ids)
+                or (event.access_id is not None and event.access_id in access_ids)
+            ]
         observability_summary = await build_observability_summary(self._repo, workspace_id=workspace_id)
         return DashboardTables(
             runs=runs,
@@ -895,6 +1207,8 @@ class MemoryRuntime:
             eval_cases=eval_cases,
             eval_runs=eval_runs,
             eval_results=eval_results,
+            memory_versions=memory_versions,
+            memory_conflicts=memory_conflicts,
             observability_summary=observability_summary,
             benchmark_summary=_benchmark_summary_from_records(results),
         )

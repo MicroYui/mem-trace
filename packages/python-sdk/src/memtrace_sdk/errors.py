@@ -8,3 +8,7 @@ class NotFoundError(MemTraceError):
 
 class BadRequestError(MemTraceError):
     """Raised when MemTrace rejects an invalid request."""
+
+
+class ForbiddenError(MemTraceError):
+    """Raised when MemTrace rejects a request for authz/authn reasons."""

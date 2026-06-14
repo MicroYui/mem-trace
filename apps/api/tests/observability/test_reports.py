@@ -294,6 +294,62 @@ async def test_report_filters_compaction_rows_and_escapes_markdown(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_report_redacts_query_and_compaction_payloads(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_report")
+    run = await runtime.start_run(
+        StartRunRequest(session_id="s_report_secret", task="secret report", workspace_id="ws_report")
+    )
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="secret query"))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_report",
+            run_id=run.run_id,
+            memory_type=MemoryType.project,
+            key="project.runtime",
+            value="bun",
+            content="This project uses Bun",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="debug Authorization: Bearer sk-1234567890abcdef password is hunter2",
+            strategy=RetrievalStrategy.variant_2,
+        )
+    )
+    await repo.add_compaction_log(
+        ContextCompactionLog(
+            access_id=ctx.access_id,
+            workspace_id="ws_report",
+            run_id=run.run_id,
+            kind=CompactionKind.budget_notice,
+            provider=CompactionProvider.rule,
+            pre_tokens=40,
+            post_tokens=10,
+            dropped_block_count=1,
+            compression_ratio=0.25,
+            summary_text="summary kept sk-1234567890abcdef and password hunter2",
+            retained_facts=[RetainedFact(key="project.api_key", value="short-secret")],
+            warnings=["warning Authorization: Bearer sk-1234567890abcdef"],
+        )
+    )
+
+    result = await runtime.write_observability_report(
+        ObservabilityReportRequest(workspace_id="ws_report", output_dir="reports", include_replay=True)
+    )
+
+    payload = json.loads((tmp_path / result.json_path).read_text())
+    serialized = json.dumps(payload, ensure_ascii=False) + (tmp_path / result.markdown_path).read_text() + (tmp_path / result.html_path).read_text()
+    assert "short-secret" not in serialized
+    for marker in ("sk-1234567890abcdef", "hunter2", "Authorization: Bearer"):
+        assert marker not in serialized
+
+
+@pytest.mark.asyncio
 async def test_report_includes_retained_negative_evidence_counts_and_sanitized_rows(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     repo = InMemoryRepository()

@@ -5,7 +5,7 @@ import json
 
 import httpx
 
-from app.api.deps import get_runtime
+from app.api.deps import app_state, get_repository, get_runtime
 from app.config import get_settings
 from app.main import app
 from app.runtime.memory_runtime import MemoryRuntime
@@ -31,10 +31,13 @@ def setup_function() -> None:
 def teardown_function() -> None:
     get_settings.cache_clear()
     app.dependency_overrides.clear()
+    app_state.repository = None
 
 
 def _override_runtime(runtime: MemoryRuntime) -> None:
     app.dependency_overrides[get_runtime] = lambda: runtime
+    app_state.repository = runtime._repo  # noqa: SLF001 - test dependency override must match runtime storage
+    app.dependency_overrides[get_repository] = lambda: runtime._repo  # noqa: SLF001
 
 
 async def _asgi_client_for(runtime: MemoryRuntime) -> tuple[MemTrace, httpx.AsyncClient]:

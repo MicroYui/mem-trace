@@ -154,6 +154,28 @@ async def test_runtime_uses_registry_extraction_provider_when_explicit_provider_
     assert [(memory.key, memory.value) for memory in memories] == [("project.language", "python")]
 
 
+async def test_write_event_redacts_metadata_lists_under_secret_like_keys() -> None:
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_metadata_redaction")
+    run = await runtime.start_run(StartRunRequest(session_id="s_metadata", task="setup"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="record metadata"))
+
+    result = await runtime.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="safe content",
+            metadata={"tokens": ["short-secret"], "nested": {"authorization": ["Bearer short"]}},
+        )
+    )
+
+    assert result.event.metadata == {
+        "tokens": ["[REDACTED]"],
+        "nested": {"authorization": ["[REDACTED]"]},
+    }
+
+
 async def test_runtime_same_identity_actives_match_historical_alias_keys():
     repo = InMemoryRepository()
     runtime = MemoryRuntime(repo)

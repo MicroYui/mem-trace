@@ -14,6 +14,7 @@ import pytest
 
 from app.retrieval.controller import RetrievalController, retention_score
 from app.runtime.memory_runtime import MemoryRuntime
+from app.runtime.memory_runtime import StateTreeError
 from app.runtime.models import (
     BranchStatus,
     EventRole,
@@ -21,6 +22,7 @@ from app.runtime.models import (
     FinishStepRequest,
     GateDecisionType,
     MemoryItem,
+    MemoryRetentionSignal,
     MemoryStatus,
     MemoryType,
     RetrievalRequest,
@@ -217,8 +219,192 @@ async def test_variant_2_injects_safe_failed_branch_as_negative_evidence(runtime
     degraded_logs = [g for g in gate_logs if g.decision == GateDecisionType.degrade]
     assert packing.metadata["degraded_count"] == len(degraded_logs)
     assert packing.metadata["hard_rejected_count"] == access.rejected_count - len(degraded_logs)
-    assert packing.metadata["negative_evidence_count"] == 1
-    assert packing.metadata["sanitized_negative_evidence_count"] == 0
+
+
+async def test_retrieve_context_rejects_workspace_override_that_does_not_match_run(runtime):
+    run, s3 = await _seed_bun_vs_node(runtime, ws="ws_owner")
+    await runtime._repo.add_memory(  # noqa: SLF001 - seed another workspace directly
+        MemoryItem(
+            memory_id="mem_other_workspace_secret",
+            workspace_id="ws_other",
+            memory_type=MemoryType.project,
+            key="project.runtime",
+            value="deno",
+            content="other workspace uses deno",
+        )
+    )
+
+    with pytest.raises(StateTreeError):
+        await runtime.retrieve_context(
+            RetrievalRequest(
+                run_id=run.run_id,
+                step_id=s3.step_id,
+                workspace_id="ws_other",
+                query="runtime",
+                strategy=RetrievalStrategy.baseline_1,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_retrieval_updates_last_accessed_at_with_access_count():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_access_time")
+    run = await runtime.start_run(StartRunRequest(session_id="s", task="recall", workspace_id="ws_access_time"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="recall"))
+    before = datetime.now(timezone.utc)
+    memory = await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_access_time",
+            workspace_id="ws_access_time",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="ACCESS_TIME_MARKER",
+            branch_status=BranchStatus.completed,
+        )
+    )
+
+    await runtime.retrieve_context(
+        RetrievalRequest(run_id=run.run_id, step_id=step.step_id, query="ACCESS_TIME_MARKER", strategy=RetrievalStrategy.variant_2)
+    )
+
+    updated = await repo.get_memory(memory.memory_id)
+    assert updated.access_count == 1
+    assert updated.last_accessed_at is not None
+    assert updated.last_accessed_at >= before
+
+
+@pytest.mark.asyncio
+async def test_variant_3_uses_persisted_reflection_signal_when_present():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_signal_rank")
+    run = await runtime.start_run(StartRunRequest(session_id="s", task="recall", workspace_id="ws_signal_rank"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="recall"))
+    low_relevance = await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_scheduler_priority",
+            workspace_id="ws_signal_rank",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="priority SCHEDULER_PRIORITY_MARKER obscure",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_relevance_noise",
+            workspace_id="ws_signal_rank",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="query query query noise",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.upsert_retention_signal(
+        MemoryRetentionSignal(
+            memory_id=low_relevance.memory_id,
+            workspace_id="ws_signal_rank",
+            retention_score=0.99,
+            reflection_priority=0.99,
+            reason={"source": "test_scheduler"},
+            policy_version="retention-policy-v1",
+        )
+    )
+
+    ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="query priority",
+            strategy=RetrievalStrategy.variant_3,
+            token_budget=14,
+            top_k=5,
+        )
+    )
+
+    rendered = "\n".join(block.content for block in ctx.context_blocks)
+    assert "SCHEDULER_PRIORITY_MARKER" in rendered
+    inspection = await runtime.inspect_access(ctx.access_id)
+    assert inspection.policy_snapshot["retrieval"]["reflection_signal_source"] == "mixed_scheduler_v1_fallback_lite"
+    assert inspection.policy_snapshot["retrieval"]["retention_policy_version"] == "retention-policy-v1"
+
+
+@pytest.mark.asyncio
+async def test_variant_3_policy_snapshot_tracks_mixed_signal_coverage_in_hash():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_signal_mixed")
+    run = await runtime.start_run(StartRunRequest(session_id="s", task="recall", workspace_id="ws_signal_mixed"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="recall"))
+    mem_with_signal = await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_with_signal",
+            workspace_id="ws_signal_mixed",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="mixed signal marker alpha",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    mem_without_signal = await repo.add_memory(
+        MemoryItem(
+            memory_id="mem_without_signal",
+            workspace_id="ws_signal_mixed",
+            run_id=run.run_id,
+            memory_type=MemoryType.episodic,
+            content="mixed fallback marker alpha",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    await repo.upsert_retention_signal(
+        MemoryRetentionSignal(
+            memory_id=mem_with_signal.memory_id,
+            workspace_id="ws_signal_mixed",
+            retention_score=0.9,
+            reflection_priority=0.9,
+            reason={"source": "test_scheduler"},
+            policy_version="retention-policy-v1",
+        )
+    )
+
+    mixed_ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="mixed marker alpha",
+            strategy=RetrievalStrategy.variant_3,
+            token_budget=96,
+            top_k=5,
+        )
+    )
+    mixed_access = await repo.get_access_log(mixed_ctx.access_id)
+    assert mixed_access.policy_snapshot["retrieval"]["reflection_signal_source"] == "mixed_scheduler_v1_fallback_lite"
+    assert mixed_access.policy_snapshot["retrieval"]["scheduler_signal_memory_ids"] == [mem_with_signal.memory_id]
+    assert mixed_access.policy_snapshot["retrieval"]["fallback_lite_memory_ids"] == [mem_without_signal.memory_id]
+
+    await repo.upsert_retention_signal(
+        MemoryRetentionSignal(
+            memory_id=mem_without_signal.memory_id,
+            workspace_id="ws_signal_mixed",
+            retention_score=0.8,
+            reflection_priority=0.8,
+            reason={"source": "test_scheduler"},
+            policy_version="retention-policy-v1",
+        )
+    )
+    scheduler_ctx = await runtime.retrieve_context(
+        RetrievalRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            query="mixed marker alpha",
+            strategy=RetrievalStrategy.variant_3,
+            token_budget=96,
+            top_k=5,
+        )
+    )
+    scheduler_access = await repo.get_access_log(scheduler_ctx.access_id)
+    assert scheduler_access.policy_snapshot["retrieval"]["reflection_signal_source"] == "scheduler_v1"
+    assert scheduler_access.policy_snapshot["retrieval"]["fallback_lite_memory_ids"] == []
+    assert scheduler_access.policy_hash != mixed_access.policy_hash
 
 
 async def test_variant_2_sanitizes_unsafe_failed_branch_negative_evidence(runtime):

@@ -156,6 +156,7 @@ class MemoryORM(Base):
     embedding_vector: Mapped[list | None] = mapped_column(Vector(EMBED_DIM), nullable=True)
     risk_flags: Mapped[dict] = mapped_column(JSONB, default=dict)
     status: Mapped[str] = mapped_column(String, index=True)
+    lifecycle_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=sa.text("'{}'::jsonb"))
     superseded_by: Mapped[str | None] = mapped_column(String, nullable=True)
     sensitivity: Mapped[str] = mapped_column(String, default="internal")
     embedding_status: Mapped[str] = mapped_column(String, default="pending")
@@ -186,6 +187,86 @@ class AccessLogORM(Base):
     policy_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     policy_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MemoryLifecycleAuditORM(Base):
+    __tablename__ = "memory_lifecycle_audits"
+    __table_args__ = (
+        Index("ix_memory_lifecycle_audits_workspace_memory_created", "workspace_id", "memory_id", "created_at"),
+    )
+    audit_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    memory_id: Mapped[str] = mapped_column(String, index=True)
+    from_status: Mapped[str] = mapped_column(String)
+    to_status: Mapped[str] = mapped_column(String)
+    reason: Mapped[str] = mapped_column(String)
+    actor: Mapped[str] = mapped_column(String)
+    scheduler_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    audit_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=sa.text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MemoryRetentionSignalORM(Base):
+    __tablename__ = "memory_retention_signals"
+    __table_args__ = (
+        Index("ix_memory_retention_signals_workspace_reflection", "workspace_id", "reflection_priority"),
+    )
+    memory_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    retention_score: Mapped[float] = mapped_column(Float, default=0.0)
+    reflection_priority: Mapped[float] = mapped_column(Float, default=0.0)
+    reason: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=sa.text("'{}'::jsonb"))
+    policy_version: Mapped[str] = mapped_column(String)
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MemoryVersionORM(Base):
+    __tablename__ = "memory_versions"
+    __table_args__ = (
+        UniqueConstraint("memory_id", "version_no", name="uq_memory_versions_memory_version_no"),
+        Index("ix_memory_versions_workspace_memory_created", "workspace_id", "memory_id", "created_at"),
+    )
+    version_id: Mapped[str] = mapped_column(String, primary_key=True)
+    memory_id: Mapped[str] = mapped_column(String, index=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    version_no: Mapped[int] = mapped_column(Integer)
+    snapshot: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=sa.text("'{}'::jsonb"))
+    change_reason: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MemoryConflictORM(Base):
+    __tablename__ = "memory_conflicts"
+    __table_args__ = (
+        Index("ix_memory_conflicts_workspace_status_created", "workspace_id", "status", "created_at"),
+    )
+    conflict_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    subject_key: Mapped[str] = mapped_column(String, index=True)
+    memory_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default=sa.text("'[]'::jsonb"))
+    status: Mapped[str] = mapped_column(String, index=True)
+    detected_by: Mapped[str] = mapped_column(String)
+    explanation: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ApiKeyORM(Base):
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        sa.UniqueConstraint("key_prefix", name="uq_api_keys_key_prefix"),
+        Index("ix_api_keys_prefix_revoked", "key_prefix", "revoked_at"),
+    )
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    principal_id: Mapped[str] = mapped_column(String, index=True)
+    key_prefix: Mapped[str] = mapped_column(String, index=True)
+    key_digest: Mapped[str] = mapped_column(String)
+    roles: Mapped[list] = mapped_column(JSONB, default=list, server_default=sa.text("'[]'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GateLogORM(Base):
@@ -320,6 +401,11 @@ __all__ = [
     "EventORM",
     "StateNodeORM",
     "MemoryORM",
+    "MemoryLifecycleAuditORM",
+    "MemoryRetentionSignalORM",
+    "MemoryVersionORM",
+    "MemoryConflictORM",
+    "ApiKeyORM",
     "AccessLogORM",
     "GateLogORM",
     "ProfileEventORM",

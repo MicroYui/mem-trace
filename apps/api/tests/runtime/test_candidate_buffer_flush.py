@@ -8,9 +8,11 @@ The default ``sync`` runtime is unchanged (covered by other suites).
 from __future__ import annotations
 
 from app.runtime.memory_runtime import MemoryRuntime
+from app.memory.candidate_buffer import CandidateBuffer
 from app.runtime.models import (
     AgentStep,
     BranchStatus,
+    CompleteRunRequest,
     EventRole,
     EventType,
     ExtractionMode,
@@ -20,6 +22,7 @@ from app.runtime.models import (
     RetrievalRequest,
     RetrievalStrategy,
     RollbackRequest,
+    RunStatus,
     StartRunRequest,
     StartStepRequest,
     StepStatus,
@@ -115,6 +118,19 @@ async def test_lazy_flush_on_finish_step():
     assert len(active) == 1 and active[0].value == "bun"
 
 
+async def test_failed_finish_does_not_extract_buffered_user_memory_as_completed():
+    rt = _buffered_runtime()
+    run = await rt.start_run(StartRunRequest(session_id="s", task="t"))
+    s1 = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="bad plan"))
+    await rt.write_event(_ev(run.run_id, s1.step_id, "这个项目使用 Bun"))
+
+    await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s1.step_id, status=StepStatus.failed))
+
+    assert await _project_memories(rt) == []
+    flushed = await rt.flush_session("s")
+    assert flushed.processed_event_count == 0
+
+
 async def test_per_request_sync_override_extracts_inline():
     rt = _buffered_runtime()
     run = await rt.start_run(StartRunRequest(session_id="s", task="t"))
@@ -138,6 +154,32 @@ async def test_secret_event_is_not_buffered():
     # flushing produces nothing from a secret event
     flushed = await rt.flush_session("s")
     assert flushed.processed_event_count == 0
+
+
+async def test_buffered_event_metadata_is_redacted_before_buffering():
+    buffer = CandidateBuffer()
+    rt = MemoryRuntime(
+        InMemoryRepository(),
+        default_workspace_id="ws_test",
+        extraction_mode=ExtractionMode.buffered,
+        candidate_buffer=buffer,
+    )
+    run = await rt.start_run(StartRunRequest(session_id="s", task="t"))
+    step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning"))
+
+    await rt.write_event(
+        WriteEventRequest(
+            run_id=run.run_id,
+            step_id=step.step_id,
+            role=EventRole.user,
+            event_type=EventType.message,
+            content="safe content",
+            metadata={"password": "hunter2", "nested": {"body": "api_key=sk-ABCDEF1234567890ABCDEF"}},
+        )
+    )
+
+    pending = await buffer.pending("s")
+    assert pending[0].metadata == {"password": "[REDACTED]", "nested": {"body": "[REDACTED]"}}
 
 
 async def test_buffered_flush_resolves_conflict_in_write_order():
@@ -202,6 +244,87 @@ async def test_rollback_missing_state_node_does_not_flush_buffered_memories():
         pass
     else:  # pragma: no cover - assertion clarity if the guard regresses
         raise AssertionError("rollback_branch should reject a corrupt state-node reference")
+
+    assert await _project_memories(rt) == []
+    flushed = await rt.flush_session("s")
+    assert flushed.processed_event_count == 1
+
+
+async def test_delayed_process_event_extraction_skips_rolled_back_state_node():
+    rt = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_test")
+    run = await rt.start_run(StartRunRequest(session_id="s", task="t"))
+    step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="plan A"))
+    res = await rt.write_event(_ev(run.run_id, step.step_id, "这个项目使用 Bun", mode=ExtractionMode.buffered))
+    event_id = res.event.event_id
+
+    await rt.rollback_branch(RollbackRequest(run_id=run.run_id, step_id=step.step_id, reason="bad branch"))
+    # Simulate a delayed async worker trying to process the event after rollback.
+    created = await rt.process_event_extraction(event_id)
+
+    assert created == []
+    completed_branch = [m for m in await _project_memories(rt) if m.branch_status == BranchStatus.completed]
+    assert completed_branch == []
+
+
+async def test_delayed_process_event_extraction_skips_failed_run():
+    rt = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_test")
+    run = await rt.start_run(StartRunRequest(session_id="s", task="t"))
+    step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="plan A"))
+    res = await rt.write_event(_ev(run.run_id, step.step_id, "这个项目使用 Bun", mode=ExtractionMode.buffered))
+
+    await rt.complete_run(CompleteRunRequest(run_id=run.run_id, status=RunStatus.failed))
+    created = await rt.process_event_extraction(res.event.event_id)
+
+    assert created == []
+
+
+async def test_process_event_extraction_is_persistently_idempotent_for_same_event():
+    rt = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_test")
+    run = await rt.start_run(StartRunRequest(session_id="s", task="t"))
+    step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="plan A"))
+    res = await rt.write_event(WriteEventRequest(
+        run_id=run.run_id,
+        step_id=step.step_id,
+        role=EventRole.tool,
+        event_type=EventType.tool_result,
+        content="bun test passed",
+        status="success",
+        extraction_mode=ExtractionMode.buffered,
+    ))
+
+    first = await rt.process_event_extraction(res.event.event_id)
+    second = await rt.process_event_extraction(res.event.event_id)
+
+    assert len(first) == 1
+    assert second == []
+    tool_mems = [
+        m for m in await rt.list_memories(workspace_id="ws_test")
+        if m.memory_type == MemoryType.tool_evidence and m.source_event_id == res.event.event_id
+    ]
+    assert len(tool_mems) == 1
+
+
+async def test_retrieve_context_rejects_workspace_mismatch_before_lazy_flush():
+    rt = _buffered_runtime()
+    run = await rt.start_run(StartRunRequest(session_id="s", task="t"))
+    step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="plan A"))
+    await rt.write_event(_ev(run.run_id, step.step_id, "这个项目使用 Bun"))
+
+    from app.runtime.memory_runtime import StateTreeError
+
+    try:
+        await rt.retrieve_context(
+            RetrievalRequest(
+                run_id=run.run_id,
+                step_id=step.step_id,
+                workspace_id="other_ws",
+                query="runtime",
+            )
+        )
+    except StateTreeError:
+        pass
+    else:  # pragma: no cover - assertion clarity if the guard regresses
+        raise AssertionError("retrieve_context should reject mismatched workspace")
 
     assert await _project_memories(rt) == []
     flushed = await rt.flush_session("s")

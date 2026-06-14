@@ -6,13 +6,15 @@ made monotonic and concurrency-safe with a per-run transactional advisory lock.
 from __future__ import annotations
 
 from typing import Optional
+from datetime import datetime
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.runtime.repository import ensure_embedding
+from app.runtime.repository import ensure_embedding, _preserved_lifecycle_fields
 from app.runtime.models import (
+    ApiKeyRecord,
     AgentEvent,
     AgentRun,
     AgentStep,
@@ -23,13 +25,18 @@ from app.runtime.models import (
     EvalCaseRecord,
     EvalResultRecord,
     EvalRunRecord,
+    MemoryLifecycleAuditRecord,
     MemoryGateLog,
     MemoryItem,
+    MemoryRetentionSignal,
+    MemoryVersionRecord,
+    MemoryConflictRecord,
     ProfileEvent,
     RetainedNegativeEvidence,
     RiskFlags,
     StateNode,
 )
+from app.memory.versioning import redacted_memory_snapshot, should_create_memory_version
 from app.storage import orm
 
 
@@ -136,6 +143,7 @@ def _mem_to_orm(m: MemoryItem) -> orm.MemoryORM:
         freshness_score=m.freshness_score, trust_score=m.trust_score,
         risk_score=m.risk_score, embedding_vector=m.embedding_vector,
         risk_flags=m.risk_flags.model_dump(), status=m.status.value,
+        lifecycle_metadata=m.lifecycle_metadata,
         superseded_by=m.superseded_by,
         sensitivity=m.sensitivity.value, embedding_status=m.embedding_status.value,
         expires_at=m.expires_at, last_accessed_at=m.last_accessed_at,
@@ -155,6 +163,7 @@ def _mem_from_orm(o: orm.MemoryORM) -> MemoryItem:
         value_score=o.value_score, freshness_score=o.freshness_score,
         trust_score=o.trust_score, risk_score=o.risk_score, embedding_vector=vec,
         risk_flags=RiskFlags(**(o.risk_flags or {})), status=o.status,
+        lifecycle_metadata=getattr(o, "lifecycle_metadata", None) or {},
         superseded_by=o.superseded_by,
         sensitivity=o.sensitivity, embedding_status=o.embedding_status,
         expires_at=o.expires_at, last_accessed_at=o.last_accessed_at,
@@ -185,6 +194,142 @@ def _access_from_orm(o: orm.AccessLogORM) -> MemoryAccessLog:
         latency_ms=o.latency_ms, policy_version=o.policy_version,
         policy_hash=o.policy_hash, policy_snapshot=o.policy_snapshot or {},
         created_at=o.created_at,
+    )
+
+
+def _lifecycle_audit_to_orm(a: MemoryLifecycleAuditRecord) -> orm.MemoryLifecycleAuditORM:
+    return orm.MemoryLifecycleAuditORM(
+        audit_id=a.audit_id,
+        workspace_id=a.workspace_id,
+        memory_id=a.memory_id,
+        from_status=a.from_status.value,
+        to_status=a.to_status.value,
+        reason=a.reason,
+        actor=a.actor,
+        scheduler_run_id=a.scheduler_run_id,
+        audit_metadata=a.metadata,
+        created_at=a.created_at,
+    )
+
+
+def _lifecycle_audit_from_orm(o: orm.MemoryLifecycleAuditORM) -> MemoryLifecycleAuditRecord:
+    return MemoryLifecycleAuditRecord(
+        audit_id=o.audit_id,
+        workspace_id=o.workspace_id,
+        memory_id=o.memory_id,
+        from_status=o.from_status,
+        to_status=o.to_status,
+        reason=o.reason,
+        actor=o.actor,
+        scheduler_run_id=o.scheduler_run_id,
+        metadata=o.audit_metadata or {},
+        created_at=o.created_at,
+    )
+
+
+def _retention_signal_to_orm(signal: MemoryRetentionSignal) -> orm.MemoryRetentionSignalORM:
+    return orm.MemoryRetentionSignalORM(
+        memory_id=signal.memory_id,
+        workspace_id=signal.workspace_id,
+        retention_score=signal.retention_score,
+        reflection_priority=signal.reflection_priority,
+        reason=signal.reason,
+        policy_version=signal.policy_version,
+        scored_at=signal.scored_at,
+        updated_at=signal.updated_at,
+    )
+
+
+def _retention_signal_from_orm(o: orm.MemoryRetentionSignalORM) -> MemoryRetentionSignal:
+    return MemoryRetentionSignal(
+        memory_id=o.memory_id,
+        workspace_id=o.workspace_id,
+        retention_score=o.retention_score,
+        reflection_priority=o.reflection_priority,
+        reason=o.reason or {},
+        policy_version=o.policy_version,
+        scored_at=o.scored_at,
+        updated_at=o.updated_at,
+    )
+
+
+def _memory_version_to_orm(version: MemoryVersionRecord) -> orm.MemoryVersionORM:
+    return orm.MemoryVersionORM(
+        version_id=version.version_id,
+        memory_id=version.memory_id,
+        workspace_id=version.workspace_id,
+        version_no=version.version_no,
+        snapshot=version.snapshot,
+        change_reason=version.change_reason,
+        created_at=version.created_at,
+    )
+
+
+def _memory_version_from_orm(o: orm.MemoryVersionORM) -> MemoryVersionRecord:
+    return MemoryVersionRecord(
+        version_id=o.version_id,
+        memory_id=o.memory_id,
+        workspace_id=o.workspace_id,
+        version_no=o.version_no,
+        snapshot=o.snapshot or {},
+        change_reason=o.change_reason,
+        created_at=o.created_at,
+    )
+
+
+def _memory_conflict_to_orm(conflict: MemoryConflictRecord) -> orm.MemoryConflictORM:
+    return orm.MemoryConflictORM(
+        conflict_id=conflict.conflict_id,
+        workspace_id=conflict.workspace_id,
+        subject_key=conflict.subject_key,
+        memory_ids=list(conflict.memory_ids),
+        status=conflict.status,
+        detected_by=conflict.detected_by,
+        explanation=conflict.explanation,
+        created_at=conflict.created_at,
+        resolved_at=conflict.resolved_at,
+    )
+
+
+def _memory_conflict_from_orm(o: orm.MemoryConflictORM) -> MemoryConflictRecord:
+    return MemoryConflictRecord(
+        conflict_id=o.conflict_id,
+        workspace_id=o.workspace_id,
+        subject_key=o.subject_key,
+        memory_ids=list(o.memory_ids or []),
+        status=o.status,
+        detected_by=o.detected_by,
+        explanation=o.explanation or "",
+        created_at=o.created_at,
+        resolved_at=o.resolved_at,
+    )
+
+
+def _api_key_to_orm(key: ApiKeyRecord) -> orm.ApiKeyORM:
+    return orm.ApiKeyORM(
+        api_key_id=key.api_key_id,
+        workspace_id=key.workspace_id,
+        principal_id=key.principal_id,
+        key_prefix=key.key_prefix,
+        key_digest=key.key_digest,
+        roles=list(key.roles),
+        created_at=key.created_at,
+        last_used_at=key.last_used_at,
+        revoked_at=key.revoked_at,
+    )
+
+
+def _api_key_from_orm(o: orm.ApiKeyORM) -> ApiKeyRecord:
+    return ApiKeyRecord(
+        api_key_id=o.api_key_id,
+        workspace_id=o.workspace_id,
+        principal_id=o.principal_id,
+        key_prefix=o.key_prefix,
+        key_digest=o.key_digest,
+        roles=list(o.roles or []),
+        created_at=o.created_at,
+        last_used_at=o.last_used_at,
+        revoked_at=o.revoked_at,
     )
 
 
@@ -548,7 +693,96 @@ class SqlRepository:
             return _mem_from_orm(o) if o else None
 
     async def update_memory(self, memory: MemoryItem) -> MemoryItem:
-        return await self.add_memory(memory)
+        ensure_embedding(memory)
+        after = memory
+        async with self._sf() as s:
+            async with s.begin():
+                current = await s.get(orm.MemoryORM, memory.memory_id, with_for_update=True)
+                if current is not None:
+                    before = _mem_from_orm(current)
+                    semantic_change = should_create_memory_version(before, memory)
+                    if semantic_change:
+                        after = memory.model_copy(
+                            update={
+                                "access_count": before.access_count,
+                                "last_accessed_at": before.last_accessed_at,
+                                **_preserved_lifecycle_fields(before, memory),
+                            },
+                            deep=True,
+                        )
+                    if should_create_memory_version(before, after):
+                        max_version = await s.scalar(
+                            select(func.max(orm.MemoryVersionORM.version_no)).where(
+                                orm.MemoryVersionORM.memory_id == memory.memory_id
+                            )
+                        )
+                        version = MemoryVersionRecord(
+                            memory_id=after.memory_id,
+                            workspace_id=after.workspace_id,
+                            version_no=int(max_version or 0) + 1,
+                            snapshot=redacted_memory_snapshot(after),
+                            change_reason="update_memory",
+                        )
+                        await s.merge(_memory_version_to_orm(version))
+                await s.merge(_mem_to_orm(after))
+        return after
+
+    async def bump_memory_access(self, memory_id: str, *, accessed_at: datetime) -> None:
+        async with self._sf() as s:
+            await s.execute(
+                orm.MemoryORM.__table__.update()
+                .where(orm.MemoryORM.memory_id == memory_id)
+                .values(
+                    access_count=orm.MemoryORM.access_count + 1,
+                    last_accessed_at=accessed_at,
+                    updated_at=accessed_at,
+                )
+            )
+            await s.commit()
+
+    async def transition_memory_with_audit(
+        self,
+        memory: MemoryItem,
+        audit: MemoryLifecycleAuditRecord,
+    ) -> tuple[MemoryItem, MemoryLifecycleAuditRecord]:
+        async with self._sf() as s:
+            async with s.begin():
+                current = await s.get(orm.MemoryORM, memory.memory_id, with_for_update=True)
+                if current is None:
+                    raise ValueError(f"memory not found for lifecycle transition: {memory.memory_id}")
+                if current.status != audit.from_status.value:
+                    raise ValueError(
+                        f"stale lifecycle transition for {memory.memory_id}: "
+                        f"expected {audit.from_status.value}, found {current.status}"
+                    )
+                before = _mem_from_orm(current)
+                after = before.model_copy(
+                    update={
+                        "status": memory.status,
+                        "lifecycle_metadata": dict(memory.lifecycle_metadata or {}),
+                        "updated_at": memory.updated_at,
+                    },
+                    deep=True,
+                )
+                if should_create_memory_version(before, after):
+                    max_version = await s.scalar(
+                        select(func.max(orm.MemoryVersionORM.version_no)).where(
+                            orm.MemoryVersionORM.memory_id == memory.memory_id
+                        )
+                    )
+                    version = MemoryVersionRecord(
+                        memory_id=memory.memory_id,
+                        workspace_id=memory.workspace_id,
+                        version_no=int(max_version or 0) + 1,
+                        snapshot=redacted_memory_snapshot(after),
+                        change_reason=f"lifecycle:{audit.reason}",
+                    )
+                    await s.merge(_memory_version_to_orm(version))
+                current.status = memory.status.value
+                current.lifecycle_metadata = dict(memory.lifecycle_metadata or {})
+                current.updated_at = memory.updated_at
+                await s.merge(_lifecycle_audit_to_orm(audit))
+        return memory, audit
 
     async def list_memories(
         self, *, workspace_id: Optional[str] = None, run_id: Optional[str] = None
@@ -586,6 +820,100 @@ class SqlRepository:
                 sim = round(max(0.0, 1.0 - float(dist)), 6)
                 out.append((_mem_from_orm(o), sim))
             return out
+
+    async def add_lifecycle_audit(self, audit: MemoryLifecycleAuditRecord) -> MemoryLifecycleAuditRecord:
+        async with self._sf() as s:
+            await s.merge(_lifecycle_audit_to_orm(audit))
+            await s.commit()
+        return audit
+
+    async def list_lifecycle_audits(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+    ) -> list[MemoryLifecycleAuditRecord]:
+        async with self._sf() as s:
+            stmt = select(orm.MemoryLifecycleAuditORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.MemoryLifecycleAuditORM.workspace_id == workspace_id)
+            if memory_id is not None:
+                stmt = stmt.where(orm.MemoryLifecycleAuditORM.memory_id == memory_id)
+            stmt = stmt.order_by(orm.MemoryLifecycleAuditORM.created_at, orm.MemoryLifecycleAuditORM.audit_id)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_lifecycle_audit_from_orm(o) for o in rows]
+
+    async def upsert_retention_signal(self, signal: MemoryRetentionSignal) -> MemoryRetentionSignal:
+        async with self._sf() as s:
+            await s.merge(_retention_signal_to_orm(signal))
+            await s.commit()
+        return signal
+
+    async def get_retention_signal(self, memory_id: str) -> Optional[MemoryRetentionSignal]:
+        async with self._sf() as s:
+            o = await s.get(orm.MemoryRetentionSignalORM, memory_id)
+            return _retention_signal_from_orm(o) if o else None
+
+    async def list_retention_signals(
+        self,
+        workspace_id: str,
+        memory_ids: Optional[list[str]] = None,
+    ) -> list[MemoryRetentionSignal]:
+        async with self._sf() as s:
+            stmt = select(orm.MemoryRetentionSignalORM).where(orm.MemoryRetentionSignalORM.workspace_id == workspace_id)
+            if memory_ids is not None:
+                if not memory_ids:
+                    return []
+                stmt = stmt.where(orm.MemoryRetentionSignalORM.memory_id.in_(memory_ids))
+            stmt = stmt.order_by(orm.MemoryRetentionSignalORM.memory_id)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_retention_signal_from_orm(o) for o in rows]
+
+    async def add_memory_version(self, version: MemoryVersionRecord) -> MemoryVersionRecord:
+        async with self._sf() as s:
+            await s.merge(_memory_version_to_orm(version))
+            await s.commit()
+        return version
+
+    async def list_memory_versions(self, memory_id: str) -> list[MemoryVersionRecord]:
+        async with self._sf() as s:
+            rows = (
+                await s.execute(
+                    select(orm.MemoryVersionORM)
+                    .where(orm.MemoryVersionORM.memory_id == memory_id)
+                    .order_by(
+                        orm.MemoryVersionORM.version_no,
+                        orm.MemoryVersionORM.created_at,
+                        orm.MemoryVersionORM.version_id,
+                    )
+                )
+            ).scalars().all()
+            return [_memory_version_from_orm(o) for o in rows]
+
+    async def upsert_memory_conflict(self, conflict: MemoryConflictRecord) -> MemoryConflictRecord:
+        async with self._sf() as s:
+            await s.merge(_memory_conflict_to_orm(conflict))
+            await s.commit()
+        return conflict
+
+    async def list_memory_conflicts(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[MemoryConflictRecord]:
+        async with self._sf() as s:
+            stmt = select(orm.MemoryConflictORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.MemoryConflictORM.workspace_id == workspace_id)
+            if status is not None:
+                stmt = stmt.where(orm.MemoryConflictORM.status == status)
+            if memory_id is not None:
+                stmt = stmt.where(orm.MemoryConflictORM.memory_ids.contains([memory_id]))
+            stmt = stmt.order_by(orm.MemoryConflictORM.created_at, orm.MemoryConflictORM.conflict_id)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_memory_conflict_from_orm(o) for o in rows]
 
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog:
@@ -750,6 +1078,54 @@ class SqlRepository:
             )
             rows = (await s.execute(stmt)).scalars().all()
             return [_eval_result_from_orm(o) for o in rows]
+
+    # governance
+    async def add_api_key(self, key: ApiKeyRecord) -> ApiKeyRecord:
+        async with self._sf() as s:
+            await s.merge(_api_key_to_orm(key))
+            await s.commit()
+        return key
+
+    async def list_api_keys(self) -> list[ApiKeyRecord]:
+        async with self._sf() as s:
+            rows = (await s.execute(select(orm.ApiKeyORM).order_by(orm.ApiKeyORM.created_at))).scalars().all()
+            return [_api_key_from_orm(row) for row in rows]
+
+    async def get_api_key_by_prefix(self, key_prefix: str) -> Optional[ApiKeyRecord]:
+        async with self._sf() as s:
+            row = (
+                await s.execute(select(orm.ApiKeyORM).where(orm.ApiKeyORM.key_prefix == key_prefix).limit(1))
+            ).scalar_one_or_none()
+            return _api_key_from_orm(row) if row else None
+
+    async def mark_api_key_used(self, api_key_id: str, *, used_at: datetime) -> None:
+        async with self._sf() as s:
+            await s.execute(
+                orm.ApiKeyORM.__table__.update()
+                .where(orm.ApiKeyORM.api_key_id == api_key_id)
+                .values(last_used_at=used_at)
+            )
+            await s.commit()
+
+    async def workspace_for_run(self, run_id: str) -> Optional[str]:
+        async with self._sf() as s:
+            return await s.scalar(select(orm.RunORM.workspace_id).where(orm.RunORM.run_id == run_id))
+
+    async def workspace_for_step(self, step_id: str) -> Optional[str]:
+        async with self._sf() as s:
+            return await s.scalar(select(orm.StepORM.workspace_id).where(orm.StepORM.step_id == step_id))
+
+    async def workspace_for_access(self, access_id: str) -> Optional[str]:
+        async with self._sf() as s:
+            return await s.scalar(select(orm.AccessLogORM.workspace_id).where(orm.AccessLogORM.access_id == access_id))
+
+    async def workspace_for_memory(self, memory_id: str) -> Optional[str]:
+        async with self._sf() as s:
+            return await s.scalar(select(orm.MemoryORM.workspace_id).where(orm.MemoryORM.memory_id == memory_id))
+
+    async def workspace_for_eval_run(self, eval_run_id: str) -> Optional[str]:
+        async with self._sf() as s:
+            return await s.scalar(select(orm.EvalRunORM.workspace_id).where(orm.EvalRunORM.eval_run_id == eval_run_id))
 
 
 __all__ = ["SqlRepository"]

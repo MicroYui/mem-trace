@@ -70,6 +70,9 @@ def retention_score(mem: MemoryItem) -> float:
 
 
 def _clamp01(value: float) -> float:
+    value = float(value)
+    if not math.isfinite(value):
+        return 0.0
     return max(0.0, min(1.0, value))
 
 
@@ -235,6 +238,11 @@ class RetrievalController:
         request: RetrievalRequest,
         *,
         effective_token_budget: int,
+        reflection_signal_source: str = "fallback_lite",
+        retention_policy_version: str | None = None,
+        scheduler_signal_memory_ids: list[str] | None = None,
+        fallback_lite_memory_ids: list[str] | None = None,
+        retention_policy_versions: list[str] | None = None,
     ) -> None:
         snapshot = build_policy_snapshot(
             request,
@@ -244,6 +252,11 @@ class RetrievalController:
             vector_weight=self._vector_weight,
             compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
             provider_snapshot=self.provider_snapshot,
+            reflection_signal_source=reflection_signal_source,
+            retention_policy_version=retention_policy_version,
+            scheduler_signal_memory_ids=scheduler_signal_memory_ids,
+            fallback_lite_memory_ids=fallback_lite_memory_ids,
+            retention_policy_versions=retention_policy_versions,
         )
         access.policy_version = POLICY_VERSION
         access.policy_snapshot = snapshot
@@ -373,11 +386,41 @@ class RetrievalController:
             },
         }
 
-        # rank accepted by final score desc; variant_3 reflection-lite blends a
-        # retention priority so high-retention memories survive tight budgets.
+        # rank accepted by final score desc; variant_3 blends a retention
+        # priority so high-retention memories survive tight budgets. Prefer
+        # scheduler-persisted signals when present, fall back per-memory to the
+        # deterministic lite score for default benchmark/reproduce behavior.
         if config.enable_reflection_rerank:
+            accepted_memory_ids = [o.memory.memory_id for o in accepted_outcomes]
+            signals = await self._repo.list_retention_signals(
+                workspace_id,
+                memory_ids=accepted_memory_ids,
+            )
+            signals_by_id = {signal.memory_id: signal for signal in signals}
+            scheduler_signal_memory_ids = sorted(set(signals_by_id) & set(accepted_memory_ids))
+            fallback_lite_memory_ids = sorted(set(accepted_memory_ids) - set(scheduler_signal_memory_ids))
+            if scheduler_signal_memory_ids and fallback_lite_memory_ids:
+                signal_source = "mixed_scheduler_v1_fallback_lite"
+            elif scheduler_signal_memory_ids:
+                signal_source = "scheduler_v1"
+            else:
+                signal_source = "fallback_lite"
+            retention_policy_versions = sorted({signal.policy_version for signal in signals if signal.policy_version})
+            retention_policy_version = retention_policy_versions[0] if len(retention_policy_versions) == 1 else None
+            self._attach_policy_snapshot(
+                access,
+                request,
+                effective_token_budget=budget,
+                reflection_signal_source=signal_source,
+                retention_policy_version=retention_policy_version,
+                scheduler_signal_memory_ids=scheduler_signal_memory_ids,
+                fallback_lite_memory_ids=fallback_lite_memory_ids,
+                retention_policy_versions=retention_policy_versions,
+            )
             for outcome in accepted_outcomes:
-                outcome.final_score = round(0.5 * outcome.final_score + 0.5 * retention_score(outcome.memory), 6)
+                signal = signals_by_id.get(outcome.memory.memory_id)
+                priority = signal.reflection_priority if signal is not None else retention_score(outcome.memory)
+                outcome.final_score = round(0.5 * outcome.final_score + 0.5 * priority, 6)
             accepted_outcomes.sort(key=lambda o: (-o.final_score, o.memory.memory_id))
         else:
             accepted_outcomes.sort(key=lambda o: (-o.final_score, o.memory.memory_id))
@@ -553,9 +596,11 @@ class RetrievalController:
             )
 
     async def _bump_access_counts(self, accepted_memories: list[MemoryItem]) -> None:
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
         for mem in accepted_memories:
-            mem.access_count += 1
-            await self._repo.update_memory(mem)
+            await self._repo.bump_memory_access(mem.memory_id, accessed_at=now)
 
     def _context_from_trace(self, trace: RetrievalPipelineTrace) -> MemoryContext:
         access = trace.access_record

@@ -1,0 +1,36 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: memtrace-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm
+    container_name: memtrace-worker
+    command: >
+      uv run celery -A app.async_tasks.celery_app:celery_app worker
+      --loglevel=INFO
+      --queues=memtrace.memory,memtrace.maintenance,memtrace.eval
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MEMTRACE_DATABASE_URL: postgresql+asyncpg://memtrace:memtrace@postgres:5432/memtrace
+      MEMTRACE_SYNC_DATABASE_URL: postgresql+psycopg://memtrace:memtrace@postgres:5432/memtrace
+      MEMTRACE_REDIS_URL: redis://redis:6379/0
+      MEMTRACE_CELERY_BROKER_URL: redis://redis:6379/1
+      MEMTRACE_CELERY_RESULT_BACKEND: redis://redis:6379/2
+      MEMTRACE_ASYNC_TASKS_ENABLED: "true"
+      MEMTRACE_CELERY_TASK_ALWAYS_EAGER: "false"
+      PYTHONPATH: apps/api
+    volumes:
+      - .:/app
+    working_dir: /app

@@ -87,31 +87,31 @@
 architecture §6.8 / §12 / §14 Phase 4、draft §8。**大量 Cold Path 能力共同依赖 Celery+Redis，应作为前置基建优先。**
 
 ### 3.1 异步基础设施
-- [ ] **Celery 异步任务队列** + **多队列拆分**（`memory_queue / maintenance_queue / eval_queue`）。
-- [ ] **Redis**：broker + 热点缓存 + 幂等锁 + active session key。
-- [ ] **Redis-backed candidate buffer + idle flush**（替换当前进程内 buffer）。
-- [ ] **完整写入模式矩阵**：`async / sync_flush / lazy / no_extract`（§12.1）+ LLM extraction 失败 async retry（§12.2）。
+- [x] **Celery 异步任务队列** + **多队列拆分**（`memory_queue / maintenance_queue / eval_queue`）。✅ P4-A1/P4-A2 已完成并审查加固：settings 默认关闭/eager-safe，`make_celery_app(...)` 注册 memory/maintenance/eval queues，JSON-only serialization，eager task wrapper 通过 runtime-level `process_event_extraction(...)` 执行且不依赖 FastAPI `app_state`；task contracts 拒绝 raw secret-like payload/result/error。
+- [x] **Redis**：broker + 热点缓存 + 幂等锁 + active session key。✅ P4-A2/P4-A5 已完成首批基础设施：`RedisIdempotencyStore` 提供 SET NX EX 幂等锁边界，默认 worker path 在 async+redis 启用时懒加载 Redis idempotency；`RedisCandidateBuffer` 维护编码后的 session↔workspace 索引；`docker-compose.dev.yml` 提供 opt-in Redis/worker dev stack，真实 Redis smoke 由 `MEMTRACE_TEST_REDIS_URL` 保护且默认跳过。
+- [x] **Redis-backed candidate buffer + idle flush**（替换当前进程内 buffer）。✅ P4-A3 已完成 async `CandidateBufferProtocol`、确定性 in-process buffer async 化、Redis post-redaction `AgentEvent` JSON buffer、encoded key segments、Lua-backed atomic detach drain、session-only flush 兼容和默认 in-memory / opt-in Redis runtime selection；buffered flush/worker extraction 统一复用 persisted-event 安全检查。
+- [x] **完整写入模式矩阵**：`async / sync_flush / lazy / no_extract`（§12.1）+ async enqueue fallback。✅ P4-A4 已完成 `ExtractionMode.async_ = "async"`、`sync_flush`、`lazy`、`no_extract`，`WriteEventResult.queued/task_id/warnings`，event-id-only `TaskEnvelope` payload，成功 enqueue 不内联抽取，enqueue 失败回退 post-redaction lazy buffer；默认 sync benchmark 行为不变。LLM extraction 失败 async retry 仍以后续生产 worker retry policy 承接。
 
-### 3.2 Reflection / Forgetting 调度器（★ 高价值，基本未实现）
-- [ ] **多维评分模型**：`value_score / freshness_score / trust_score / risk_score`，按 memory_type 的 tau 衰减表。出处：draft §8 / architecture §6.8。
-- [ ] **决策分数分离**：`retrieval_score / retention_score / reflection_priority`。
-- [ ] **真实 Reflection 取代 reflection-lite**：§7 6 策略对比中的 `variant_3` 目前使用确定性 reflection-lite（`retention_score = 0.4*trust + 0.3*freshness + 0.3*min(1, access_count/10)`，仅对 accepted 记忆重排，见 `apps/api/app/retrieval/controller.py`）。它是占位实现，本调度器落地后应以真实 `retention_score / reflection_priority` 取代之，并让 `case_12_reflection_retention` 改由真实衰减/反思信号驱动。
-- [ ] **完整生命周期状态机**：`active→dormant→archived→deleted` + 旁路状态 `pinned/superseded/conflicted/quarantined` 全套转移。
-- [ ] **10 个定时任务**：summarize_completed_runs(✅已有同步版)、extract_procedural_memory(✅)、dedup_memory、conflict_scan、score_memory、decay_memory、archive_memory、quarantine_memory、profile_refresh、reindex_memory。
-- [ ] **审计日志**：scheduler 每次状态变更记录 audit log。
+### 3.2 Reflection / Forgetting 调度器（★ 高价值，P4-B 已落首批）
+- [x] **多维评分模型首版**：P4-B2 已实现 `compute_retention_signals(...)`，使用 `value_score / freshness_score / trust_score / risk_score / access_count / last_accessed_at / expires_at` 计算独立 `retention_score` / `reflection_priority`；过期/高风险记忆降权且不会被评分重新变为可检索。
+- [x] **决策分数分离**：P4-B2/P4-B3 已新增 `memory_retention_signals` 表，scheduler 输出与 `MemoryItem` 内容/状态分离；retrieval 仍使用相关性/gate 分，`variant_3` 仅在 accepted 后用 `reflection_priority` 重排。
+- [x] **真实 Reflection 信号源替代 reflection-lite 优先级**：P4-B3 已让 `variant_3` bulk-load `MemoryRetentionSignal.reflection_priority`，有持久化信号时使用 `reflection_signal_source="scheduler_v1"`，无信号时保留 deterministic fallback `reflection_signal_source="fallback_lite"`，默认 benchmark/reproduce 稳定不变。
+- [x] **完整生命周期状态机首版**：P4-B1 已实现 `active→dormant→archived→deleted` + `pinned/conflicted/quarantined/superseded` 旁路转移；pin 记录 `previous_status`，unpin 恢复安全 previous status；scheduler 不会归档 pinned。
+- [ ] **10 个定时任务补全**：P4-B3 已完成 `score_memory / decay_memory / archive_memory / quarantine_memory / profile_refresh` 的直接 async 函数与 `maintenance.memory` Celery wrapper；仍待后续 P4-C/P4-D 或专门切片补齐 `dedup_memory / conflict_scan / reindex_memory` 以及把已有 summarize/procedural 纳入统一调度编排。
+- [x] **审计日志**：P4-B1 已新增 `MemoryLifecycleAuditRecord` / `memory_lifecycle_audits`，scheduler 生命周期状态变更写 audit log。
 
 ### 3.3 冲突 / 版本管理（在 P2 基础版上补全）
-- [ ] **`memory_versions` 表 + Version Manager**：完整版本审计链。
-- [ ] **`memory_conflicts` 表 + conflict_scan 后台任务**：同 subject+predicate 不同 object 标记。
-- [ ] **7 条完整冲突规则**（时间覆盖、tool result 优先、provenance 解释链）。出处：architecture §6.7 / draft §1.8。
+- [x] **`memory_versions` 表 + Version Manager**：P4-C1 已完成（2026-06-14）。新增 `MemoryVersionRecord` / `memory_versions`、红线脱敏 snapshot helper、semantic-change 判定；`update_memory(...)` 与 lifecycle transition 会记录版本，access-count-only / `last_accessed_at` 更新不记录版本。
+- [x] **`memory_conflicts` 表 + conflict_scan 读路径**：P4-C2 已完成（2026-06-14）。新增 `MemoryConflictRecord` / `memory_conflicts`、ontology-backed conflict scan、HTTP read APIs `GET /v1/memory-conflicts` 与 `GET /v1/memories/{memory_id}/versions`，dashboard table payload 暴露 versions/conflicts。
+- [ ] **7 条完整冲突规则**（时间覆盖、tool result 优先、provenance 解释链）。P4-C 已实现最小可审计冲突扫描与 read-only API；完整 admin/manual resolution workflow 与更细 7-rule resolver 仍后置到 P4-D/后续治理。出处：architecture §6.7 / draft §1.8。
 
-### 3.4 多租户治理（★ 计划内，后置到 Phase 4）
+### 3.4 多租户治理（★ P4-D 已落首批）
 
-> **状态（2026-06-10）**：完整多租户治理**已确认在计划内**，但按性价比后置到 Phase 4——这是排期决策，不是降范围（见 ADR-016）。**前置依赖**：§3.1 异步基建（Redis/Celery，用于配额计数与限流）。**先行最小切片**：托管 demo 前先做 §0 决策的「轻量 Hosted-Demo Safety Mode」（API-key stub + workspace-scoped demo token + 不存原文 secret + demo reset + rate limit + 只读公开报告），它独立、不依赖重型基建，可在 §3.1 之前单独落地。下列为完整治理项：
+> **状态（2026-06-14）**：P4-D governance 首批已完成并保持 default-off：本地/dev/benchmark 默认无 auth、无 quota、无治理依赖；启用 auth 后支持 legacy `MEMTRACE_API_KEY` 与 DB API key 的安全过渡，DB key 存储使用 prefix+digest；资源 ID 路由会先解析 workspace ownership 再授权；quota / redaction policy 均为 config-gated。完整 JWT、membership table、admin conflict review UI、per-tenant quota override 存储与 encrypted raw payload store 仍是后续治理/admin work。
 
-- [ ] **API Key / JWT / workspace 权限系统**（`api_keys` 表）。
-- [ ] **多租户配额 (quota) / 限流**（依赖 §3.1 Redis）。
-- [ ] **字段级脱敏 / 加密存储**（当前仅 digest）+ 完整 redaction 状态机（`none/redacted/digest_only/blocked`）。含 ADR-017 的「`raw_payload_ref` 必须加密且默认关闭」。
+- [x] **API Key / workspace 权限系统首版**（`api_keys` 表）。P4-D1 已新增 prefix+digest API key 模型、`Principal` / `WorkspacePermission`、workspace-scoped role hierarchy、legacy-key fallback disable rule，以及 run/step/access/memory/eval resource-owner lookup helpers；resource-id routes enforce 404 for missing resources and 403 for unauthorized existing resources. JWT / membership table remains future work.
+- [x] **多租户配额 (quota) / 限流首版**。P4-D2 已新增 fixed-window quota service with per-workspace/principal/unit counters (`write_event`, `retrieve_context`, `report_export`, `replay`, `async_task_enqueue`), configurable default limits, default-off behavior, and fail-closed 503 on quota-counter errors only when governance is enabled. Production Redis-backed distributed counter / DB override records remain future work.
+- [x] **字段级脱敏 / redaction 状态机首版**。P4-D3 已新增 `none/redacted/digest_only/blocked` decision policy, default redaction behavior, operator-secret-gated HMAC digest behavior（未配置 digest secret 时不持久化裸 secret 指纹）, blocked-content no-store behavior, and raw payload retention guard requiring governance-enabled encrypted store configuration. Encrypted raw payload persistence itself remains disabled/future work per ADR-017.
 - [ ] **人工审核 memory conflict 管理后台**（admin）。**降级为远期：先做 conflict scan + conflict API + conflict table view，完整 admin workflow 后置。**
 
 ---
@@ -300,14 +300,14 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 4. ~~**Context Compaction**（§9 + §5/§10 协同子集）~~ ✅ **核心闭环已完成 (2026-06-11)**：C0-C5 完成 packer 超预算补偿、durable compaction log、observability/replay、SummarizerProvider、rolling history summary、压缩质量 benchmark/report/replay 同步；剩余协同项为 §5「completed subgoal → summary node」与 §10 Provider 抽象族。
 5. ~~**Failure-aware Negative Memory Injection**（§9.1）~~ ✅ **I1-I7 已完成 (2026-06-14)**：I1 gate 三路 `accept/degrade/reject`、I2 `NegativeEvidence` DTO + shared builder + packer `avoided_attempts`、I3 controller hot-path wiring、I4 replay/metrics/inspect sync、I5 benchmark/evaluator 扩展、I6 文档/项目记忆同步、I7 compaction-negative retained metadata 均已完成。benchmark 已含 `case_10` safe failure learning、`case_11` sanitized destructive failure、`case_13_compaction_retains_negative_lesson`，acceptance 包含 `variant_2_retains_negative_lesson_under_compaction`，当前 reproducibility 为 13/13。
 6. ~~**Phase 3.5 SDK / Adapter / CLI**（§6 前段）~~ ✅ **已完成 (2026-06-12)**：Python SDK + in-process/HTTP backends + LangGraph Adapter + custom-loop / LangGraph 示例 + CLI 入口 + README 三入口说明 + S6 项目记忆同步均已完成，证明「可插拔 runtime」。S6 复审还修复了 `flush_session` 对含 `/` 的 arbitrary `session_id` 的 HTTP/in-process 等价性缺口；TS SDK / OTel / MCP / IDE 插件继续后置。
-7. ~~**完整 6 策略对比 + benchmark 落库**（§7 主线）~~ ✅ **已完成 (2026-06-12)**：6 策略（含 `long_context` / `variant_3` reflection-lite）逐层量化；新增 `case_12_reflection_retention` 与 acceptance `variant_3_retains_high_value_memory_under_budget` + `long_context_shows_token_bloat`；benchmark 现额外落 `eval_*` 表，并已加固同一 repo 重复落库运行的 workspace 隔离；Task 11 已完成 full regression / reproducibility / report-shape / project-memory sync，当前 acceptance 为 12/12。**+reflection 为确定性占位，待 §3.2 调度器落地后取代**（见 §3.2）。原先的 §10/§11 Provider Registry / Key Ontology 候选已被 §13 安全与一致性加固（ADR-020）前置。
+7. ~~**完整 6 策略对比 + benchmark 落库**（§7 主线）~~ ✅ **已完成 (2026-06-12)**：6 策略（含 `long_context` / `variant_3` reflection-lite）逐层量化；新增 `case_12_reflection_retention` 与 acceptance `variant_3_retains_high_value_memory_under_budget` + `long_context_shows_token_bloat`；benchmark 现额外落 `eval_*` 表，并已加固同一 repo 重复落库运行的 workspace 隔离；Task 11 已完成 full regression / reproducibility / report-shape / project-memory sync，当前 acceptance 为 12/12。P4-B 已让 `variant_3` 在存在 scheduler `MemoryRetentionSignal` 时使用持久化 `reflection_priority`，默认 benchmark/reproduce 仍保留 deterministic fallback 以保持稳定。原先的 §10/§11 Provider Registry / Key Ontology 候选已被 §13 安全与一致性加固（ADR-020）前置。
 8. ~~**安全与一致性加固**（§13；源自 2026-06-13 全量审查 §1.1 + 外部审查横切补充）~~ ✅ **已完成 (2026-06-13)**。分四批，**完整覆盖 §13.1/§13.2/§13.3/§13.4**：
    - ~~**8a 安全闭环（§13.1，最优先）**~~ ✅ **已完成 (2026-06-13)**：H1 正向打包脱敏 + H2 `variant_1` gate 收敛 + H3 默认关闭轻量鉴权。
    - ~~**8b 一致性/并发（§13.2）**~~ ✅ **已完成 (2026-06-13)**：H4 后端 isomorphism、H5 `next_sequence_no` 原子化、H6 检索超时 split-brain、H7 gate log 确定性排序、H8 ORM/迁移 compaction 索引对齐均已完成。
    - ~~**8c 横切运行时保障 High（§13.4-A/B，★最高价值）**~~ ✅ **已完成 (2026-06-13)**：Retrieval Policy Contract / policy snapshot + Runtime Invariant & Conformance Suite 已完成，replay 现可区分 data drift vs policy drift，并把 lifecycle/workspace/secret/isomorphism 不变量聚成机器校验套件。
    - ~~**8d 精度/健壮性 + 其余横切（§13.3 + §13.4-C/D/E）**~~ ✅ **已完成 (2026-06-13)**：状态机边界 H13、token 估算独立化 H11、summarizer provenance 验证 H12、benchmark 公平性快照整体化 H14、H15 migration policy、H16 redacted trace bundle、H17 dogfood harness、H18 docs/project-memory closeout 均已完成并验证。§1.1 末条 Low 项保留为后续 opportunistic cleanup，不阻塞 §10/§11。
 9. ~~**Provider Registry + Key Ontology**（§10 + §11）~~ ✅ **已完成 (2026-06-13)**：统一 `LLMExtractionProvider/EmbeddingProvider/SummarizerProvider/JudgeProvider` 抽象族 + capability metadata（承接 §0 embedding 决策、§9 summarizer）；受控记忆 key 本体表 + 抽取侧归一（根治 §1 LLM key 漂移，并消除 §11「本体作为单一真相源」记录的三处单值语义漂移）；benchmark deterministic provider isolation + provider snapshot conformance + P10 closeout + final review hardening（fixed 256-dim provider boundary、`npm -> bun` correction、ontology schema coverage、summarizer factory wiring）均已完成。
-10. **I7 compaction-negative retained facts 已完成；下一主线已选择 Phase 4 异步基建 + 生命周期 + 多租户治理**：执行 `docs/design/PHASE4_PLATFORM_PLAN.md`，默认从 P4-A async foundation 开始（§3.1 Redis buffer/Celery、队列/幂等、async candidate buffer、写入模式矩阵），再进入 P4-B Reflection/Forgetting 调度器 + 10 定时任务 + 审计日志、P4-C memory_versions/conflicts、P4-D API Key/JWT/quota/redaction 完整多租户治理；real Reflection/Forgetting scheduler 将在 P4-B 替换当前 deterministic `variant_3` reflection-lite。TS/MCP/IDE integrations 保持后置。
+10. **Phase 4 async/lifecycle/governance**：`docs/design/PHASE4_PLATFORM_PLAN.md` 的 P4-A1-P4-A5、P4-B1-P4-B4、P4-C1-P4-C2、P4-D1-P4-D4 已完成并完成 full regression 验证。P4-A 覆盖 async settings/contracts、Celery/Redis/idempotency、candidate buffer、写入模式矩阵、async enqueue fallback、dev compose；P4-B 覆盖 lifecycle policy/audit、retention signal storage、访问时间戳、scheduler 函数、maintenance wrapper、`variant_3` scheduler signal source、benchmark/replay closeout；P4-C 覆盖 redacted `memory_versions`、semantic-change versioning、ontology-backed `memory_conflicts`、read-only versions/conflicts API 与 dashboard table surfacing；P4-D 覆盖 default-off API key/workspace authorization、quota service、redaction state machine/raw-payload guard、docs/project-memory closeout。2026-06-14 full Phase 4 review 继续加固了 event extraction 幂等、workspace mismatch 无副作用、lifecycle stale update 防护、secret digest HMAC/omit、replay retained-negative redaction、dashboard version parity 与 SDK Phase 4 读 API。Phase 4 剩余项主要是远期 admin/manual conflict review、完整 JWT/membership、production distributed quota override 和 integrations；TS/MCP/IDE integrations 保持后置。
 11. **Phase 3-B 前端可视化**（§2）：Timeline → State Tree Viewer → Gate Analysis → Sankey。
 12. **Phase 5 高级存储**（§4）：ES/Neo4j 混合检索 + 图谱 provenance + 多路融合 + Query Planner + 多跳检索，**仅在触发条件满足时启动**。
 13. **远期 / scale-only**：§5 状态树其余能力（subgoal 自动推断 / 完整 node_type / MAGE 四操作）、§6 TS SDK / OTel exporter / MCP Server / IDE 插件 / Go-Rust 组件、§7 小规模 LoCoMo/MemoryArena。**均设触发条件，不主动排期。**

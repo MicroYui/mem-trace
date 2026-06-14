@@ -26,6 +26,26 @@ _SECRET_PATTERNS = [
 ]
 
 _REDACTION = "[REDACTED]"
+_SECRET_KEY_TERMS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "credentials",
+    "access_key",
+    "private_key",
+)
+
+
+def is_secret_like_key(key: str | None) -> bool:
+    if not key:
+        return False
+    normalized = key.lower().replace("-", "_")
+    return any(term in normalized for term in _SECRET_KEY_TERMS)
 
 
 def contains_secret(text: str | None) -> bool:
@@ -43,4 +63,4 @@ def redact(text: str | None) -> str:
     return out
 
 
-__all__ = ["contains_secret", "redact"]
+__all__ = ["contains_secret", "redact", "is_secret_like_key"]

@@ -111,6 +111,13 @@ class MemoryStatus(str, Enum):
     deleted = "deleted"
 
 
+class WorkspacePermission(str, Enum):
+    owner = "owner"
+    writer = "writer"
+    reader = "reader"
+    report_reader = "report_reader"
+
+
 class Sensitivity(str, Enum):
     public = "public"
     internal = "internal"
@@ -171,14 +178,20 @@ class ExtractionMode(str, Enum):
     """Freshness-vs-latency policy for turning events into memory (architecture.md §12.1).
 
     - ``sync``: extract inline on write_event (default; deterministic demo/benchmark).
-    - ``buffered``: append the event to a candidate buffer and defer extraction
-      until an explicit or lazy flush (a natural window boundary such as
-      retrieve_context / finish_step). Raw events are still persisted on write,
-      so the buffer only holds derivation work, never unrecoverable facts.
+    - ``buffered``: backward-compatible alias for lazy deferred extraction.
+    - ``async``: enqueue extraction for an async worker; code uses ``async_``
+      because ``async`` is a Python keyword.
+    - ``sync_flush``: defer extraction until an explicit flush only.
+    - ``lazy``: defer extraction until explicit flush or a natural window boundary.
+    - ``no_extract``: persist the event without deriving memory.
     """
 
     sync = "sync"
     buffered = "buffered"
+    async_ = "async"
+    sync_flush = "sync_flush"
+    lazy = "lazy"
+    no_extract = "no_extract"
 
 
 class CompactionKind(str, Enum):
@@ -308,6 +321,7 @@ class MemoryItem(_Base):
     embedding_vector: Optional[list[float]] = None
     risk_flags: RiskFlags = Field(default_factory=RiskFlags)
     status: MemoryStatus = MemoryStatus.active
+    lifecycle_metadata: dict[str, Any] = Field(default_factory=dict)
     superseded_by: Optional[str] = None
     sensitivity: Sensitivity = Sensitivity.internal
     embedding_status: EmbeddingStatus = EmbeddingStatus.pending
@@ -353,6 +367,72 @@ class MemoryGateLog(_Base):
     risk_score: float = 0.0
     final_score: float = 0.0
     created_at: datetime = Field(default_factory=_now)
+
+
+class MemoryLifecycleAuditRecord(_Base):
+    audit_id: str = Field(default_factory=lambda: _new_id("maudit"))
+    workspace_id: str
+    memory_id: str
+    from_status: MemoryStatus
+    to_status: MemoryStatus
+    reason: str
+    actor: str
+    scheduler_run_id: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class MemoryRetentionSignal(_Base):
+    memory_id: str
+    workspace_id: str
+    retention_score: float
+    reflection_priority: float
+    reason: dict[str, Any] = Field(default_factory=dict)
+    policy_version: str
+    scored_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class MemoryVersionRecord(_Base):
+    version_id: str = Field(default_factory=lambda: _new_id("mver"))
+    memory_id: str
+    workspace_id: str
+    version_no: int
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+    change_reason: str
+    created_at: datetime = Field(default_factory=_now)
+
+
+class MemoryConflictRecord(_Base):
+    conflict_id: str = Field(default_factory=lambda: _new_id("mconf"))
+    workspace_id: str
+    subject_key: str
+    memory_ids: list[str] = Field(default_factory=list)
+    status: str = "open"
+    detected_by: str = "conflict_scan_v1"
+    explanation: str = ""
+    created_at: datetime = Field(default_factory=_now)
+    resolved_at: Optional[datetime] = None
+
+
+class ApiKeyRecord(_Base):
+    api_key_id: str = Field(default_factory=lambda: _new_id("apikey"))
+    workspace_id: str
+    principal_id: str
+    key_prefix: str
+    key_digest: str
+    roles: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=_now)
+    last_used_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+
+
+class Principal(_Base):
+    principal_id: str
+    kind: Literal["anonymous", "legacy_api_key", "api_key"]
+    workspace_ids: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+    api_key_id: Optional[str] = None
 
 
 class ProfileEvent(_Base):
@@ -719,6 +799,8 @@ class DashboardTables(_Base):
     eval_cases: list[EvalCaseRecord] = Field(default_factory=list)
     eval_runs: list[EvalRunRecord] = Field(default_factory=list)
     eval_results: list[EvalResultRecord] = Field(default_factory=list)
+    memory_versions: list[MemoryVersionRecord] = Field(default_factory=list)
+    memory_conflicts: list[MemoryConflictRecord] = Field(default_factory=list)
     observability_summary: Optional[ObservabilitySummary] = None
     benchmark_summary: dict[str, dict[str, float]] = Field(default_factory=dict)
 
@@ -768,6 +850,11 @@ class WriteEventResult(_Base):
     # True when the event was appended to the candidate buffer instead of being
     # extracted inline; extraction is deferred to a flush.
     buffered: bool = False
+    # True when extraction was queued for an async worker instead of running
+    # inline or entering the local lazy buffer.
+    queued: bool = False
+    task_id: Optional[str] = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class FlushRequest(_Base):

@@ -3,6 +3,7 @@ def test_sdk_package_importable() -> None:
     from memtrace_sdk import (
         BadRequestError,
         Backend,
+        ForbiddenError,
         HttpBackend,
         InProcessBackend,
         MemTrace,
@@ -19,6 +20,7 @@ def test_sdk_package_importable() -> None:
         "MemTraceError",
         "NotFoundError",
         "BadRequestError",
+        "ForbiddenError",
         "MemTraceLangGraphAdapter",
     ]
     assert MemTrace.__name__ == "MemTrace"
@@ -28,3 +30,4 @@ def test_sdk_package_importable() -> None:
     assert HttpBackend.__name__ == "HttpBackend"
     assert issubclass(NotFoundError, MemTraceError)
     assert issubclass(BadRequestError, MemTraceError)
+    assert issubclass(ForbiddenError, MemTraceError)

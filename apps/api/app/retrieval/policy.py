@@ -27,6 +27,11 @@ def build_policy_snapshot(
     vector_weight: float,
     compaction_notice_reserve_tokens: int,
     provider_snapshot: dict[str, Any] | None = None,
+    reflection_signal_source: str = "fallback_lite",
+    retention_policy_version: str | None = None,
+    scheduler_signal_memory_ids: list[str] | None = None,
+    fallback_lite_memory_ids: list[str] | None = None,
+    retention_policy_versions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-compatible, non-secret retrieval policy snapshot."""
     vector_active = bool(vector_enabled)
@@ -41,6 +46,11 @@ def build_policy_snapshot(
             "vector_weight": float(vector_weight) if vector_active else 0.0,
             "include_all": request.strategy == RetrievalStrategy.long_context,
             "lifecycle_filter_version": LIFECYCLE_FILTER_VERSION,
+            "reflection_signal_source": reflection_signal_source,
+            "retention_policy_version": retention_policy_version,
+            "scheduler_signal_memory_ids": sorted(scheduler_signal_memory_ids or []),
+            "fallback_lite_memory_ids": sorted(fallback_lite_memory_ids or []),
+            "retention_policy_versions": sorted(retention_policy_versions or ([] if retention_policy_version is None else [retention_policy_version])),
         },
         "packer": {
             "token_estimator_version": TOKEN_ESTIMATOR_VERSION,

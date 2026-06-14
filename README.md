@@ -98,7 +98,7 @@ Strategies:
 - `variant_2`: state-aware retrieval plus admission gate.
 - `variant_3`: state-aware + gate + deterministic reflection-lite / retention-rerank (placeholder for the ROADMAP §3.2 Reflection scheduler).
 
-The benchmark covers project preference, failed-branch isolation, workspace isolation, tool-call safety, explicit correction, completed-run reuse, stale rejection, no-memory failure recovery, over-budget context compaction retention, safe failure learning (`case_10`), sanitized destructive-failure handling (`case_11`), and reflection-retention under a tight budget (`case_12_reflection_retention`).
+The benchmark covers project preference, failed-branch isolation, workspace isolation, tool-call safety, explicit correction, completed-run reuse, stale rejection, no-memory failure recovery, over-budget context compaction retention, safe failure learning (`case_10`), sanitized destructive-failure handling (`case_11`), reflection-retention under a tight budget (`case_12_reflection_retention`), and retained negative lessons through compaction metadata (`case_13_compaction_retains_negative_lesson`).
 
 ## Observability and replay
 
@@ -212,6 +212,24 @@ curl http://localhost:8000/health
 
 The compose file uses `pgvector/pgvector:pg16` on host port `5433`. Existing PG15 volumes are not compatible with the PG16 image; switching images may require removing the old volume.
 
+Optional async infrastructure for development lives in `docker-compose.dev.yml` and keeps the core PostgreSQL compose unchanged:
+
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+MEMTRACE_ASYNC_TASKS_ENABLED=true \
+MEMTRACE_REDIS_URL=redis://localhost:6379/0 \
+MEMTRACE_CELERY_BROKER_URL=redis://localhost:6379/1 \
+MEMTRACE_CELERY_RESULT_BACKEND=redis://localhost:6379/2 \
+MEMTRACE_CELERY_TASK_ALWAYS_EAGER=false \
+uv run uvicorn app.main:app --app-dir apps/api --reload
+```
+
+Real Redis smoke coverage is opt-in and skipped by default:
+
+```bash
+MEMTRACE_TEST_REDIS_URL=redis://localhost:6379/15 uv run --extra dev pytest apps/api/tests/integration/test_async_infra.py -q
+```
+
 ## Optional real LLM validation bench
 
 The real LLM bench is manual and opt-in because it requires network access and a live OpenAI-compatible API key:
@@ -243,4 +261,4 @@ uv run python -m app.benchmark.runner --output-dir reports
 
 ## Roadmap
 
-The completed MVP, Phase 3-A observability work, Context Compaction C0-C5, Failure-aware Negative Memory Injection I1-I6, Phase 3.5 SDK/LangGraph adapter/CLI work, the completed 6-strategy benchmark/eval-table slice, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). ROADMAP §13 Security & Consistency Hardening is complete through H18, including migration policy checks, redacted trace bundle export/validation, and deterministic dogfood harnesses; the next recommended areas are Provider Registry / Controlled Memory Key Ontology (§10/§11), unless deferred I7 compaction-negative retention is explicitly selected first.
+The completed MVP, Phase 3-A observability work, Context Compaction C0-C5 plus I7 retained-negative metadata, Failure-aware Negative Memory Injection I1-I7, Phase 3.5 SDK/LangGraph adapter/CLI work, the completed 6-strategy benchmark/eval-table slice, Security & Consistency Hardening, Provider Registry / Controlled Memory Key Ontology, and future priorities are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview of the core idea, read [`docs/blog/why-agent-memory-is-not-just-rag.md`](docs/blog/why-agent-memory-is-not-just-rag.md). Current Phase 4 work has completed P4-A async foundation, P4-B lifecycle/reflection scheduler, P4-C memory versions/conflicts, and P4-D default-off governance; remaining roadmap priorities are admin/manual governance depth, integrations, and later advanced storage/UI work.

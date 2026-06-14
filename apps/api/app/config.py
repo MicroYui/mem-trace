@@ -21,6 +21,26 @@ class Settings(BaseSettings):
     # deterministic benchmarks, and examples continue to run without secrets.
     auth_enabled: bool = False
     api_key: str | None = None
+    # Phase 4 governance remains default-off so local/dev/benchmark/reproduce
+    # keep their historical no-auth deterministic behavior unless explicitly
+    # enabled by the operator.
+    governance_enabled: bool = False
+    allow_legacy_api_key: bool = False
+    api_key_digest_salt: str = ""
+    quota_enabled: bool = False
+    quota_window_seconds: int = 60
+    quota_write_event_per_window: int = 600
+    quota_retrieve_context_per_window: int = 600
+    quota_report_export_per_window: int = 60
+    quota_replay_per_window: int = 120
+    quota_async_task_enqueue_per_window: int = 600
+    redaction_policy_default_state: str = "redacted"
+    # Optional secret used to compute non-enumerable redaction digests. When
+    # unset, secret payload digests are omitted rather than storing bare SHA-256
+    # fingerprints of low-entropy sensitive content.
+    redaction_digest_secret: str = ""
+    raw_payload_retention_enabled: bool = False
+    raw_payload_store_url: str = ""
     embedding_dim: int = 256
     retrieval_token_budget: int = 512
     retrieval_timeout_ms: int = 2000
@@ -79,6 +99,18 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_model: str = "text-embedding-3-small"
     embedding_timeout_ms: int = 8000
+    # Phase 4 async foundation. Defaults are deliberately eager/offline-safe:
+    # importing settings or running tests must not open Redis/Celery network
+    # connections unless async tasks are explicitly enabled.
+    redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str = "memory://"
+    celery_result_backend: str | None = None
+    async_tasks_enabled: bool = False
+    celery_task_always_eager: bool = True
+    memory_queue_name: str = "memtrace.memory"
+    maintenance_queue_name: str = "memtrace.maintenance"
+    eval_queue_name: str = "memtrace.eval"
+    async_task_default_ttl_seconds: int = 3600
 
 
 @lru_cache
