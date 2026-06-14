@@ -6,6 +6,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import get_quota_service, get_runtime, get_telemetry_service, require_api_key
+from app.config import get_settings
+from app.governance.admin import require_admin_owner
 from app.governance.permissions import require_workspace_permission
 from app.governance.quota import QuotaService, QuotaUnit
 from app.runtime.memory_runtime import (
@@ -490,7 +492,17 @@ async def dashboard_tables(
         _authz(principal, workspace_id, WorkspacePermission.report_reader)
     elif principal.kind != "anonymous" and "*" not in principal.workspace_ids:
         raise HTTPException(status_code=403, detail="workspace_id required")
-    return await rt.dashboard_tables(workspace_id=workspace_id)
+    # Owner-only maintenance/admin governance tables are gated behind the same
+    # default-off owner policy as the /v1/admin routes; report-reader and
+    # anonymous dashboard callers never see admin audit/maintenance/quota rows.
+    include_admin = False
+    if workspace_id is not None:
+        try:
+            require_admin_owner(principal, workspace_id, get_settings())
+            include_admin = True
+        except HTTPException:
+            include_admin = False
+    return await rt.dashboard_tables(workspace_id=workspace_id, include_admin=include_admin)
 
 
 __all__ = ["router"]

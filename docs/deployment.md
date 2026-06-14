@@ -69,6 +69,52 @@ When auth is enabled, `/v1` routes require `Authorization: Bearer <token>` or `X
 
 Phase 4 governance adds default-off API-key storage, workspace authorization, and quota checks. Enable these only when you have configured the expected repository-backed runtime and operational policy. Missing resources should remain 404, unauthorized existing resources should be 403, and invalid same-run workspace overrides should remain 400.
 
+## Admin governance API (operator-only, default-off)
+
+The maintenance scheduler and governance admin endpoints under `/v1/admin` are an operator-only surface. They are **disabled by default** and unreachable unless `MEMTRACE_ADMIN_API_ENABLED=true`. When enabled, every admin route requires a real authenticated workspace **owner** principal (anonymous/legacy/global/wildcard principals are rejected), so admin use also requires auth and governance:
+
+```bash
+MEMTRACE_ADMIN_API_ENABLED=true \
+MEMTRACE_AUTH_ENABLED=true \
+MEMTRACE_GOVERNANCE_ENABLED=true \
+uv run uvicorn app.main:app --app-dir apps/api
+```
+
+There is **no admin UI** and **no SDK admin facade** in this slice; the surface is HTTP-only. Use an owner API key (`Authorization: Bearer <owner-key>` or `X-API-Key`). Examples:
+
+```bash
+# Start a maintenance run (direct execution). Omit "operations" to use the
+# configured default operation set.
+curl -X POST http://localhost:8000/v1/admin/maintenance/runs \
+  -H "X-API-Key: $OWNER_KEY" -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_1","operations":["score_memory","conflict_scan"],"dry_run":true}'
+
+# List runs and inspect attempts.
+curl "http://localhost:8000/v1/admin/maintenance/runs?workspace_id=ws_1" -H "X-API-Key: $OWNER_KEY"
+curl "http://localhost:8000/v1/admin/maintenance/runs/$RUN_ID/attempts" -H "X-API-Key: $OWNER_KEY"
+
+# Create an API key (raw key returned ONCE; only prefix+digest are stored).
+curl -X POST http://localhost:8000/v1/admin/api-keys \
+  -H "X-API-Key: $OWNER_KEY" -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_1","principal_id":"alice","roles":["writer"]}'
+curl -X POST http://localhost:8000/v1/admin/api-keys/$API_KEY_ID/revoke -H "X-API-Key: $OWNER_KEY"
+
+# Quota overrides (per-principal beats workspace-wide beats settings default).
+curl -X PUT http://localhost:8000/v1/admin/quota-limits \
+  -H "X-API-Key: $OWNER_KEY" -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"ws_1","principal_id":"alice","unit":"write_event","limit":600,"window_seconds":60}'
+
+# Manual lifecycle transition and conflict resolution.
+curl -X POST http://localhost:8000/v1/admin/memories/$MEMORY_ID/status \
+  -H "X-API-Key: $OWNER_KEY" -H 'Content-Type: application/json' \
+  -d '{"to_status":"pinned","reason":"operator decision"}'
+curl -X POST http://localhost:8000/v1/admin/memory-conflicts/$CONFLICT_ID/resolve \
+  -H "X-API-Key: $OWNER_KEY" -H 'Content-Type: application/json' \
+  -d '{"action":"choose_winner","winner_memory_id":"'$WINNER'","reason":"owner adjudication"}'
+```
+
+`enqueue=true` on a maintenance run requires `MEMTRACE_ASYNC_TASKS_ENABLED=true` and a configured Celery maintenance worker; otherwise it returns HTTP 400. Admin actions are recorded as redacted audit rows and surfaced (workspace-scoped) in `GET /v1/dashboard/tables?workspace_id=...` and the observability report's maintenance section. Already-resolved conflicts cannot be re-resolved (HTTP 409).
+
 ## Redaction and raw payload safety
 
 MemTrace redacts secrets before prompt context and observability output. Raw payload retention is disabled by default. Any future raw-payload storage must be encrypted/configured explicitly and should not be enabled for ordinary local demos.

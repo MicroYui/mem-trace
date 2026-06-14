@@ -18,6 +18,9 @@ from app.runtime.models import (
     CompactionKind,
     CompactionProvider,
     ContextCompactionLog,
+    MaintenanceOperation,
+    MaintenanceRunRecord,
+    MaintenanceTaskAttemptRecord,
     MemoryItem,
     MemoryType,
     ObservabilityReportRequest,
@@ -25,6 +28,8 @@ from app.runtime.models import (
     RetainedFact,
     RetrievalRequest,
     RetrievalStrategy,
+    SchedulerRunStatus,
+    SchedulerTaskStatus,
     StartRunRequest,
     StartStepRequest,
 )
@@ -485,3 +490,54 @@ async def test_report_writer_rejects_symlink_loop_as_value_error(monkeypatch, tm
 
     with pytest.raises(ValueError, match="unsafe output_dir"):
         await runtime.write_observability_report(ObservabilityReportRequest(output_dir="reports"))
+
+
+@pytest.mark.asyncio
+async def test_report_includes_maintenance_summary(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="ws_report")
+    # A completed run plus a run with a failed attempt (redacted error_summary).
+    await repo.add_maintenance_run(
+        MaintenanceRunRecord(
+            scheduler_run_id="msrun_ok",
+            workspace_id="ws_report",
+            operations=[MaintenanceOperation.score_memory],
+            status=SchedulerRunStatus.completed,
+        )
+    )
+    failed_run = await repo.add_maintenance_run(
+        MaintenanceRunRecord(
+            scheduler_run_id="msrun_bad",
+            workspace_id="ws_report",
+            operations=[MaintenanceOperation.dedup_memory],
+            status=SchedulerRunStatus.failed,
+        )
+    )
+    await repo.add_maintenance_task_attempt(
+        MaintenanceTaskAttemptRecord(
+            scheduler_run_id=failed_run.scheduler_run_id,
+            workspace_id="ws_report",
+            operation=MaintenanceOperation.dedup_memory,
+            status=SchedulerTaskStatus.failed,
+            error_summary="dedup_memory failed",
+        )
+    )
+
+    result = await runtime.write_observability_report(
+        ObservabilityReportRequest(workspace_id="ws_report", output_dir="reports", include_replay=False)
+    )
+    payload = json.loads((tmp_path / result.json_path).read_text())
+    maintenance = payload["maintenance"]
+    assert maintenance["run_count"] == 2
+    assert maintenance["runs_by_status"] == {"completed": 1, "failed": 1}
+    assert maintenance["recent_failed_attempts"] == [
+        {
+            "scheduler_run_id": "msrun_bad",
+            "operation": "dedup_memory",
+            "error_summary": "dedup_memory failed",
+        }
+    ]
+    markdown = (tmp_path / result.markdown_path).read_text()
+    assert "## Maintenance" in markdown
+    assert "dedup_memory" in markdown

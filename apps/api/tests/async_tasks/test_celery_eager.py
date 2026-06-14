@@ -9,6 +9,10 @@ from app.async_tasks.idempotency import InMemoryIdempotencyStore
 from app.async_tasks import tasks as task_module
 from app.async_tasks.tasks import process_event_extraction, process_memory_maintenance, set_task_dependencies
 from app.config import Settings
+from app.memory import maintenance
+from app.runtime.models import MaintenanceOperation
+from app.runtime.models import MemoryItem, MemoryType
+from app.runtime.repository import InMemoryRepository
 
 
 def _settings() -> Settings:
@@ -145,16 +149,16 @@ def test_task_idempotency_skips_duplicate_until_release():
 
 
 def test_maintenance_task_uses_workspace_operation_and_idempotency():
-    calls: list[tuple[str, str]] = []
     store = InMemoryIdempotencyStore()
-
-    class FakeRepo:
-        async def list_memories(self, *, workspace_id=None, run_id=None):
-            calls.append(("list", workspace_id))
-            return []
+    repo = InMemoryRepository()
+    asyncio.run(
+        repo.add_memory(
+            MemoryItem(workspace_id="ws_maint", memory_type=MemoryType.project, content="Use bun")
+        )
+    )
 
     class FakeRuntime:
-        _repo = FakeRepo()
+        _repo = repo
 
     envelope = TaskEnvelope(
         task_type="maintenance.memory",
@@ -170,10 +174,73 @@ def test_maintenance_task_uses_workspace_operation_and_idempotency():
         set_task_dependencies(runtime_factory=None, idempotency_store=None)
 
     assert first["status"] == "completed"
-    assert first["metadata"]["operation"] == "score_memory"
-    assert first["metadata"]["scored_count"] == 0
+    assert first["metadata"]["operations"] == ["score_memory"]
+    assert first["metadata"]["completed_count"] == 1
     assert second["duplicate"] is True
-    assert calls == [("list", "ws_maint")]
+
+    runs = asyncio.run(repo.list_maintenance_runs(workspace_id="ws_maint"))
+    assert len(runs) == 1
+    attempts = asyncio.run(repo.list_maintenance_task_attempts(scheduler_run_id=runs[0].scheduler_run_id))
+    assert len(attempts) == 1
+    assert attempts[0].result["scored_count"] == 1
+
+
+def test_maintenance_task_accepts_operations_list_payload():
+    store = InMemoryIdempotencyStore()
+    repo = InMemoryRepository()
+
+    class FakeRuntime:
+        _repo = repo
+
+    envelope = TaskEnvelope(
+        task_type="maintenance.memory",
+        workspace_id="ws_maint",
+        dedupe_key="maintenance:multi:ws_maint:window_1",
+        payload={"operations": ["score_memory", "profile_refresh"], "requested_by": "celery:test"},
+    )
+    set_task_dependencies(runtime_factory=lambda: FakeRuntime(), idempotency_store=store)
+    try:
+        result = process_memory_maintenance(envelope.model_dump(mode="json"))
+    finally:
+        set_task_dependencies(runtime_factory=None, idempotency_store=None)
+
+    assert result["status"] == "completed"
+    assert result["metadata"]["operations"] == ["score_memory", "profile_refresh"]
+    assert result["metadata"]["completed_count"] == 2
+
+
+def test_maintenance_task_failed_run_returns_failed_and_releases_idempotency(monkeypatch):
+    store = InMemoryIdempotencyStore()
+    repo = InMemoryRepository()
+    calls = 0
+
+    async def boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("maintenance failed")
+
+    class FakeRuntime:
+        _repo = repo
+
+    envelope = TaskEnvelope(
+        task_type="maintenance.memory",
+        workspace_id="ws_maint",
+        dedupe_key="maintenance:failed:ws_maint:window_1",
+        payload={"operation": "score_memory", "requested_by": "celery:test"},
+    )
+    monkeypatch.setitem(maintenance.OPERATION_HANDLERS, MaintenanceOperation.score_memory, boom)
+    set_task_dependencies(runtime_factory=lambda: FakeRuntime(), idempotency_store=store)
+    try:
+        first = process_memory_maintenance(envelope.model_dump(mode="json"))
+        second = process_memory_maintenance(envelope.model_dump(mode="json"))
+    finally:
+        set_task_dependencies(runtime_factory=None, idempotency_store=None)
+
+    assert first["status"] == "failed"
+    assert first["error"] == "maintenance run failed"
+    assert first["metadata"]["failed_count"] == 1
+    assert second["status"] == "failed"
+    assert calls == 2
 
 
 async def test_in_memory_idempotency_store_expires_keys():

@@ -298,3 +298,159 @@ async def test_dashboard_tables_include_versions_without_conflicts():
     assert resp.status_code == 200
     assert [row["memory_id"] for row in resp.json()["memory_versions"]] == [memory.memory_id]
     assert resp.json()["memory_conflicts"] == []
+
+
+async def _seed_admin_records(repo: InMemoryRepository) -> str:
+    from app.runtime.models import (
+        AdminActionAuditRecord,
+        MaintenanceOperation,
+        MaintenanceRunRecord,
+        MaintenanceTaskAttemptRecord,
+        QuotaLimitRecord,
+        SchedulerRunStatus,
+        SchedulerTaskStatus,
+    )
+
+    run = await repo.add_maintenance_run(
+        MaintenanceRunRecord(
+            workspace_id="dash_ws",
+            operations=[MaintenanceOperation.score_memory],
+            status=SchedulerRunStatus.completed,
+        )
+    )
+    await repo.add_maintenance_task_attempt(
+        MaintenanceTaskAttemptRecord(
+            scheduler_run_id=run.scheduler_run_id,
+            workspace_id="dash_ws",
+            operation=MaintenanceOperation.score_memory,
+            status=SchedulerTaskStatus.completed,
+        )
+    )
+    await repo.add_admin_action_audit(
+        AdminActionAuditRecord(
+            workspace_id="dash_ws",
+            principal_id="owner_1",
+            action="start_maintenance_run",
+            target_type="maintenance_run",
+            target_id=run.scheduler_run_id,
+        )
+    )
+    await repo.upsert_quota_limit(
+        QuotaLimitRecord(
+            workspace_id="dash_ws",
+            principal_id="alice",
+            unit="write_event",
+            limit=5,
+            window_seconds=60,
+            created_by="admin",
+        )
+    )
+    # Another workspace's records must never leak into dash_ws dashboard.
+    other_run = await repo.add_maintenance_run(
+        MaintenanceRunRecord(
+            workspace_id="other_ws",
+            operations=[MaintenanceOperation.score_memory],
+            status=SchedulerRunStatus.completed,
+        )
+    )
+    await repo.add_admin_action_audit(
+        AdminActionAuditRecord(
+            workspace_id="other_ws",
+            principal_id="owner_2",
+            action="start_maintenance_run",
+            target_type="maintenance_run",
+            target_id=other_run.scheduler_run_id,
+        )
+    )
+    return run.scheduler_run_id
+
+
+async def test_dashboard_admin_tables_visible_only_to_admin_owner(monkeypatch):
+    from app.api.deps import app_state
+    from app.config import get_settings
+    from app.governance.auth import create_api_key_record
+    from app.main import app as main_app
+    from app.runtime.models import WorkspacePermission
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("MEMTRACE_ADMIN_API_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_GOVERNANCE_ENABLED", "true")
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="dash_ws")
+    app_state.repository = repo
+    main_app.dependency_overrides[get_runtime] = lambda: runtime
+    from app.api.deps import get_repository
+
+    main_app.dependency_overrides[get_repository] = lambda: repo
+    run_id = await _seed_admin_records(repo)
+    owner_raw = "mt_owner_dash_ws"
+    await repo.add_api_key(
+        create_api_key_record(
+            owner_raw, workspace_id="dash_ws", principal_id="owner_1", roles=[WorkspacePermission.owner.value]
+        )
+    )
+    reader_raw = "mt_reader_dash_ws"
+    await repo.add_api_key(
+        create_api_key_record(
+            reader_raw, workspace_id="dash_ws", principal_id="reader_1", roles=[WorkspacePermission.report_reader.value]
+        )
+    )
+
+    try:
+        transport = httpx.ASGITransport(app=main_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            owner_resp = await client.get(
+                "/v1/dashboard/tables?workspace_id=dash_ws", headers={"X-API-Key": owner_raw}
+            )
+            reader_resp = await client.get(
+                "/v1/dashboard/tables?workspace_id=dash_ws", headers={"X-API-Key": reader_raw}
+            )
+    finally:
+        main_app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    # Owner sees only dash_ws admin governance rows (no other_ws leakage).
+    assert owner_resp.status_code == 200
+    owner_body = owner_resp.json()
+    assert [r["scheduler_run_id"] for r in owner_body["maintenance_runs"]] == [run_id]
+    assert [a["operation"] for a in owner_body["maintenance_task_attempts"]] == ["score_memory"]
+    assert [a["target_id"] for a in owner_body["admin_action_audits"]] == [run_id]
+    assert [q["principal_id"] for q in owner_body["quota_limits"]] == ["alice"]
+
+    # report_reader can read the dashboard but NOT the owner-only admin tables.
+    assert reader_resp.status_code == 200
+    reader_body = reader_resp.json()
+    assert reader_body["maintenance_runs"] == []
+    assert reader_body["maintenance_task_attempts"] == []
+    assert reader_body["admin_action_audits"] == []
+    assert reader_body["quota_limits"] == []
+
+
+async def test_dashboard_admin_tables_hidden_from_anonymous_and_unscoped():
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo, default_workspace_id="dash_ws")
+    await _seed_admin_records(repo)
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_runtime] = lambda: runtime
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # No auth -> anonymous principal; admin tables must stay empty even when
+        # a workspace is requested, and unscoped must not leak across workspaces.
+        scoped = await client.get("/v1/dashboard/tables?workspace_id=dash_ws")
+        unscoped = await client.get("/v1/dashboard/tables")
+
+    assert scoped.status_code == 200
+    scoped_body = scoped.json()
+    assert scoped_body["maintenance_runs"] == []
+    assert scoped_body["admin_action_audits"] == []
+    assert scoped_body["quota_limits"] == []
+
+    assert unscoped.status_code == 200
+    unscoped_body = unscoped.json()
+    assert unscoped_body["maintenance_runs"] == []
+    assert unscoped_body["admin_action_audits"] == []
+    assert unscoped_body["quota_limits"] == []

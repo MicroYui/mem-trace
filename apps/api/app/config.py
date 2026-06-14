@@ -35,6 +35,25 @@ class Settings(BaseSettings):
     quota_report_export_per_window: int = 60
     quota_replay_per_window: int = 120
     quota_async_task_enqueue_per_window: int = 600
+    # Maintenance/admin governance depth. Admin APIs are an operator surface and
+    # stay default-off; when enabled, admin mutation helpers require a real
+    # owner principal and never allow anonymous local bypasses.
+    admin_api_enabled: bool = False
+    maintenance_default_operations: list[str] = Field(
+        default_factory=lambda: [
+            "score_memory",
+            "conflict_scan",
+            "dedup_memory",
+            "decay_memory",
+            "archive_memory",
+            "quarantine_memory",
+            "reindex_memory",
+            "summary_refresh",
+            "procedural_refresh",
+            "profile_refresh",
+        ]
+    )
+    maintenance_max_operations_per_run: int = 10
     redaction_policy_default_state: str = "redacted"
     # Optional secret used to compute non-enumerable redaction digests. When
     # unset, secret payload digests are omitted rather than storing bare SHA-256

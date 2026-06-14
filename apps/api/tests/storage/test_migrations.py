@@ -12,6 +12,7 @@ import pytest
 
 from app.storage.orm import (
     AccessLogORM,
+    AdminActionAuditORM,
     ApiKeyORM,
     Base,
     ContextCompactionORM,
@@ -23,6 +24,9 @@ from app.storage.orm import (
     MemoryORM,
     MemoryRetentionSignalORM,
     MemoryVersionORM,
+    MaintenanceRunORM,
+    MaintenanceTaskAttemptORM,
+    QuotaLimitORM,
 )
 
 
@@ -35,6 +39,7 @@ LIFECYCLE_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0008_phase4_lifec
 RETENTION_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0009_memory_retention_signals.py"
 VERSIONS_CONFLICTS_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0010_memory_versions_conflicts.py"
 GOVERNANCE_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0011_governance.py"
+MAINTENANCE_ADMIN_MIGRATION_PATH = ROOT / "migrations" / "versions" / "0012_maintenance_admin_governance.py"
 
 
 def _migration_files() -> list[Path]:
@@ -159,6 +164,17 @@ def _load_versions_conflicts_migration():
 
 def _load_governance_migration():
     spec = importlib.util.spec_from_file_location("migration_0011_governance", GOVERNANCE_MIGRATION_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_maintenance_admin_migration():
+    spec = importlib.util.spec_from_file_location(
+        "migration_0012_maintenance_admin_governance", MAINTENANCE_ADMIN_MIGRATION_PATH
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -310,6 +326,31 @@ def test_phase4_governance_api_key_orm_table_matches_plan():
     assert indexes["ix_api_keys_prefix_revoked"] == ("key_prefix", "revoked_at")
 
 
+def test_madm_a_maintenance_admin_orm_tables_match_plan():
+    assert Base.metadata.tables["maintenance_runs"] is MaintenanceRunORM.__table__
+    assert Base.metadata.tables["maintenance_task_attempts"] is MaintenanceTaskAttemptORM.__table__
+    assert Base.metadata.tables["admin_action_audits"] is AdminActionAuditORM.__table__
+    assert Base.metadata.tables["quota_limits"] is QuotaLimitORM.__table__
+    assert str(MaintenanceRunORM.__table__.c.summary.server_default.arg) == "'{}'::jsonb"
+    assert str(MaintenanceRunORM.__table__.c.warnings.server_default.arg) == "'[]'::jsonb"
+    assert str(MaintenanceTaskAttemptORM.__table__.c.result.server_default.arg) == "'{}'::jsonb"
+    assert str(AdminActionAuditORM.__table__.c.audit_metadata.server_default.arg) == "'{}'::jsonb"
+    attempt_constraints = {
+        constraint.name: tuple(constraint.columns.keys())
+        for constraint in MaintenanceTaskAttemptORM.__table__.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert attempt_constraints["uq_maintenance_task_attempts_run_operation"] == ("scheduler_run_id", "operation")
+    quota_indexes = {index.name: tuple(column.name for column in index.columns) for index in QuotaLimitORM.__table__.indexes}
+    assert quota_indexes["uq_quota_limits_workspace_unit"] == ("workspace_id", "unit")
+    assert quota_indexes["uq_quota_limits_workspace_principal_unit"] == (
+        "workspace_id",
+        "principal_id",
+        "unit",
+    )
+    assert QuotaLimitORM.__table__.indexes
+
+
 def test_phase4_lifecycle_and_retention_migrations_declare_chain_and_operations():
     lifecycle = _load_lifecycle_migration()
     retention = _load_retention_migration()
@@ -349,6 +390,24 @@ def test_phase4_governance_migration_declares_chain_and_operations():
     assert "ix_api_keys_workspace_id" in source
     assert "ix_api_keys_principal_id" in source
     assert "ix_api_keys_prefix_revoked" in source
+    assert "server_default=sa.text(\"'[]'::jsonb\")" in source
+
+
+def test_madm_a_maintenance_admin_migration_declares_chain_and_operations():
+    migration = _load_maintenance_admin_migration()
+    assert migration.revision == "0012_maintenance_admin_governance"
+    assert migration.down_revision == "0011_governance"
+    source = MAINTENANCE_ADMIN_MIGRATION_PATH.read_text()
+    assert '"maintenance_runs"' in source
+    assert '"maintenance_task_attempts"' in source
+    assert '"admin_action_audits"' in source
+    assert '"quota_limits"' in source
+    assert "uq_maintenance_task_attempts_run_operation" in source
+    assert "uq_quota_limits_workspace_unit" in source
+    assert "postgresql_where=sa.text(\"principal_id IS NULL\")" in source
+    assert "uq_quota_limits_workspace_principal_unit" in source
+    assert "postgresql_where=sa.text(\"principal_id IS NOT NULL\")" in source
+    assert "server_default=sa.text(\"'{}'::jsonb\")" in source
     assert "server_default=sa.text(\"'[]'::jsonb\")" in source
 
 

@@ -81,6 +81,7 @@ async def write_observability_report(
         "summary": summary.model_dump(mode="json"),
         "accesses": access_rows,
         "compactions": compaction_rows,
+        "maintenance": await _maintenance_summary(repo, workspace_id=request.workspace_id),
         "replays": [_safe_replay_dump(replay) for replay in replays],
     }
 
@@ -131,6 +132,37 @@ async def _filtered_accesses(
         accesses = [access for access in accesses if access.run_id == run_id]
     accesses.sort(key=lambda access: (access.created_at, access.access_id))
     return accesses
+
+
+async def _maintenance_summary(repo: Repository, *, workspace_id: str | None) -> dict[str, Any]:
+    """Summarize maintenance runs/attempts for the observability report.
+
+    Counts runs by status and surfaces recent failed attempts using the
+    orchestrator's already-redacted ``error_summary``; no raw stack traces.
+    """
+    runs = await repo.list_maintenance_runs(workspace_id=workspace_id)
+    status_counts: dict[str, int] = {}
+    for run in runs:
+        status_counts[run.status.value] = status_counts.get(run.status.value, 0) + 1
+    failed_attempts: list[dict[str, Any]] = []
+    for run in runs:
+        attempts = await repo.list_maintenance_task_attempts(scheduler_run_id=run.scheduler_run_id)
+        for attempt in attempts:
+            if attempt.status.value != "failed":
+                continue
+            failed_attempts.append(
+                {
+                    "scheduler_run_id": attempt.scheduler_run_id,
+                    "operation": attempt.operation.value,
+                    "error_summary": attempt.error_summary,
+                }
+            )
+    failed_attempts.sort(key=lambda row: (row["scheduler_run_id"], row["operation"]))
+    return {
+        "run_count": len(runs),
+        "runs_by_status": dict(sorted(status_counts.items())),
+        "recent_failed_attempts": failed_attempts[:50],
+    }
 
 
 async def _candidate_memories(repo: Repository, gate_logs: list[MemoryGateLog]) -> list[MemoryItem]:
@@ -343,6 +375,27 @@ def _render_markdown(
         )
     if not payload.get("compactions"):
         lines.append("| none | - | - | 0/0 | 0 |  |  |")
+
+    maintenance = payload.get("maintenance", {})
+    lines.extend(
+        [
+            "",
+            "## Maintenance",
+            "",
+            f"- Run count: {maintenance.get('run_count', 0)}",
+            f"- Runs by status: {_md_text(maintenance.get('runs_by_status', {}))}",
+            "",
+            "| Scheduler Run | Operation | Error Summary |",
+            "|---|---|---|",
+        ]
+    )
+    for row in maintenance.get("recent_failed_attempts", []):
+        lines.append(
+            f"| `{_md_text(row['scheduler_run_id'])}` | {_md_text(row['operation'])} | "
+            f"{_md_text(row.get('error_summary'))} |"
+        )
+    if not maintenance.get("recent_failed_attempts"):
+        lines.append("| none | - | - |")
 
     lines.extend(
         [

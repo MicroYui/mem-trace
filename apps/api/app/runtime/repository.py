@@ -13,6 +13,7 @@ from datetime import datetime
 
 from app.retrieval.similarity import cosine_similarity, stable_embedding
 from app.runtime.models import (
+    AdminActionAuditRecord,
     ApiKeyRecord,
     AgentEvent,
     AgentRun,
@@ -30,14 +31,50 @@ from app.runtime.models import (
     MemoryItem,
     MemoryRetentionSignal,
     MemoryStatus,
+    MaintenanceRunRecord,
+    MaintenanceTaskAttemptRecord,
     MemoryVersionRecord,
     MemoryConflictRecord,
     ProfileEvent,
+    QuotaLimitRecord,
     StateNode,
 )
 from app.memory.versioning import redacted_memory_snapshot, should_create_memory_version
 
 EMBED_DIM = 256
+MAX_ADMIN_PAGE_SIZE = 500
+
+
+def _validate_pagination(*, limit: int, offset: int) -> None:
+    if limit < 1 or limit > MAX_ADMIN_PAGE_SIZE:
+        raise ValueError("limit must be between 1 and 500")
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+
+
+def _same_quota_limit_identity(left: QuotaLimitRecord, right: QuotaLimitRecord) -> bool:
+    return (
+        left.workspace_id == right.workspace_id
+        and left.principal_id == right.principal_id
+        and left.unit == right.unit
+    )
+
+
+def _quota_limit_with_preserved_identity(
+    incoming: QuotaLimitRecord,
+    existing: QuotaLimitRecord,
+) -> QuotaLimitRecord:
+    return incoming.model_copy(
+        update={
+            "quota_limit_id": existing.quota_limit_id,
+            "workspace_id": existing.workspace_id,
+            "principal_id": existing.principal_id,
+            "unit": existing.unit,
+            "created_by": existing.created_by,
+            "created_at": existing.created_at,
+        },
+        deep=True,
+    )
 
 
 def ensure_embedding(memory: MemoryItem, *, dim: int = EMBED_DIM) -> MemoryItem:
@@ -126,6 +163,8 @@ class Repository(Protocol):
         *,
         workspace_id: Optional[str] = None,
         memory_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[MemoryLifecycleAuditRecord]: ...
     async def upsert_retention_signal(self, signal: MemoryRetentionSignal) -> MemoryRetentionSignal: ...
     async def get_retention_signal(self, memory_id: str) -> Optional[MemoryRetentionSignal]: ...
@@ -137,13 +176,62 @@ class Repository(Protocol):
     async def add_memory_version(self, version: MemoryVersionRecord) -> MemoryVersionRecord: ...
     async def list_memory_versions(self, memory_id: str) -> list[MemoryVersionRecord]: ...
     async def upsert_memory_conflict(self, conflict: MemoryConflictRecord) -> MemoryConflictRecord: ...
+    async def get_memory_conflict(self, conflict_id: str) -> Optional[MemoryConflictRecord]: ...
+    async def update_memory_conflict(self, conflict: MemoryConflictRecord) -> MemoryConflictRecord: ...
     async def list_memory_conflicts(
         self,
         *,
         workspace_id: Optional[str] = None,
         memory_id: Optional[str] = None,
         status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[MemoryConflictRecord]: ...
+
+    # maintenance/admin records
+    async def add_maintenance_run(self, run: MaintenanceRunRecord) -> MaintenanceRunRecord: ...
+    async def get_maintenance_run(self, scheduler_run_id: str) -> Optional[MaintenanceRunRecord]: ...
+    async def update_maintenance_run(self, run: MaintenanceRunRecord) -> MaintenanceRunRecord: ...
+    async def list_maintenance_runs(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MaintenanceRunRecord]: ...
+    async def add_maintenance_task_attempt(
+        self, attempt: MaintenanceTaskAttemptRecord
+    ) -> MaintenanceTaskAttemptRecord: ...
+    async def update_maintenance_task_attempt(
+        self, attempt: MaintenanceTaskAttemptRecord
+    ) -> MaintenanceTaskAttemptRecord: ...
+    async def list_maintenance_task_attempts(
+        self,
+        *,
+        scheduler_run_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MaintenanceTaskAttemptRecord]: ...
+    async def add_admin_action_audit(self, audit: AdminActionAuditRecord) -> AdminActionAuditRecord: ...
+    async def list_admin_action_audits(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AdminActionAuditRecord]: ...
+    async def upsert_quota_limit(self, limit: QuotaLimitRecord) -> QuotaLimitRecord: ...
+    async def get_quota_limit(self, quota_limit_id: str) -> Optional[QuotaLimitRecord]: ...
+    async def list_quota_limits(
+        self,
+        *,
+        workspace_id: str,
+        principal_id: Optional[str] = None,
+        all_principals: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[QuotaLimitRecord]: ...
+    async def delete_quota_limit(self, quota_limit_id: str) -> None: ...
 
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog: ...
@@ -182,8 +270,16 @@ class Repository(Protocol):
 
     # governance
     async def add_api_key(self, key: ApiKeyRecord) -> ApiKeyRecord: ...
-    async def list_api_keys(self) -> list[ApiKeyRecord]: ...
+    async def list_api_keys(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ApiKeyRecord]: ...
     async def get_api_key_by_prefix(self, key_prefix: str) -> Optional[ApiKeyRecord]: ...
+    async def get_api_key(self, api_key_id: str) -> Optional[ApiKeyRecord]: ...
+    async def revoke_api_key(self, api_key_id: str, *, revoked_at: datetime) -> Optional[ApiKeyRecord]: ...
     async def mark_api_key_used(self, api_key_id: str, *, used_at: datetime) -> None: ...
     async def workspace_for_run(self, run_id: str) -> Optional[str]: ...
     async def workspace_for_step(self, step_id: str) -> Optional[str]: ...
@@ -206,6 +302,10 @@ class InMemoryRepository:
         self._retention_signals: dict[str, MemoryRetentionSignal] = {}
         self._memory_versions: dict[str, MemoryVersionRecord] = {}
         self._memory_conflicts: dict[str, MemoryConflictRecord] = {}
+        self._maintenance_runs: dict[str, MaintenanceRunRecord] = {}
+        self._maintenance_task_attempts: dict[str, MaintenanceTaskAttemptRecord] = {}
+        self._admin_action_audits: dict[str, AdminActionAuditRecord] = {}
+        self._quota_limits: dict[str, QuotaLimitRecord] = {}
         self._access_logs: dict[str, MemoryAccessLog] = {}
         self._gate_logs: list[MemoryGateLog] = []
         self._profile_events: list[ProfileEvent] = []
@@ -372,6 +472,7 @@ class InMemoryRepository:
             update={
                 "status": memory.status,
                 "lifecycle_metadata": dict(memory.lifecycle_metadata or {}),
+                "superseded_by": memory.superseded_by,
                 "updated_at": memory.updated_at,
             },
             deep=True,
@@ -390,6 +491,7 @@ class InMemoryRepository:
             update={
                 "status": memory.status,
                 "lifecycle_metadata": dict(memory.lifecycle_metadata or {}),
+                "superseded_by": memory.superseded_by,
                 "updated_at": memory.updated_at,
             },
             deep=True,
@@ -441,7 +543,10 @@ class InMemoryRepository:
         *,
         workspace_id: Optional[str] = None,
         memory_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[MemoryLifecycleAuditRecord]:
+        _validate_pagination(limit=limit, offset=offset)
         rows = []
         for audit in self._lifecycle_audits.values():
             if workspace_id is not None and audit.workspace_id != workspace_id:
@@ -450,7 +555,7 @@ class InMemoryRepository:
                 continue
             rows.append(audit)
         rows.sort(key=lambda a: (a.created_at, a.audit_id))
-        return [row.model_copy(deep=True) for row in rows]
+        return [row.model_copy(deep=True) for row in rows[offset : offset + limit]]
 
     async def upsert_retention_signal(self, signal: MemoryRetentionSignal) -> MemoryRetentionSignal:
         self._retention_signals[signal.memory_id] = signal.model_copy(deep=True)
@@ -498,13 +603,37 @@ class InMemoryRepository:
         self._memory_conflicts[conflict.conflict_id] = conflict.model_copy(deep=True)
         return conflict
 
+    async def get_memory_conflict(self, conflict_id: str) -> Optional[MemoryConflictRecord]:
+        conflict = self._memory_conflicts.get(conflict_id)
+        return conflict.model_copy(deep=True) if conflict else None
+
+    async def update_memory_conflict(self, conflict: MemoryConflictRecord) -> MemoryConflictRecord:
+        current = self._memory_conflicts.get(conflict.conflict_id)
+        if current is None:
+            raise ValueError("memory conflict not found")
+        stored = conflict.model_copy(
+            update={
+                "workspace_id": current.workspace_id,
+                "subject_key": current.subject_key,
+                "memory_ids": list(current.memory_ids),
+                "detected_by": current.detected_by,
+                "created_at": current.created_at,
+            },
+            deep=True,
+        )
+        self._memory_conflicts[stored.conflict_id] = stored.model_copy(deep=True)
+        return stored
+
     async def list_memory_conflicts(
         self,
         *,
         workspace_id: Optional[str] = None,
         memory_id: Optional[str] = None,
         status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[MemoryConflictRecord]:
+        _validate_pagination(limit=limit, offset=offset)
         rows = []
         for conflict in self._memory_conflicts.values():
             if workspace_id is not None and conflict.workspace_id != workspace_id:
@@ -515,7 +644,170 @@ class InMemoryRepository:
                 continue
             rows.append(conflict)
         rows.sort(key=lambda c: (c.created_at, c.conflict_id))
-        return [row.model_copy(deep=True) for row in rows]
+        return [row.model_copy(deep=True) for row in rows[offset : offset + limit]]
+
+    # maintenance/admin records
+    async def add_maintenance_run(self, run: MaintenanceRunRecord) -> MaintenanceRunRecord:
+        operation_values = [operation.value for operation in run.operations]
+        if len(operation_values) != len(set(operation_values)):
+            raise ValueError("duplicate maintenance operation in run")
+        self._maintenance_runs[run.scheduler_run_id] = run.model_copy(deep=True)
+        return run
+
+    async def get_maintenance_run(self, scheduler_run_id: str) -> Optional[MaintenanceRunRecord]:
+        run = self._maintenance_runs.get(scheduler_run_id)
+        return run.model_copy(deep=True) if run else None
+
+    async def update_maintenance_run(self, run: MaintenanceRunRecord) -> MaintenanceRunRecord:
+        current = self._maintenance_runs.get(run.scheduler_run_id)
+        if current is None:
+            raise ValueError("maintenance run not found")
+        stored = run.model_copy(
+            update={
+                "workspace_id": current.workspace_id,
+                "requested_by": current.requested_by,
+                "reason": current.reason,
+                "operations": list(current.operations),
+                "dry_run": current.dry_run,
+                "created_at": current.created_at,
+            },
+            deep=True,
+        )
+        self._maintenance_runs[stored.scheduler_run_id] = stored.model_copy(deep=True)
+        return stored
+
+    async def list_maintenance_runs(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MaintenanceRunRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        rows = []
+        for run in self._maintenance_runs.values():
+            if workspace_id is not None and run.workspace_id != workspace_id:
+                continue
+            rows.append(run)
+        rows.sort(key=lambda run: (run.created_at, run.scheduler_run_id))
+        return [row.model_copy(deep=True) for row in rows[offset : offset + limit]]
+
+    async def add_maintenance_task_attempt(
+        self, attempt: MaintenanceTaskAttemptRecord
+    ) -> MaintenanceTaskAttemptRecord:
+        for existing in self._maintenance_task_attempts.values():
+            if (
+                existing.scheduler_run_id == attempt.scheduler_run_id
+                and existing.operation == attempt.operation
+                and existing.attempt_id != attempt.attempt_id
+            ):
+                raise ValueError("duplicate maintenance task attempt for run operation")
+        self._maintenance_task_attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+        return attempt
+
+    async def update_maintenance_task_attempt(
+        self, attempt: MaintenanceTaskAttemptRecord
+    ) -> MaintenanceTaskAttemptRecord:
+        current = self._maintenance_task_attempts.get(attempt.attempt_id)
+        if current is None:
+            raise ValueError("maintenance task attempt not found")
+        if (
+            current.scheduler_run_id != attempt.scheduler_run_id
+            or current.workspace_id != attempt.workspace_id
+            or current.operation != attempt.operation
+        ):
+            raise ValueError("maintenance task attempt identity cannot change")
+        for existing in self._maintenance_task_attempts.values():
+            if (
+                existing.scheduler_run_id == attempt.scheduler_run_id
+                and existing.operation == attempt.operation
+                and existing.attempt_id != attempt.attempt_id
+            ):
+                raise ValueError("duplicate maintenance task attempt for run operation")
+        attempt = attempt.model_copy(update={"created_at": current.created_at}, deep=True)
+        self._maintenance_task_attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+        return attempt
+
+    async def list_maintenance_task_attempts(
+        self,
+        *,
+        scheduler_run_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MaintenanceTaskAttemptRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        rows = [
+            attempt
+            for attempt in self._maintenance_task_attempts.values()
+            if attempt.scheduler_run_id == scheduler_run_id
+        ]
+        rows.sort(key=lambda attempt: (attempt.created_at, attempt.attempt_id))
+        return [row.model_copy(deep=True) for row in rows[offset : offset + limit]]
+
+    async def add_admin_action_audit(self, audit: AdminActionAuditRecord) -> AdminActionAuditRecord:
+        self._admin_action_audits[audit.admin_action_id] = audit.model_copy(deep=True)
+        return audit
+
+    async def list_admin_action_audits(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AdminActionAuditRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        rows = []
+        for audit in self._admin_action_audits.values():
+            if workspace_id is not None and audit.workspace_id != workspace_id:
+                continue
+            rows.append(audit)
+        rows.sort(key=lambda audit: (audit.created_at, audit.admin_action_id))
+        return [row.model_copy(deep=True) for row in rows[offset : offset + limit]]
+
+    async def upsert_quota_limit(self, limit: QuotaLimitRecord) -> QuotaLimitRecord:
+        current = self._quota_limits.get(limit.quota_limit_id)
+        if current is not None and not _same_quota_limit_identity(current, limit):
+            raise ValueError("quota limit identity cannot change")
+        for quota_limit_id, existing in list(self._quota_limits.items()):
+            if (
+                existing.workspace_id == limit.workspace_id
+                and existing.principal_id == limit.principal_id
+                and existing.unit == limit.unit
+                and existing.quota_limit_id != limit.quota_limit_id
+            ):
+                limit = _quota_limit_with_preserved_identity(limit, existing)
+                del self._quota_limits[quota_limit_id]
+        if current is not None:
+            limit = _quota_limit_with_preserved_identity(limit, current)
+        self._quota_limits[limit.quota_limit_id] = limit.model_copy(deep=True)
+        return limit
+
+    async def list_quota_limits(
+        self,
+        *,
+        workspace_id: str,
+        principal_id: Optional[str] = None,
+        all_principals: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[QuotaLimitRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        rows = []
+        for quota_limit in self._quota_limits.values():
+            if quota_limit.workspace_id != workspace_id:
+                continue
+            if not all_principals and quota_limit.principal_id != principal_id:
+                continue
+            rows.append(quota_limit)
+        rows.sort(key=lambda quota_limit: (quota_limit.created_at, quota_limit.quota_limit_id))
+        return [row.model_copy(deep=True) for row in rows[offset : offset + limit]]
+
+    async def get_quota_limit(self, quota_limit_id: str) -> Optional[QuotaLimitRecord]:
+        limit = self._quota_limits.get(quota_limit_id)
+        return limit.model_copy(deep=True) if limit else None
+
+    async def delete_quota_limit(self, quota_limit_id: str) -> None:
+        self._quota_limits.pop(quota_limit_id, None)
 
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog:
@@ -649,15 +941,41 @@ class InMemoryRepository:
         self._api_keys[key.api_key_id] = key.model_copy(deep=True)
         return key
 
-    async def list_api_keys(self) -> list[ApiKeyRecord]:
-        rows = sorted(self._api_keys.values(), key=lambda key: key.created_at)
-        return [row.model_copy(deep=True) for row in rows]
+    async def list_api_keys(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ApiKeyRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        rows = []
+        for key in self._api_keys.values():
+            if workspace_id is not None and key.workspace_id != workspace_id:
+                continue
+            rows.append(key)
+        rows.sort(key=lambda key: (key.created_at, key.api_key_id))
+        return [row.model_copy(deep=True) for row in rows[offset : offset + limit]]
 
     async def get_api_key_by_prefix(self, key_prefix: str) -> Optional[ApiKeyRecord]:
         for key in self._api_keys.values():
             if key.key_prefix == key_prefix:
                 return key.model_copy(deep=True)
         return None
+
+    async def get_api_key(self, api_key_id: str) -> Optional[ApiKeyRecord]:
+        key = self._api_keys.get(api_key_id)
+        return key.model_copy(deep=True) if key else None
+
+    async def revoke_api_key(self, api_key_id: str, *, revoked_at: datetime) -> Optional[ApiKeyRecord]:
+        current = self._api_keys.get(api_key_id)
+        if current is None:
+            return None
+        if current.revoked_at is not None:
+            return current.model_copy(deep=True)
+        updated = current.model_copy(update={"revoked_at": revoked_at}, deep=True)
+        self._api_keys[api_key_id] = updated
+        return updated.model_copy(deep=True)
 
     async def mark_api_key_used(self, api_key_id: str, *, used_at: datetime) -> None:
         current = self._api_keys.get(api_key_id)

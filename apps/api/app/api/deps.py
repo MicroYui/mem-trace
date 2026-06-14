@@ -5,6 +5,7 @@ created at startup and injected into routes.
 """
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Optional
 
 from fastapi import Header, HTTPException, status
@@ -43,6 +44,7 @@ class AppState:
         self.repository: Optional[Repository] = None
         self.provider_registry: Optional[ProviderRegistry] = None
         self.telemetry_service: Optional[TelemetryService] = None
+        self.maintenance_enqueue: Optional[Callable[[TaskEnvelope], Awaitable[str]]] = None
 
     def startup(self) -> None:
         settings = get_settings()
@@ -68,6 +70,16 @@ class AppState:
                 task_id=envelope.task_id,
             )
             return str(result.id)
+
+        async def enqueue_memory_maintenance(envelope: TaskEnvelope) -> str:
+            result = celery_app.tasks["maintenance.memory"].apply_async(
+                args=[envelope.model_dump(mode="json")],
+                queue=settings.maintenance_queue_name,
+                task_id=envelope.task_id,
+            )
+            return str(result.id)
+
+        self.maintenance_enqueue = enqueue_memory_maintenance if settings.async_tasks_enabled else None
 
         self.runtime = MemoryRuntime(
             repo,
@@ -112,7 +124,16 @@ def get_telemetry_service() -> TelemetryService:
 
 
 def get_quota_service() -> QuotaService:
-    return QuotaService(_quota_counter, get_settings())
+    settings = get_settings()
+    # Override lookups touch the DB, so only pass the repository when quota is
+    # actually enabled. Enabling admin/governance alone must not make hot
+    # runtime routes perform per-request quota override DB reads.
+    repo = app_state.repository if settings.quota_enabled else None
+    return QuotaService(_quota_counter, settings, repo=repo)
+
+
+def get_maintenance_enqueue() -> Optional[Callable[[TaskEnvelope], Awaitable[str]]]:
+    return app_state.maintenance_enqueue
 
 
 async def require_api_key(
@@ -167,6 +188,7 @@ __all__ = [
     "get_repository",
     "get_provider_registry",
     "get_quota_service",
+    "get_maintenance_enqueue",
     "require_api_key",
     "AppState",
     "_build_summarizer_provider",

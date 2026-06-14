@@ -269,6 +269,92 @@ class ApiKeyORM(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class MaintenanceRunORM(Base):
+    __tablename__ = "maintenance_runs"
+    __table_args__ = (
+        Index("ix_maintenance_runs_workspace_created", "workspace_id", "created_at"),
+        Index("ix_maintenance_runs_workspace_status_created", "workspace_id", "status", "created_at"),
+    )
+    scheduler_run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    requested_by: Mapped[str] = mapped_column(String, default="system")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operations: Mapped[list] = mapped_column(JSONB, default=list, server_default=sa.text("'[]'::jsonb"))
+    dry_run: Mapped[bool] = mapped_column(default=False, server_default=sa.text("false"))
+    status: Mapped[str] = mapped_column(String, index=True)
+    summary: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=sa.text("'{}'::jsonb"))
+    warnings: Mapped[list] = mapped_column(JSONB, default=list, server_default=sa.text("'[]'::jsonb"))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MaintenanceTaskAttemptORM(Base):
+    __tablename__ = "maintenance_task_attempts"
+    __table_args__ = (
+        UniqueConstraint("scheduler_run_id", "operation", name="uq_maintenance_task_attempts_run_operation"),
+        Index("ix_maintenance_task_attempts_run_created", "scheduler_run_id", "created_at"),
+    )
+    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    scheduler_run_id: Mapped[str] = mapped_column(String, index=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    operation: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    result: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=sa.text("'{}'::jsonb"))
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdminActionAuditORM(Base):
+    __tablename__ = "admin_action_audits"
+    __table_args__ = (Index("ix_admin_action_audits_workspace_created", "workspace_id", "created_at"),)
+    admin_action_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    principal_id: Mapped[str] = mapped_column(String, index=True)
+    action: Mapped[str] = mapped_column(String)
+    target_type: Mapped[str] = mapped_column(String)
+    target_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    audit_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=sa.text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class QuotaLimitORM(Base):
+    __tablename__ = "quota_limits"
+    __table_args__ = (
+        Index("ix_quota_limits_workspace_unit", "workspace_id", "unit"),
+        Index(
+            "uq_quota_limits_workspace_unit",
+            "workspace_id",
+            "unit",
+            unique=True,
+            postgresql_where=sa.text("principal_id IS NULL"),
+        ),
+        Index(
+            "uq_quota_limits_workspace_principal_unit",
+            "workspace_id",
+            "principal_id",
+            "unit",
+            unique=True,
+            postgresql_where=sa.text("principal_id IS NOT NULL"),
+        ),
+    )
+    quota_limit_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    principal_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    unit: Mapped[str] = mapped_column(String)
+    limit: Mapped[int] = mapped_column(Integer)
+    window_seconds: Mapped[int] = mapped_column(Integer)
+    created_by: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class GateLogORM(Base):
     __tablename__ = "memory_gate_logs"
     gate_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -406,6 +492,10 @@ __all__ = [
     "MemoryVersionORM",
     "MemoryConflictORM",
     "ApiKeyORM",
+    "MaintenanceRunORM",
+    "MaintenanceTaskAttemptORM",
+    "AdminActionAuditORM",
+    "QuotaLimitORM",
     "AccessLogORM",
     "GateLogORM",
     "ProfileEventORM",

@@ -10,7 +10,8 @@ from app.async_tasks.contracts import TaskEnvelope, TaskResult
 from app.async_tasks.idempotency import IdempotencyStore, InMemoryIdempotencyStore, RedisIdempotencyStore
 from app.async_tasks.runtime_factory import WorkerRuntimeHandle, build_worker_runtime
 from app.config import Settings, get_settings
-from app.memory import scheduler as scheduler_mod
+from app.memory.maintenance import run_workspace_maintenance
+from app.runtime.models import MaintenanceOperation, SchedulerRunStatus
 
 
 _runtime_factory: Callable[[], Any] | None = None
@@ -132,23 +133,30 @@ async def _process_memory_maintenance(envelope_payload: dict[str, Any]) -> dict[
         else:
             runtime = runtime_or_handle
         repo = runtime._repo  # noqa: SLF001 - worker boundary intentionally calls runtime-owned repository
-        operation = str(envelope.payload["operation"])
-        scheduler_run_id = envelope.payload.get("scheduler_run_id")
-        handlers = {
-            "score_memory": scheduler_mod.score_memory,
-            "decay_memory": scheduler_mod.decay_memory,
-            "archive_memory": scheduler_mod.archive_memory,
-            "quarantine_memory": scheduler_mod.quarantine_memory,
-            "profile_refresh": scheduler_mod.profile_refresh,
-        }
-        if operation not in handlers:
-            raise ValueError(f"unknown maintenance operation: {operation}")
-        metadata = await handlers[operation](
+        operations = _maintenance_operations_from_payload(envelope.payload)
+        run = await run_workspace_maintenance(
             repo,
             workspace_id=envelope.workspace_id,
-            scheduler_run_id=str(scheduler_run_id) if scheduler_run_id is not None else None,
+            operations=operations,
+            requested_by=str(envelope.payload.get("requested_by") or "celery"),
+            dry_run=bool(envelope.payload.get("dry_run", False)),
+            reason=envelope.payload.get("reason"),
         )
-        metadata["operation"] = operation
+        metadata = {
+            "scheduler_run_id": run.scheduler_run_id,
+            "workspace_id": run.workspace_id,
+            "operations": [operation.value for operation in run.operations],
+            **run.summary,
+        }
+        if run.status == SchedulerRunStatus.failed:
+            await store.release(envelope.dedupe_key)
+            return TaskResult(
+                task_id=envelope.task_id,
+                task_type=envelope.task_type,
+                status="failed",
+                error="maintenance run failed",
+                metadata=metadata,
+            ).model_dump(mode="json")
         return TaskResult(
             task_id=envelope.task_id,
             task_type=envelope.task_type,
@@ -174,6 +182,14 @@ def _settings_backed_idempotency_store(settings: Settings) -> IdempotencyStore:
             _settings_idempotency_store = RedisIdempotencyStore(_settings_redis_client)
         return _settings_idempotency_store
     return _default_in_memory_store
+
+
+def _maintenance_operations_from_payload(payload: dict[str, Any]) -> list[MaintenanceOperation]:
+    if "operations" in payload:
+        return [MaintenanceOperation(str(operation)) for operation in payload["operations"]]
+    if "operation" in payload:
+        return [MaintenanceOperation(str(payload["operation"]))]
+    raise ValueError("maintenance operation required")
 
 
 __all__ = ["process_event_extraction", "process_memory_maintenance", "set_task_dependencies"]

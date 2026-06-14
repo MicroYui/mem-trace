@@ -194,6 +194,44 @@ class ExtractionMode(str, Enum):
     no_extract = "no_extract"
 
 
+class MaintenanceOperation(str, Enum):
+    score_memory = "score_memory"
+    decay_memory = "decay_memory"
+    archive_memory = "archive_memory"
+    quarantine_memory = "quarantine_memory"
+    conflict_scan = "conflict_scan"
+    dedup_memory = "dedup_memory"
+    reindex_memory = "reindex_memory"
+    summary_refresh = "summary_refresh"
+    procedural_refresh = "procedural_refresh"
+    profile_refresh = "profile_refresh"
+
+
+class SchedulerRunStatus(str, Enum):
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class SchedulerTaskStatus(str, Enum):
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    skipped = "skipped"
+
+
+QuotaUnitName = Literal[
+    "write_event",
+    "retrieve_context",
+    "report_export",
+    "replay",
+    "async_task_enqueue",
+]
+
+
 class CompactionKind(str, Enum):
     budget_notice = "budget_notice"
     history_summary = "history_summary"
@@ -425,6 +463,110 @@ class ApiKeyRecord(_Base):
     created_at: datetime = Field(default_factory=_now)
     last_used_at: Optional[datetime] = None
     revoked_at: Optional[datetime] = None
+
+
+class MaintenanceRunRecord(_Base):
+    scheduler_run_id: str = Field(default_factory=lambda: _new_id("msrun"))
+    workspace_id: str
+    requested_by: str = "system"
+    reason: Optional[str] = None
+    operations: list[MaintenanceOperation] = Field(default_factory=list)
+    dry_run: bool = False
+    status: SchedulerRunStatus = SchedulerRunStatus.pending
+    summary: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class MaintenanceTaskAttemptRecord(_Base):
+    attempt_id: str = Field(default_factory=lambda: _new_id("mstat"))
+    scheduler_run_id: str
+    workspace_id: str
+    operation: MaintenanceOperation
+    status: SchedulerTaskStatus = SchedulerTaskStatus.pending
+    idempotency_key: Optional[str] = None
+    attempt_no: int = 1
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_summary: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class AdminActionAuditRecord(_Base):
+    admin_action_id: str = Field(default_factory=lambda: _new_id("admact"))
+    workspace_id: str
+    principal_id: str
+    action: str
+    target_type: str
+    target_id: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class QuotaLimitRecord(_Base):
+    quota_limit_id: str = Field(default_factory=lambda: _new_id("qlim"))
+    workspace_id: str
+    principal_id: Optional[str] = None
+    unit: QuotaUnitName
+    limit: int
+    window_seconds: int
+    created_by: str
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class StartMaintenanceRunRequest(_Base):
+    workspace_id: str
+    operations: Optional[list[MaintenanceOperation]] = None
+    dry_run: bool = False
+    reason: Optional[str] = None
+    enqueue: bool = False
+
+
+class CreateApiKeyRequest(_Base):
+    workspace_id: str
+    principal_id: str
+    roles: list[WorkspacePermission]
+
+
+class PublicApiKey(_Base):
+    api_key_id: str
+    workspace_id: str
+    principal_id: str
+    key_prefix: str
+    roles: list[str] = Field(default_factory=list)
+    created_at: datetime
+    last_used_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+
+
+class CreatedApiKeyResponse(_Base):
+    api_key: PublicApiKey
+    raw_api_key: str
+
+
+class UpsertQuotaLimitRequest(_Base):
+    workspace_id: str
+    principal_id: Optional[str] = None
+    unit: QuotaUnitName
+    limit: int
+    window_seconds: int
+
+
+class AdminMemoryStatusRequest(_Base):
+    to_status: MemoryStatus
+    reason: str
+
+
+class ResolveMemoryConflictRequest(_Base):
+    action: Literal["mark_false_positive", "choose_winner"]
+    winner_memory_id: Optional[str] = None
+    reason: str
 
 
 class Principal(_Base):
@@ -812,6 +954,10 @@ class DashboardTables(_Base):
     eval_results: list[EvalResultRecord] = Field(default_factory=list)
     memory_versions: list[MemoryVersionRecord] = Field(default_factory=list)
     memory_conflicts: list[MemoryConflictRecord] = Field(default_factory=list)
+    maintenance_runs: list[MaintenanceRunRecord] = Field(default_factory=list)
+    maintenance_task_attempts: list[MaintenanceTaskAttemptRecord] = Field(default_factory=list)
+    admin_action_audits: list[AdminActionAuditRecord] = Field(default_factory=list)
+    quota_limits: list[QuotaLimitRecord] = Field(default_factory=list)
     observability_summary: Optional[ObservabilitySummary] = None
     benchmark_summary: dict[str, dict[str, float]] = Field(default_factory=dict)
 

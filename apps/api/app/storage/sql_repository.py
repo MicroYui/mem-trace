@@ -12,8 +12,15 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.runtime.repository import ensure_embedding, _preserved_lifecycle_fields
+from app.runtime.repository import (
+    ensure_embedding,
+    _preserved_lifecycle_fields,
+    _quota_limit_with_preserved_identity,
+    _same_quota_limit_identity,
+    _validate_pagination,
+)
 from app.runtime.models import (
+    AdminActionAuditRecord,
     ApiKeyRecord,
     AgentEvent,
     AgentRun,
@@ -29,9 +36,13 @@ from app.runtime.models import (
     MemoryGateLog,
     MemoryItem,
     MemoryRetentionSignal,
+    MaintenanceOperation,
+    MaintenanceRunRecord,
+    MaintenanceTaskAttemptRecord,
     MemoryVersionRecord,
     MemoryConflictRecord,
     ProfileEvent,
+    QuotaLimitRecord,
     RetainedNegativeEvidence,
     RiskFlags,
     StateNode,
@@ -330,6 +341,132 @@ def _api_key_from_orm(o: orm.ApiKeyORM) -> ApiKeyRecord:
         created_at=o.created_at,
         last_used_at=o.last_used_at,
         revoked_at=o.revoked_at,
+    )
+
+
+def _maintenance_run_to_orm(run: MaintenanceRunRecord) -> orm.MaintenanceRunORM:
+    return orm.MaintenanceRunORM(
+        scheduler_run_id=run.scheduler_run_id,
+        workspace_id=run.workspace_id,
+        requested_by=run.requested_by,
+        reason=run.reason,
+        operations=[operation.value for operation in run.operations],
+        dry_run=run.dry_run,
+        status=run.status.value,
+        summary=run.summary,
+        warnings=list(run.warnings),
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
+
+
+def _maintenance_run_from_orm(o: orm.MaintenanceRunORM) -> MaintenanceRunRecord:
+    return MaintenanceRunRecord(
+        scheduler_run_id=o.scheduler_run_id,
+        workspace_id=o.workspace_id,
+        requested_by=o.requested_by,
+        reason=o.reason,
+        operations=list(o.operations or []),
+        dry_run=o.dry_run,
+        status=o.status,
+        summary=o.summary or {},
+        warnings=list(o.warnings or []),
+        started_at=o.started_at,
+        finished_at=o.finished_at,
+        created_at=o.created_at,
+        updated_at=o.updated_at,
+    )
+
+
+def _maintenance_task_attempt_to_orm(attempt: MaintenanceTaskAttemptRecord) -> orm.MaintenanceTaskAttemptORM:
+    return orm.MaintenanceTaskAttemptORM(
+        attempt_id=attempt.attempt_id,
+        scheduler_run_id=attempt.scheduler_run_id,
+        workspace_id=attempt.workspace_id,
+        operation=attempt.operation.value,
+        status=attempt.status.value,
+        idempotency_key=attempt.idempotency_key,
+        attempt_no=attempt.attempt_no,
+        result=attempt.result,
+        error_summary=attempt.error_summary,
+        started_at=attempt.started_at,
+        finished_at=attempt.finished_at,
+        created_at=attempt.created_at,
+        updated_at=attempt.updated_at,
+    )
+
+
+def _maintenance_task_attempt_from_orm(o: orm.MaintenanceTaskAttemptORM) -> MaintenanceTaskAttemptRecord:
+    return MaintenanceTaskAttemptRecord(
+        attempt_id=o.attempt_id,
+        scheduler_run_id=o.scheduler_run_id,
+        workspace_id=o.workspace_id,
+        operation=o.operation,
+        status=o.status,
+        idempotency_key=o.idempotency_key,
+        attempt_no=o.attempt_no,
+        result=o.result or {},
+        error_summary=o.error_summary,
+        started_at=o.started_at,
+        finished_at=o.finished_at,
+        created_at=o.created_at,
+        updated_at=o.updated_at,
+    )
+
+
+def _admin_action_audit_to_orm(audit: AdminActionAuditRecord) -> orm.AdminActionAuditORM:
+    return orm.AdminActionAuditORM(
+        admin_action_id=audit.admin_action_id,
+        workspace_id=audit.workspace_id,
+        principal_id=audit.principal_id,
+        action=audit.action,
+        target_type=audit.target_type,
+        target_id=audit.target_id,
+        audit_metadata=audit.metadata,
+        created_at=audit.created_at,
+    )
+
+
+def _admin_action_audit_from_orm(o: orm.AdminActionAuditORM) -> AdminActionAuditRecord:
+    return AdminActionAuditRecord(
+        admin_action_id=o.admin_action_id,
+        workspace_id=o.workspace_id,
+        principal_id=o.principal_id,
+        action=o.action,
+        target_type=o.target_type,
+        target_id=o.target_id,
+        metadata=o.audit_metadata or {},
+        created_at=o.created_at,
+    )
+
+
+def _quota_limit_to_orm(limit: QuotaLimitRecord) -> orm.QuotaLimitORM:
+    return orm.QuotaLimitORM(
+        quota_limit_id=limit.quota_limit_id,
+        workspace_id=limit.workspace_id,
+        principal_id=limit.principal_id,
+        unit=limit.unit,
+        limit=limit.limit,
+        window_seconds=limit.window_seconds,
+        created_by=limit.created_by,
+        created_at=limit.created_at,
+        updated_at=limit.updated_at,
+    )
+
+
+def _quota_limit_from_orm(o: orm.QuotaLimitORM) -> QuotaLimitRecord:
+    return QuotaLimitRecord(
+        quota_limit_id=o.quota_limit_id,
+        workspace_id=o.workspace_id,
+        principal_id=o.principal_id,
+        unit=o.unit,
+        limit=o.limit,
+        window_seconds=o.window_seconds,
+        created_by=o.created_by,
+        created_at=o.created_at,
+        updated_at=o.updated_at,
     )
 
 
@@ -760,6 +897,7 @@ class SqlRepository:
                     update={
                         "status": memory.status,
                         "lifecycle_metadata": dict(memory.lifecycle_metadata or {}),
+                        "superseded_by": memory.superseded_by,
                         "updated_at": memory.updated_at,
                     },
                     deep=True,
@@ -780,6 +918,7 @@ class SqlRepository:
                     await s.merge(_memory_version_to_orm(version))
                 current.status = memory.status.value
                 current.lifecycle_metadata = dict(memory.lifecycle_metadata or {})
+                current.superseded_by = memory.superseded_by
                 current.updated_at = memory.updated_at
                 await s.merge(_lifecycle_audit_to_orm(audit))
         return memory, audit
@@ -832,7 +971,10 @@ class SqlRepository:
         *,
         workspace_id: Optional[str] = None,
         memory_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[MemoryLifecycleAuditRecord]:
+        _validate_pagination(limit=limit, offset=offset)
         async with self._sf() as s:
             stmt = select(orm.MemoryLifecycleAuditORM)
             if workspace_id is not None:
@@ -840,6 +982,7 @@ class SqlRepository:
             if memory_id is not None:
                 stmt = stmt.where(orm.MemoryLifecycleAuditORM.memory_id == memory_id)
             stmt = stmt.order_by(orm.MemoryLifecycleAuditORM.created_at, orm.MemoryLifecycleAuditORM.audit_id)
+            stmt = stmt.offset(offset).limit(limit)
             rows = (await s.execute(stmt)).scalars().all()
             return [_lifecycle_audit_from_orm(o) for o in rows]
 
@@ -896,13 +1039,42 @@ class SqlRepository:
             await s.commit()
         return conflict
 
+    async def get_memory_conflict(self, conflict_id: str) -> Optional[MemoryConflictRecord]:
+        async with self._sf() as s:
+            row = await s.get(orm.MemoryConflictORM, conflict_id)
+            return _memory_conflict_from_orm(row) if row else None
+
+    async def update_memory_conflict(self, conflict: MemoryConflictRecord) -> MemoryConflictRecord:
+        async with self._sf() as s:
+            current = await s.get(orm.MemoryConflictORM, conflict.conflict_id)
+            if current is None:
+                raise ValueError("memory conflict not found")
+            stored = conflict.model_copy(
+                update={
+                    "workspace_id": current.workspace_id,
+                    "subject_key": current.subject_key,
+                    "memory_ids": list(current.memory_ids),
+                    "detected_by": current.detected_by,
+                    "created_at": current.created_at,
+                },
+                deep=True,
+            )
+            current.status = stored.status
+            current.explanation = stored.explanation
+            current.resolved_at = stored.resolved_at
+            await s.commit()
+        return stored
+
     async def list_memory_conflicts(
         self,
         *,
         workspace_id: Optional[str] = None,
         memory_id: Optional[str] = None,
         status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[MemoryConflictRecord]:
+        _validate_pagination(limit=limit, offset=offset)
         async with self._sf() as s:
             stmt = select(orm.MemoryConflictORM)
             if workspace_id is not None:
@@ -912,8 +1084,227 @@ class SqlRepository:
             if memory_id is not None:
                 stmt = stmt.where(orm.MemoryConflictORM.memory_ids.contains([memory_id]))
             stmt = stmt.order_by(orm.MemoryConflictORM.created_at, orm.MemoryConflictORM.conflict_id)
+            stmt = stmt.offset(offset).limit(limit)
             rows = (await s.execute(stmt)).scalars().all()
             return [_memory_conflict_from_orm(o) for o in rows]
+
+    # maintenance/admin records
+    async def add_maintenance_run(self, run: MaintenanceRunRecord) -> MaintenanceRunRecord:
+        operation_values = [operation.value for operation in run.operations]
+        if len(operation_values) != len(set(operation_values)):
+            raise ValueError("duplicate maintenance operation in run")
+        async with self._sf() as s:
+            await s.merge(_maintenance_run_to_orm(run))
+            await s.commit()
+        return run
+
+    async def get_maintenance_run(self, scheduler_run_id: str) -> Optional[MaintenanceRunRecord]:
+        async with self._sf() as s:
+            row = await s.get(orm.MaintenanceRunORM, scheduler_run_id)
+            return _maintenance_run_from_orm(row) if row else None
+
+    async def update_maintenance_run(self, run: MaintenanceRunRecord) -> MaintenanceRunRecord:
+        async with self._sf() as s:
+            current = await s.get(orm.MaintenanceRunORM, run.scheduler_run_id)
+            if current is None:
+                raise ValueError("maintenance run not found")
+            stored = run.model_copy(
+                update={
+                    "workspace_id": current.workspace_id,
+                    "requested_by": current.requested_by,
+                    "reason": current.reason,
+                    "operations": [MaintenanceOperation(str(operation)) for operation in current.operations],
+                    "dry_run": current.dry_run,
+                    "created_at": current.created_at,
+                },
+                deep=True,
+            )
+            current.status = stored.status.value
+            current.summary = stored.summary
+            current.warnings = list(stored.warnings)
+            current.started_at = stored.started_at
+            current.finished_at = stored.finished_at
+            current.updated_at = stored.updated_at
+            await s.commit()
+        return stored
+
+    async def list_maintenance_runs(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MaintenanceRunRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        async with self._sf() as s:
+            stmt = select(orm.MaintenanceRunORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.MaintenanceRunORM.workspace_id == workspace_id)
+            stmt = stmt.order_by(orm.MaintenanceRunORM.created_at, orm.MaintenanceRunORM.scheduler_run_id)
+            stmt = stmt.offset(offset).limit(limit)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_maintenance_run_from_orm(row) for row in rows]
+
+    async def add_maintenance_task_attempt(
+        self, attempt: MaintenanceTaskAttemptRecord
+    ) -> MaintenanceTaskAttemptRecord:
+        async with self._sf() as s:
+            await s.merge(_maintenance_task_attempt_to_orm(attempt))
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                await s.rollback()
+                raise ValueError("duplicate maintenance task attempt for run operation") from exc
+        return attempt
+
+    async def update_maintenance_task_attempt(
+        self, attempt: MaintenanceTaskAttemptRecord
+    ) -> MaintenanceTaskAttemptRecord:
+        async with self._sf() as s:
+            current = await s.get(orm.MaintenanceTaskAttemptORM, attempt.attempt_id)
+            if current is None:
+                raise ValueError("maintenance task attempt not found")
+            if (
+                current.scheduler_run_id != attempt.scheduler_run_id
+                or current.workspace_id != attempt.workspace_id
+                or current.operation != attempt.operation.value
+            ):
+                raise ValueError("maintenance task attempt identity cannot change")
+            stored = attempt.model_copy(update={"created_at": current.created_at}, deep=True)
+            current.status = stored.status.value
+            current.idempotency_key = stored.idempotency_key
+            current.attempt_no = stored.attempt_no
+            current.result = stored.result
+            current.error_summary = stored.error_summary
+            current.started_at = stored.started_at
+            current.finished_at = stored.finished_at
+            current.updated_at = stored.updated_at
+            await s.commit()
+        return stored
+
+    async def list_maintenance_task_attempts(
+        self,
+        *,
+        scheduler_run_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MaintenanceTaskAttemptRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        async with self._sf() as s:
+            stmt = (
+                select(orm.MaintenanceTaskAttemptORM)
+                .where(orm.MaintenanceTaskAttemptORM.scheduler_run_id == scheduler_run_id)
+                .order_by(orm.MaintenanceTaskAttemptORM.created_at, orm.MaintenanceTaskAttemptORM.attempt_id)
+                .offset(offset)
+                .limit(limit)
+            )
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_maintenance_task_attempt_from_orm(row) for row in rows]
+
+    async def add_admin_action_audit(self, audit: AdminActionAuditRecord) -> AdminActionAuditRecord:
+        async with self._sf() as s:
+            await s.merge(_admin_action_audit_to_orm(audit))
+            await s.commit()
+        return audit
+
+    async def list_admin_action_audits(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AdminActionAuditRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        async with self._sf() as s:
+            stmt = select(orm.AdminActionAuditORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.AdminActionAuditORM.workspace_id == workspace_id)
+            stmt = stmt.order_by(orm.AdminActionAuditORM.created_at, orm.AdminActionAuditORM.admin_action_id)
+            stmt = stmt.offset(offset).limit(limit)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_admin_action_audit_from_orm(row) for row in rows]
+
+    async def upsert_quota_limit(self, limit: QuotaLimitRecord) -> QuotaLimitRecord:
+        async with self._sf() as s:
+            current = await s.get(orm.QuotaLimitORM, limit.quota_limit_id)
+            if current is not None:
+                current_record = _quota_limit_from_orm(current)
+                if not _same_quota_limit_identity(current_record, limit):
+                    raise ValueError("quota limit identity cannot change")
+            stmt = select(orm.QuotaLimitORM).where(
+                orm.QuotaLimitORM.workspace_id == limit.workspace_id,
+                orm.QuotaLimitORM.unit == limit.unit,
+            )
+            if limit.principal_id is None:
+                stmt = stmt.where(orm.QuotaLimitORM.principal_id.is_(None))
+            else:
+                stmt = stmt.where(orm.QuotaLimitORM.principal_id == limit.principal_id)
+            existing = (await s.execute(stmt.limit(1))).scalar_one_or_none()
+            if existing is not None:
+                limit = _quota_limit_with_preserved_identity(limit, _quota_limit_from_orm(existing))
+            elif current is not None:
+                limit = _quota_limit_with_preserved_identity(limit, _quota_limit_from_orm(current))
+            await s.merge(_quota_limit_to_orm(limit))
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                # Concurrent upserts can race before the partial unique index
+                # resolves the identity. Re-read and update the existing row so
+                # callers see stable upsert semantics instead of DB errors.
+                async with self._sf() as retry_session:
+                    retry_stmt = select(orm.QuotaLimitORM).where(
+                        orm.QuotaLimitORM.workspace_id == limit.workspace_id,
+                        orm.QuotaLimitORM.unit == limit.unit,
+                    )
+                    if limit.principal_id is None:
+                        retry_stmt = retry_stmt.where(orm.QuotaLimitORM.principal_id.is_(None))
+                    else:
+                        retry_stmt = retry_stmt.where(orm.QuotaLimitORM.principal_id == limit.principal_id)
+                    existing_after_race = (await retry_session.execute(retry_stmt.limit(1))).scalar_one_or_none()
+                    if existing_after_race is None:
+                        raise
+                    limit = _quota_limit_with_preserved_identity(
+                        limit,
+                        _quota_limit_from_orm(existing_after_race),
+                    )
+                    await retry_session.merge(_quota_limit_to_orm(limit))
+                    await retry_session.commit()
+        return limit
+
+    async def list_quota_limits(
+        self,
+        *,
+        workspace_id: str,
+        principal_id: Optional[str] = None,
+        all_principals: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[QuotaLimitRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        async with self._sf() as s:
+            stmt = select(orm.QuotaLimitORM).where(orm.QuotaLimitORM.workspace_id == workspace_id)
+            if not all_principals:
+                if principal_id is None:
+                    stmt = stmt.where(orm.QuotaLimitORM.principal_id.is_(None))
+                else:
+                    stmt = stmt.where(orm.QuotaLimitORM.principal_id == principal_id)
+            stmt = stmt.order_by(orm.QuotaLimitORM.created_at, orm.QuotaLimitORM.quota_limit_id)
+            stmt = stmt.offset(offset).limit(limit)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_quota_limit_from_orm(row) for row in rows]
+
+    async def delete_quota_limit(self, quota_limit_id: str) -> None:
+        async with self._sf() as s:
+            await s.execute(
+                orm.QuotaLimitORM.__table__.delete().where(orm.QuotaLimitORM.quota_limit_id == quota_limit_id)
+            )
+            await s.commit()
+
+    async def get_quota_limit(self, quota_limit_id: str) -> Optional[QuotaLimitRecord]:
+        async with self._sf() as s:
+            row = await s.get(orm.QuotaLimitORM, quota_limit_id)
+            return _quota_limit_from_orm(row) if row else None
 
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog:
@@ -1086,9 +1477,20 @@ class SqlRepository:
             await s.commit()
         return key
 
-    async def list_api_keys(self) -> list[ApiKeyRecord]:
+    async def list_api_keys(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ApiKeyRecord]:
+        _validate_pagination(limit=limit, offset=offset)
         async with self._sf() as s:
-            rows = (await s.execute(select(orm.ApiKeyORM).order_by(orm.ApiKeyORM.created_at))).scalars().all()
+            stmt = select(orm.ApiKeyORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.ApiKeyORM.workspace_id == workspace_id)
+            stmt = stmt.order_by(orm.ApiKeyORM.created_at, orm.ApiKeyORM.api_key_id).offset(offset).limit(limit)
+            rows = (await s.execute(stmt)).scalars().all()
             return [_api_key_from_orm(row) for row in rows]
 
     async def get_api_key_by_prefix(self, key_prefix: str) -> Optional[ApiKeyRecord]:
@@ -1097,6 +1499,21 @@ class SqlRepository:
                 await s.execute(select(orm.ApiKeyORM).where(orm.ApiKeyORM.key_prefix == key_prefix).limit(1))
             ).scalar_one_or_none()
             return _api_key_from_orm(row) if row else None
+
+    async def get_api_key(self, api_key_id: str) -> Optional[ApiKeyRecord]:
+        async with self._sf() as s:
+            row = await s.get(orm.ApiKeyORM, api_key_id)
+            return _api_key_from_orm(row) if row else None
+
+    async def revoke_api_key(self, api_key_id: str, *, revoked_at: datetime) -> Optional[ApiKeyRecord]:
+        async with self._sf() as s:
+            current = await s.get(orm.ApiKeyORM, api_key_id)
+            if current is None:
+                return None
+            if current.revoked_at is None:
+                current.revoked_at = revoked_at
+                await s.commit()
+            return _api_key_from_orm(await s.get(orm.ApiKeyORM, api_key_id))
 
     async def mark_api_key_used(self, api_key_id: str, *, used_at: datetime) -> None:
         async with self._sf() as s:

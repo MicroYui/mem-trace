@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.deps import app_state
+from app.api.admin_routes import router as admin_router
 from app.api.routes import router
 
 
@@ -22,6 +23,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MemTrace", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

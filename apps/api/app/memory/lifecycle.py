@@ -11,6 +11,9 @@ _MAINLINE = {
     MemoryStatus.active: {MemoryStatus.dormant},
     MemoryStatus.dormant: {MemoryStatus.archived},
     MemoryStatus.archived: {MemoryStatus.deleted},
+    # Conflict adjudication (choose_winner) retires conflicted losers to
+    # superseded; this is the legitimate exit for a conflicted memory.
+    MemoryStatus.conflicted: {MemoryStatus.superseded},
 }
 _SAFE_UNPIN_STATUSES = {MemoryStatus.active, MemoryStatus.dormant, MemoryStatus.archived}
 _PINNABLE_STATUSES = {MemoryStatus.active, MemoryStatus.dormant, MemoryStatus.archived}

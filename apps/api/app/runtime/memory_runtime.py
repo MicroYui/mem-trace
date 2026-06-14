@@ -69,6 +69,10 @@ from app.runtime.models import (
     MemoryContext,
     MemoryItem,
     MemoryVersionRecord,
+    MaintenanceRunRecord,
+    MaintenanceTaskAttemptRecord,
+    AdminActionAuditRecord,
+    QuotaLimitRecord,
     MemoryConflictRecord,
     MemoryStatus,
     ObservabilitySummary,
@@ -1227,8 +1231,16 @@ class MemoryRuntime:
             status=status,
         )
 
-    async def dashboard_tables(self, *, workspace_id: Optional[str] = None) -> DashboardTables:
-        """Return minimal table payload for the P1 dashboard/API view."""
+    async def dashboard_tables(
+        self, *, workspace_id: Optional[str] = None, include_admin: bool = False
+    ) -> DashboardTables:
+        """Return minimal table payload for the P1 dashboard/API view.
+
+        ``include_admin`` gates the owner-only maintenance/admin governance
+        tables. The route only sets it for a real workspace owner when the admin
+        API is enabled, so report-reader / anonymous dashboard callers never see
+        admin audit / maintenance / quota-override metadata.
+        """
         runs = await self._repo.list_runs(workspace_id=workspace_id)
         accesses = await self._repo.list_access_logs(workspace_id=workspace_id)
         profile_events = await self._repo.list_profile_events()
@@ -1255,6 +1267,21 @@ class MemoryRuntime:
                 or (event.access_id is not None and event.access_id in access_ids)
             ]
         observability_summary = await build_observability_summary(self._repo, workspace_id=workspace_id)
+        # Admin governance tables are owner-gated and workspace-scoped. They are
+        # only populated for an authorized admin owner of a specific workspace;
+        # report-reader / anonymous / unscoped callers get empty admin tables.
+        maintenance_runs: list[MaintenanceRunRecord] = []
+        maintenance_task_attempts: list[MaintenanceTaskAttemptRecord] = []
+        admin_action_audits: list[AdminActionAuditRecord] = []
+        quota_limits: list[QuotaLimitRecord] = []
+        if include_admin and workspace_id is not None:
+            maintenance_runs = await self._repo.list_maintenance_runs(workspace_id=workspace_id)
+            for run in maintenance_runs:
+                maintenance_task_attempts.extend(
+                    await self._repo.list_maintenance_task_attempts(scheduler_run_id=run.scheduler_run_id)
+                )
+            admin_action_audits = await self._repo.list_admin_action_audits(workspace_id=workspace_id)
+            quota_limits = await self._repo.list_quota_limits(workspace_id=workspace_id, all_principals=True)
         return DashboardTables(
             runs=runs,
             accesses=accesses,
@@ -1266,6 +1293,10 @@ class MemoryRuntime:
             eval_results=eval_results,
             memory_versions=memory_versions,
             memory_conflicts=memory_conflicts,
+            maintenance_runs=maintenance_runs,
+            maintenance_task_attempts=maintenance_task_attempts,
+            admin_action_audits=admin_action_audits,
+            quota_limits=quota_limits,
             observability_summary=observability_summary,
             benchmark_summary=_benchmark_summary_from_records(results),
         )
