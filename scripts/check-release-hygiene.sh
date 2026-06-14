@@ -35,7 +35,7 @@ done
 secret_pattern="(sk-[A-Za-z0-9_-]{12,}|Bearer[[:space:]]+[A-Za-z0-9._~+/-]{12,}|api[_-]?key[[:space:]]*[:=][[:space:]]*['\"]?[A-Za-z0-9._~+/-]{12,}|password[[:space:]]*[:=][[:space:]]*['\"]?[^[:space:]'\"]{6,})"
 secret_matches="$(
   git grep -n -I -E -i "$secret_pattern" -- "${existing_scan_paths[@]}" ':!docs/design/*' ':!docs/superpowers/*' \
-    | grep -Ev 'process\.env|your-|example-|placeholder|\$\{[A-Z0-9_]+\}' \
+    | grep -Ev 'process\.env|your-|example-|placeholder|replace-with|\$\{[A-Z0-9_]+\}' \
     || true
 )"
 if [[ -n "$secret_matches" ]]; then

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,13 @@ from types import ModuleType
 
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def _example_subprocess_env() -> dict[str, str]:
+    python_paths = [str(ROOT / "apps" / "api"), str(ROOT / "packages" / "python-sdk" / "src")]
+    if existing := os.environ.get("PYTHONPATH"):
+        python_paths.append(existing)
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(python_paths)}
 
 
 def _load_module(path: Path, name: str) -> ModuleType:
@@ -55,6 +63,7 @@ def test_dogfood_coding_agent_scenario_outputs_safe_recovery() -> None:
     result = subprocess.run(
         [sys.executable, "examples/dogfood/coding_agent.py"],
         cwd=ROOT,
+        env=_example_subprocess_env(),
         check=True,
         text=True,
         capture_output=True,
@@ -68,6 +77,7 @@ def test_dogfood_multi_session_scenario_retrieves_project_constraint() -> None:
     result = subprocess.run(
         [sys.executable, "examples/dogfood/multi_session_constraints.py"],
         cwd=ROOT,
+        env=_example_subprocess_env(),
         check=True,
         text=True,
         capture_output=True,
@@ -80,6 +90,7 @@ def test_dogfood_destructive_failure_scenario_sanitizes_raw_command() -> None:
     result = subprocess.run(
         [sys.executable, "examples/dogfood/destructive_failure.py"],
         cwd=ROOT,
+        env=_example_subprocess_env(),
         check=True,
         text=True,
         capture_output=True,
