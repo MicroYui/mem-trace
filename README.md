@@ -21,6 +21,7 @@ Plain vector recall can retrieve text that is semantically similar but operation
 - Provider registry and controlled memory-key ontology with deterministic defaults and config-gated real providers.
 - Phase 4 platform foundations: optional async Redis/Celery, lifecycle/reflection signals, memory versions/conflicts, default-off governance/auth/quota, and redaction state protections.
 - Python SDK, CLI, LangGraph adapter, TypeScript SDK (`@memtrace/sdk`), MCP server (`@memtrace/mcp-server`), and Claude Code / Cursor MCP config templates.
+- Default-off OpenTelemetry/OpenInference-compatible export hooks with noop/JSONL/optional OTLP sinks and a read-only run export endpoint.
 
 ## Quickstart: 5-minute no-network demo
 
@@ -120,6 +121,27 @@ Both templates launch `bun packages/mcp-server/src/server.ts` relative to the re
 
 Available MCP tools: `memtrace_start_run`, `memtrace_start_step`, `memtrace_write_event`, `memtrace_retrieve_context`, `memtrace_inspect_access`, `memtrace_finish_step`, `memtrace_replay_access`, and `memtrace_report`.
 
+## Telemetry export
+
+Telemetry is disabled/noop by default. To write local no-network JSONL spans while using the HTTP service, opt in explicitly:
+
+```bash
+MEMTRACE_TELEMETRY_ENABLED=true \
+MEMTRACE_TELEMETRY_EXPORTER=jsonl \
+MEMTRACE_TELEMETRY_JSONL_PATH=reports/telemetry.jsonl \
+uv run uvicorn app.main:app --app-dir apps/api --reload
+```
+
+Runtime hooks export redacted terminal run/step snapshots plus event and retrieval spans after authoritative persistence succeeds. You can also request a read-only run projection; the response contains counts and warnings, not raw spans:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/telemetry/export/runs/<run_id> \
+  -H 'Content-Type: application/json' \
+  -d '{"include_steps":true,"include_events":true}'
+```
+
+OTLP export is optional and requires installing the `telemetry` extra plus an HTTP(S) endpoint without embedded credentials. LangSmith, Phoenix, and Langfuse are possible external OTLP/OpenInference destinations when configured outside MemTrace; this repository does not include vendor-specific SDK bridges. A CLI telemetry-export command is intentionally deferred; use runtime JSONL settings or the HTTP endpoint.
+
 ## Benchmark and reproducibility
 
 Run only the deterministic benchmark:
@@ -156,7 +178,7 @@ The benchmark currently compares six strategies (`baseline_0`, `long_context`, `
 ## User docs
 
 - [Getting started](docs/getting-started.md): prerequisites, no-network demos, HTTP path, TypeScript example, troubleshooting.
-- [Concepts](docs/concepts.md): runs, steps, events, state tree, memories, gate, negative evidence, compaction, lifecycle, governance defaults.
+- [Concepts](docs/concepts.md): runs, steps, events, state tree, memories, gate, negative evidence, compaction, lifecycle, governance defaults, telemetry export boundaries.
 - [MCP integration](docs/mcp.md): server behavior, templates, placeholders, local path assumptions, redaction/capping.
 - [Benchmark guide](docs/benchmark.md): strategies, cases, commands, and metric interpretation.
 - [Deployment notes](docs/deployment.md): PostgreSQL, optional Redis/Celery, auth/governance/quota defaults, provider config, safety posture.
@@ -199,6 +221,6 @@ Default local/dev/benchmark behavior keeps auth, quotas, Redis/Celery, live Post
 
 ## Roadmap
 
-The completed MVP, observability, compaction, failure-aware negative evidence, SDK/CLI/LangGraph, six-strategy benchmark, security/consistency hardening, provider registry/key ontology, Phase 4 platform foundations, TypeScript SDK, MCP server, and release-readiness work are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview, read [Why agent memory is not just RAG](docs/blog/why-agent-memory-is-not-just-rag.md).
+The completed MVP, observability, compaction, failure-aware negative evidence, SDK/CLI/LangGraph, six-strategy benchmark, security/consistency hardening, provider registry/key ontology, Phase 4 platform foundations, TypeScript SDK, MCP server, release-readiness work, and the core OpenTelemetry/OpenInference exporter are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md). For a narrative overview, read [Why agent memory is not just RAG](docs/blog/why-agent-memory-is-not-just-rag.md).
 
-Likely next feature slice after release readiness is OpenTelemetry/OpenInference export. Advanced retrieval/storage, admin workflow depth, a React dashboard, and a dedicated IDE extension remain future work; the IDE package is deferred until MCP adoption feedback shows editor-specific needs.
+Advanced retrieval/storage, admin workflow depth, a React dashboard, richer telemetry backfill/CLI surfaces, and a dedicated IDE extension remain future work; the IDE package is deferred until MCP adoption feedback shows editor-specific needs.

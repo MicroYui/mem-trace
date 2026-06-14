@@ -13,6 +13,7 @@ Agent / demo loop
      -> Retrieval Controller
      -> Admission Gate
      -> Profiler
+     -> Telemetry projection package (core exporter slice complete)
   -> PostgreSQL + pgvector source of truth
   -> CLI/JSON/Markdown report first; dashboard later
 ```
@@ -32,6 +33,7 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 - **Context Packer:** emits structured blocks: active state, tool evidence, project constraints, profile/procedural/episodic memory, warnings.
 - **Profiler:** records phase-level latency, candidate counts, gate counts, token/cost fields when available.
 - **Evaluation/Demo:** compares vector-only versus state-aware/gated retrieval on deterministic cases.
+- **Telemetry Projection Package:** `docs/design/OTEL_OPENINFERENCE_EXPORTER_PLAN.md` core exporter slice is complete through Segment 4 closeout and final full-plan review hardening. The package provides redacted `memtrace.*` / OpenInference-compatible spans, noop/in-memory/JSONL/optional OTLP sinks, settings-driven factory construction with strict/header/sample-rate controls, a fail-open `TelemetryService`, post-persistence runtime hooks, and a minimal read-only run export endpoint returning counts/generic warnings only. Runtime hooks must not synchronously perform network OTLP export, must remain fail-open on hot paths (including projection reads), and must avoid duplicate run/step lifecycle span ids; CLI export and richer access/backfill surfaces remain deferred.
 
 ## Key Data Structures
 
@@ -60,6 +62,7 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 - P0 write rules must not become a general NLP/extraction system by accident.
 - Provider capability snapshots and retrieval policy snapshots must stay non-secret.
 - Benchmarks must force deterministic providers even when real-provider env vars are set.
+- Telemetry export is an external egress surface: it must be disabled/noop by default, recursively redacted/capped, best-effort/fail-open on runtime hot paths, no synchronous network export from hot-path hooks, quota-governed for HTTP export surfaces, and read-only when projecting persisted run data. Access-level export/backfill remains future work.
 
 ## Persistence / Storage Design
 
@@ -69,4 +72,5 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 ## External Integrations
 
 - Implemented: Python SDK/CLI/LangGraph adapter, TypeScript SDK, MCP server, and MCP config templates.
-- Future: OpenTelemetry/OpenInference exporter, React dashboard, and dedicated IDE extension if MCP adoption feedback shows editor-specific needs.
+- Latest completed feature: OpenTelemetry/OpenInference exporter via `docs/design/OTEL_OPENINFERENCE_EXPORTER_PLAN.md`; Segment 1 contracts/redaction/pure builders, Segment 2 exporters/settings/factory/service, Segment 3 runtime hooks/API/docs, and Segment 4 verification/closeout are complete.
+- Future: React dashboard and dedicated IDE extension if MCP adoption feedback shows editor-specific needs; vendor-specific LangSmith/Phoenix/Langfuse bridges remain deferred until explicitly selected as a separate bridge slice.

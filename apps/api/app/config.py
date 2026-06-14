@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -111,6 +112,25 @@ class Settings(BaseSettings):
     maintenance_queue_name: str = "memtrace.maintenance"
     eval_queue_name: str = "memtrace.eval"
     async_task_default_ttl_seconds: int = 3600
+    # OpenTelemetry/OpenInference export (Segment 2). Defaults are deliberately
+    # disabled/noop so local/dev/benchmark/reproduce never require files,
+    # optional OTel dependencies, or network endpoints.
+    telemetry_enabled: bool = False
+    telemetry_exporter: str = "noop"
+    telemetry_jsonl_path: str = "reports/telemetry.jsonl"
+    telemetry_jsonl_append: bool = False
+    telemetry_otlp_endpoint: str = ""
+    telemetry_headers: dict[str, str] = Field(default_factory=dict)
+    telemetry_strict: bool = False
+    telemetry_sample_rate: float = 1.0
+    telemetry_fail_open: bool = True
+
+    @field_validator("telemetry_sample_rate")
+    @classmethod
+    def _validate_telemetry_sample_rate(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            raise ValueError("telemetry_sample_rate must be between 0.0 and 1.0")
+        return value
 
 
 @lru_cache

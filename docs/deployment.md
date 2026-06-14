@@ -11,6 +11,7 @@ By default, local/dev/benchmark behavior is deterministic and low-friction:
 - quota checks disabled,
 - Redis/Celery disabled,
 - real LLM and embedding providers disabled,
+- telemetry export disabled/noop,
 - raw payload retention disabled.
 
 This keeps no-network demos, tests, benchmark runs, and `scripts/reproduce.sh` reproducible.
@@ -88,6 +89,41 @@ uv run python -m app.benchmark.llm_bench --output-dir reports
 ```
 
 Do not make real provider calls part of default CI or first-time quickstarts.
+
+## Optional telemetry export
+
+OpenTelemetry/OpenInference-compatible export is default-off and must be enabled explicitly. Local JSONL output is the safest no-network smoke path:
+
+```bash
+MEMTRACE_TELEMETRY_ENABLED=true \
+MEMTRACE_TELEMETRY_EXPORTER=jsonl \
+MEMTRACE_TELEMETRY_JSONL_PATH=reports/telemetry.jsonl \
+uv run uvicorn app.main:app --app-dir apps/api
+```
+
+The configured JSONL path must stay under `reports/...`; absolute paths, `..` traversal, and symlink escapes are rejected by the factory. Runtime hooks write redacted terminal run/step snapshots plus event/retrieval spans after persistence succeeds and fail open if telemetry export fails.
+
+For OTLP, install the optional telemetry extra and provide an HTTP(S) endpoint without embedded credentials:
+
+```bash
+uv sync --extra dev --extra telemetry
+MEMTRACE_TELEMETRY_ENABLED=true \
+MEMTRACE_TELEMETRY_EXPORTER=otlp \
+MEMTRACE_TELEMETRY_OTLP_ENDPOINT=https://otel-collector.example.invalid/v1/traces \
+uv run uvicorn app.main:app --app-dir apps/api
+```
+
+If optional OTLP dependencies or endpoint configuration are missing, default fail-open construction degrades to noop with warnings. LangSmith, Phoenix, and Langfuse can consume OTLP/OpenInference-compatible output when configured externally, but MemTrace does not ship vendor-specific SDK bridges in this slice.
+
+The read-only run export API returns counts and warnings, not raw spans:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/telemetry/export/runs/<run_id> \
+  -H 'Content-Type: application/json' \
+  -d '{"include_steps":true,"include_events":true}'
+```
+
+When auth/governance is enabled, this endpoint requires report-reader access to the run workspace and consumes the same `report_export` quota unit as observability report export. A CLI telemetry-export command is deferred; use runtime JSONL settings or the HTTP endpoint.
 
 ## Client integration deployment
 

@@ -72,6 +72,14 @@ Lifecycle signals and scheduler outputs track retention and reflection priority 
 
 Local/dev/benchmark behavior is default-off for auth, quotas, and governance. Hosted or multi-user deployments can enable API keys, workspace authorization, quota checks, and stricter raw-payload controls. Raw payload retention is disabled by default.
 
+## Telemetry export
+
+OpenTelemetry/OpenInference-compatible export is an observability projection, not a second source of truth. It maps persisted runs, steps, events, and retrieval accesses into redacted spans through a pluggable exporter. The stable attribute contract uses `memtrace.*` keys; OpenInference keys are compatibility hints only.
+
+Telemetry is disabled/noop by default. When enabled, runtime hooks export only after authoritative persistence succeeds and fail open if the sink is unavailable; terminal run/step snapshots are emitted once per lifecycle id to avoid duplicate OpenTelemetry span ids. JSONL output is intended for local no-network smoke/debug use, while OTLP export is optional and requires an explicit endpoint plus optional telemetry dependencies. Exporters never send raw event content, raw memory content, raw failed-attempt text, raw payload references, API keys, auth headers, destructive commands, or production-path markers.
+
+The HTTP run export endpoint is read-only and returns only export counts and warnings, not raw span payloads. CLI telemetry export is deferred so the CLI does not duplicate HTTP/export semantics.
+
 ## Public integration boundaries
 
 External integrations should use one of the public boundaries:

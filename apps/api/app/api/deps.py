@@ -25,6 +25,8 @@ from app.runtime.models import ExtractionMode, Principal
 from app.runtime.repository import Repository
 from app.storage.db import make_engine, make_session_factory
 from app.storage.sql_repository import SqlRepository
+from app.telemetry.factory import build_telemetry_service
+from app.telemetry.service import TelemetryService
 
 
 def _build_summarizer_provider(settings: Settings) -> SummarizerProvider:
@@ -40,6 +42,7 @@ class AppState:
         self.runtime: Optional[MemoryRuntime] = None
         self.repository: Optional[Repository] = None
         self.provider_registry: Optional[ProviderRegistry] = None
+        self.telemetry_service: Optional[TelemetryService] = None
 
     def startup(self) -> None:
         settings = get_settings()
@@ -48,6 +51,7 @@ class AppState:
         repo = SqlRepository(sf)
         self.repository = repo
         self.provider_registry = build_provider_registry(settings)
+        self.telemetry_service = build_telemetry_service(settings).service
         provider = self.provider_registry.get(ProviderKind.extraction)
         summarizer_provider = self.provider_registry.get(ProviderKind.summarizer)
         candidate_buffer = CandidateBuffer()
@@ -75,6 +79,7 @@ class AppState:
             provider_registry=self.provider_registry,
             candidate_buffer=candidate_buffer,
             task_enqueue=enqueue_memory_extraction if settings.async_tasks_enabled else None,
+            telemetry_service=self.telemetry_service,
         )
 
     async def shutdown(self) -> None:
@@ -99,6 +104,11 @@ def get_repository() -> Repository:
 def get_provider_registry() -> ProviderRegistry:
     assert app_state.provider_registry is not None, "provider registry not initialized"
     return app_state.provider_registry
+
+
+def get_telemetry_service() -> TelemetryService:
+    assert app_state.telemetry_service is not None, "telemetry service not initialized"
+    return app_state.telemetry_service
 
 
 def get_quota_service() -> QuotaService:

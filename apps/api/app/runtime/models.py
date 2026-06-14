@@ -788,6 +788,17 @@ class ObservabilityReportResult(_Base):
     summary: ObservabilitySummary
 
 
+class TelemetryExportRequest(_Base):
+    include_steps: bool = True
+    include_events: bool = True
+
+
+class TelemetryExportResponse(_Base):
+    exported_span_count: int = 0
+    dropped_span_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DashboardTables(_Base):
     """Minimal P1 table-style dashboard payload."""
 

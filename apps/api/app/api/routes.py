@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.api.deps import get_quota_service, get_runtime, require_api_key
+from app.api.deps import get_quota_service, get_runtime, get_telemetry_service, require_api_key
 from app.governance.permissions import require_workspace_permission
 from app.governance.quota import QuotaService, QuotaUnit
 from app.runtime.memory_runtime import (
@@ -42,11 +42,14 @@ from app.runtime.models import (
     StartRunRequest,
     StartStepRequest,
     StateNode,
+    TelemetryExportRequest,
+    TelemetryExportResponse,
     WriteEventRequest,
     WriteEventResult,
     Principal,
     WorkspacePermission,
 )
+from app.telemetry.service import TelemetryService
 
 router = APIRouter(prefix="/v1")
 
@@ -392,6 +395,31 @@ async def write_observability_report(
         return await rt.write_observability_report(req.model_copy(update={"workspace_id": workspace_id}))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/telemetry/export/runs/{run_id}", response_model=TelemetryExportResponse)
+async def export_run_telemetry(
+    run_id: str,
+    req: TelemetryExportRequest,
+    principal: Principal = Depends(require_api_key),
+    rt: MemoryRuntime = Depends(get_runtime),
+    telemetry: TelemetryService = Depends(get_telemetry_service),
+    quota: QuotaService = Depends(get_quota_service),
+) -> TelemetryExportResponse:
+    workspace_id = await _workspace_for_run_or_404(rt, run_id)
+    _authz(principal, workspace_id, WorkspacePermission.report_reader)
+    await quota.check(principal, workspace_id, QuotaUnit.report_export)
+    run = await rt.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    steps = await rt.get_steps(run_id) if req.include_steps else []
+    events = await rt.get_timeline(run_id) if req.include_events else []
+    result = telemetry.export_run_records(run=run, steps=steps, events=events)
+    return TelemetryExportResponse(
+        exported_span_count=result.exported_span_count,
+        dropped_span_count=result.dropped_span_count,
+        warnings=result.warnings,
+    )
 
 
 @router.get("/steps/{step_id}", response_model=AgentStep)

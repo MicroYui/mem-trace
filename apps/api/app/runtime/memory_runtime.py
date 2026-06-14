@@ -98,6 +98,7 @@ from app.runtime.models import (
     RetainedFact,
 )
 from app.runtime.repository import EMBED_DIM, Repository
+from app.telemetry.service import TelemetryService
 
 
 def _now() -> datetime:
@@ -152,6 +153,7 @@ class MemoryRuntime:
         provider_registry: Optional[ProviderRegistry] = None,
         candidate_buffer: Optional[CandidateBufferProtocol] = None,
         task_enqueue: TaskEnqueue | None = None,
+        telemetry_service: TelemetryService | None = None,
     ):
         settings = get_settings()
         self._settings = settings
@@ -203,6 +205,7 @@ class MemoryRuntime:
         self._explicit_flush_buffer = CandidateBuffer()
         self._explicit_local_fallback_buffer = CandidateBuffer()
         self._task_enqueue = task_enqueue
+        self._telemetry_service = telemetry_service
 
     @property
     def default_workspace_id(self) -> str:
@@ -387,6 +390,8 @@ class MemoryRuntime:
             state_node.updated_at = _now()
             await self._repo.update_state_node(state_node)
 
+        self._export_event_telemetry(event)
+
         return WriteEventResult(
             event=event,
             created_memory_ids=created_ids,
@@ -428,6 +433,7 @@ class MemoryRuntime:
         if run is None:
             raise RunNotFoundError(request.run_id)
 
+        previous_step_status = step.status
         step.status = request.status
         step.error_message = request.error_message
         step.finished_at = _now()
@@ -451,6 +457,9 @@ class MemoryRuntime:
         mem = writer.write_from_finish_step(step, summary=request.summary)
         await self._repo.add_memory(await self._prepare_embedding(mem))
         created_ids.append(mem.memory_id)
+
+        if previous_step_status == StepStatus.active:
+            self._export_step_telemetry(step, run=run)
 
         return FinishStepResult(
             step=step,
@@ -542,6 +551,7 @@ class MemoryRuntime:
         if run is None:
             raise RunNotFoundError(request.run_id)
 
+        previous_run_status = run.status
         run.status = request.status
         run.finished_at = _now()
         run.updated_at = _now()
@@ -567,6 +577,9 @@ class MemoryRuntime:
             await self._supersede_run_summary_key(run.workspace_id, mem.key)
             await self._repo.add_memory(await self._prepare_embedding(mem))
             created_ids.append(mem.memory_id)
+
+        if previous_run_status == RunStatus.running:
+            self._export_run_telemetry(run)
 
         return CompleteRunResult(
             run=run,
@@ -595,14 +608,18 @@ class MemoryRuntime:
         ws = request.workspace_id or run.workspace_id
         prelude_blocks, pending_logs, prelude_warnings = await self._maybe_fold_history(request, workspace_id=ws)
         if prelude_blocks or pending_logs or prelude_warnings:
-            return await self._retrieval.retrieve_with_prelude(
+            context = await self._retrieval.retrieve_with_prelude(
                 request,
                 workspace_id=ws,
                 prelude_blocks=prelude_blocks,
                 pending_compaction_logs=pending_logs,
                 prelude_warnings=prelude_warnings,
             )
-        return await self._retrieval.retrieve(request, workspace_id=ws)
+            await self._export_retrieval_telemetry(context.access_id)
+            return context
+        context = await self._retrieval.retrieve(request, workspace_id=ws)
+        await self._export_retrieval_telemetry(context.access_id)
+        return context
 
     async def flush_session(self, session_id: str, *, workspace_id: str | None = None) -> FlushResult:
         """Force extraction of all buffered candidates for a session.
@@ -628,6 +645,43 @@ class MemoryRuntime:
         for event in events:
             created.extend(await self.process_event_extraction(event.event_id))
         return created
+
+    def _export_run_telemetry(self, run: AgentRun) -> None:
+        if self._telemetry_service is not None:
+            try:
+                self._telemetry_service.export_run_records(run=run)
+            except Exception:  # noqa: BLE001 - runtime telemetry hooks must never break the hot path
+                logger.warning("Runtime telemetry run export failed for run %s", run.run_id, exc_info=True)
+
+    def _export_step_telemetry(self, step: AgentStep, *, run: AgentRun | None = None) -> None:
+        if self._telemetry_service is not None:
+            try:
+                self._telemetry_service.export_step_record(step=step, run=run)
+            except Exception:  # noqa: BLE001 - runtime telemetry hooks must never break the hot path
+                logger.warning("Runtime telemetry step export failed for step %s", step.step_id, exc_info=True)
+
+    def _export_event_telemetry(self, event: AgentEvent) -> None:
+        if self._telemetry_service is not None:
+            try:
+                self._telemetry_service.export_event_record(event=event)
+            except Exception:  # noqa: BLE001 - runtime telemetry hooks must never break the hot path
+                logger.warning("Runtime telemetry event export failed for event %s", event.event_id, exc_info=True)
+
+    async def _export_retrieval_telemetry(self, access_id: str) -> None:
+        if self._telemetry_service is None:
+            return
+        try:
+            access = await self._repo.get_access_log(access_id)
+            if access is None:
+                return
+            self._telemetry_service.export_retrieval_records(
+                access=access,
+                gate_logs=await self._repo.list_gate_logs(access_id),
+                profile_events=await self._repo.list_profile_events(access_id=access_id),
+                compaction_logs=await self._repo.list_compaction_logs(access_id=access_id),
+            )
+        except Exception:  # noqa: BLE001 - runtime telemetry hooks must never break the hot path
+            logger.warning("Runtime telemetry retrieval export failed for access %s", access_id, exc_info=True)
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -1134,6 +1188,9 @@ class MemoryRuntime:
     # ------------------------------------------------------------------ #
     async def get_timeline(self, run_id: str) -> list[AgentEvent]:
         return await self._repo.list_events(run_id)
+
+    async def get_run(self, run_id: str) -> AgentRun | None:
+        return await self._repo.get_run(run_id)
 
     async def get_state_tree(self, run_id: str) -> list[StateNode]:
         return await self._repo.list_state_nodes(run_id)
