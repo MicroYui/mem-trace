@@ -228,6 +228,7 @@ class Repository(Protocol):
         workspace_id: str,
         principal_id: Optional[str] = None,
         all_principals: bool = False,
+        unit: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[QuotaLimitRecord]: ...
@@ -788,6 +789,7 @@ class InMemoryRepository:
         workspace_id: str,
         principal_id: Optional[str] = None,
         all_principals: bool = False,
+        unit: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[QuotaLimitRecord]:
@@ -797,6 +799,8 @@ class InMemoryRepository:
             if quota_limit.workspace_id != workspace_id:
                 continue
             if not all_principals and quota_limit.principal_id != principal_id:
+                continue
+            if unit is not None and quota_limit.unit != unit:
                 continue
             rows.append(quota_limit)
         rows.sort(key=lambda quota_limit: (quota_limit.created_at, quota_limit.quota_limit_id))

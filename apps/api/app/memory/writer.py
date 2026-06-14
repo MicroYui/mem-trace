@@ -56,16 +56,22 @@ _CORRECTION_PATTERNS = [
     re.compile(r"不是\s*(?P<old>[A-Za-z0-9_.\-]+)[，,\s]*是\s*(?P<new>[A-Za-z0-9_.\-]+)"),
     re.compile(r"不用\s*(?P<old>[A-Za-z0-9_.\-]+)[，,\s]*用\s*(?P<new>[A-Za-z0-9_.\-]+)"),
 ]
+# Non-adjacent Chinese negation like "不想用 X" / "不打算用 X": a few intervening
+# characters between 不 and 用 still express negation. Used both to detect the
+# negative constraint and to suppress the spurious positive match (mvp.md §5.2).
+_NONADJACENT_NEGATION = re.compile(r"不[^。，；,;]{0,3}(?:使用|用)\s*(?P<rt>[A-Za-z0-9_.\-]+)")
 # positive: "使用 X" / "用 X" / "uses X". The lookbehinds prevent matching the
 # "使用"/"用" inside a negation like "不用" / "不使用" (mvp.md §5.2): `(?<!不)`
 # rejects "不使用"/"不用", and `(?<!不使)` rejects the bare "用" tail of "不使用".
+# Non-adjacent negations ("不想用") are filtered out separately below.
 _POSITIVE_PATTERNS = [
     re.compile(r"(?<!不)(?<!不使)(?:使用|用)\s*(?P<rt>[A-Za-z0-9_.\-]+)"),
     re.compile(r"(?i)\buses?\s+(?P<rt>[A-Za-z0-9_.\-]+)"),
 ]
-# negative: "不用 Y" / "不使用 Y" / "should not use Y"
+# negative: "不用 Y" / "不使用 Y" / "不想用 Y" / "should not use Y"
 _NEGATIVE_PATTERNS = [
     re.compile(r"不(?:使用|用)\s*(?P<rt>[A-Za-z0-9_.\-]+)"),
+    _NONADJACENT_NEGATION,
     re.compile(r"(?i)should not use\s+(?P<rt>[A-Za-z0-9_.\-]+)"),
     re.compile(r"(?i)\bnot\s+use\s+(?P<rt>[A-Za-z0-9_.\-]+)"),
 ]
@@ -172,10 +178,12 @@ def write_from_user_message(event: AgentEvent) -> list[MemoryWriteResult]:
             break
 
     # Negative constraint
+    seen_excluded: set[str] = set()
     for pat in _NEGATIVE_PATTERNS:
         for m in pat.finditer(content):
             rt = _norm_execution_token(m.group("rt"))
-            if rt:
+            if rt and rt not in seen_excluded:
+                seen_excluded.add(rt)
                 results.append(
                     MemoryWriteResult(
                         _project_memory(
@@ -186,18 +194,22 @@ def write_from_user_message(event: AgentEvent) -> list[MemoryWriteResult]:
                         )
                     )
                 )
-                break
 
     # Negation guard (mvp.md §5.2): phrases like "should not use X" / "不想用 X"
     # can match BOTH a positive pattern ("use X") and a negative pattern, yielding
-    # a self-contradictory project.runtime=X plus project.runtime.excluded=X. When
-    # the same runtime is excluded, the positive constraint is spurious — drop it.
+    # a self-contradictory positive project constraint plus project.runtime.excluded.
+    # When the same execution token is excluded, drop any spurious positive
+    # constraint for it, regardless of which positive controlled key it normalized
+    # to (project.runtime or project.package_manager).
     excluded = {r.memory.value for r in results if r.memory.key == PROJECT_RUNTIME_EXCLUDED}
     if excluded:
         results = [
             r
             for r in results
-            if not (r.memory.key == PROJECT_RUNTIME and r.memory.value in excluded)
+            if not (
+                r.memory.key in (PROJECT_RUNTIME, PROJECT_PACKAGE_MANAGER)
+                and r.memory.value in excluded
+            )
         ]
 
     return results
@@ -265,6 +277,11 @@ def write_from_finish_step(step: AgentStep, *, summary: Optional[str]) -> Memory
         branch = BranchStatus.completed
     elif step.status == StepStatus.failed:
         branch = BranchStatus.failed
+    elif step.status in (StepStatus.cancelled, StepStatus.rolled_back):
+        # cancelled/rolled_back steps are removed from the active path by the
+        # state tree; their working-state memory must not enter the active
+        # branch or it would leak into retrieval context.
+        branch = BranchStatus.rolled_back
     else:
         branch = BranchStatus.active
     text = summary or step.error_message or f"step {step.intent or step.step_id} {step.status.value}"

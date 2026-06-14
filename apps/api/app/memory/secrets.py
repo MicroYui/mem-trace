@@ -18,11 +18,13 @@ _SECRET_PATTERNS = [
     re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"),  # Slack token
     re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b"),  # JWT
     re.compile(
-        r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"
-    ),  # PEM private key block
+        r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----"
+    ),  # PEM private key block (incl. encrypted)
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*\S+"),
+    re.compile(r"(?i)\bauthorization\b\s*[:=]\s*[^\n\r]+"),  # full auth header value (scheme + credential)
     re.compile(r"(?i)\b(?:password|passwd)\s+is\s+\S+"),  # "my password is hunter2"
     re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}"),
+    re.compile(r"(?i)\bbasic\s+[A-Za-z0-9+/=]{16,}"),  # HTTP Basic auth credential
 ]
 
 _REDACTION = "[REDACTED]"

@@ -238,3 +238,38 @@ async def test_http_backend_flush_session_accepts_path_sensitive_session_ids() -
         await client.aclose()
 
     assert result.session_id == "tenant/session"
+
+
+async def test_http_backend_maps_422_validation_error_to_bad_request() -> None:
+    """FastAPI 422 validation errors must map to SDK BadRequestError, matching the
+    TS SDK and the in-process backend's BadRequestError semantics."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": [{"msg": "field required"}]})
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.AsyncClient(transport=transport, base_url="http://test")
+    client = MemTrace.http("http://test", client=http_client)
+    try:
+        with pytest.raises(BadRequestError):
+            await client.start_run(StartRunRequest(workspace_id="ws", session_id="s", task="t"))
+    finally:
+        await client.aclose()
+
+
+async def test_http_backend_flush_session_passes_workspace_id_under_auth(monkeypatch) -> None:
+    """With auth enabled and a scoped principal, flush_session must forward
+    workspace_id or the server returns 403."""
+    monkeypatch.setenv("MEMTRACE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_API_KEY", "dev-secret")
+    get_settings.cache_clear()
+    runtime = MemoryRuntime(InMemoryRepository(), default_workspace_id="ws_http_auth")
+    _override_runtime(runtime)
+    http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+    client = MemTrace.http("http://test", api_key="dev-secret", client=http_client)
+    try:
+        result = await client.flush_session("sess-1", workspace_id="ws_http_auth")
+    finally:
+        await client.aclose()
+
+    assert result.session_id == "sess-1"

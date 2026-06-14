@@ -254,6 +254,13 @@ def build_results(event: AgentEvent, candidates: list[object]) -> list[MemoryWri
         normalized = normalize_memory_key(candidate.key, free_form=candidate.free_form)
         if normalized.spec is None and not normalized.free_form:
             continue
+        # A controlled key flagged llm_extractable=False is not allowed to be
+        # written through the LLM extraction path even if the model emits it,
+        # otherwise a controlled key could be used to write an unexpected
+        # memory_type/scope. The prompt already excludes these keys; this is the
+        # enforcement at the persistence boundary.
+        if normalized.spec is not None and not normalized.spec.llm_extractable:
+            continue
         updates = {"key": normalized.key, "free_form": normalized.free_form}
         if normalized.spec is not None:
             updates["memory_type"] = normalized.spec.memory_type

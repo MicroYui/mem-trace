@@ -1278,6 +1278,7 @@ class SqlRepository:
         workspace_id: str,
         principal_id: Optional[str] = None,
         all_principals: bool = False,
+        unit: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[QuotaLimitRecord]:
@@ -1289,6 +1290,8 @@ class SqlRepository:
                     stmt = stmt.where(orm.QuotaLimitORM.principal_id.is_(None))
                 else:
                     stmt = stmt.where(orm.QuotaLimitORM.principal_id == principal_id)
+            if unit is not None:
+                stmt = stmt.where(orm.QuotaLimitORM.unit == unit)
             stmt = stmt.order_by(orm.QuotaLimitORM.created_at, orm.QuotaLimitORM.quota_limit_id)
             stmt = stmt.offset(offset).limit(limit)
             rows = (await s.execute(stmt)).scalars().all()

@@ -61,65 +61,71 @@ async def run_workspace_maintenance(
 
     completed = failed = skipped = 0
     warnings: list[str] = []
-    for operation in parsed:
-        attempt = await repo.add_maintenance_task_attempt(
-            MaintenanceTaskAttemptRecord(
-                scheduler_run_id=run.scheduler_run_id,
-                workspace_id=workspace_id,
-                operation=operation,
-                status=SchedulerTaskStatus.running,
-                idempotency_key=f"maintenance:{run.scheduler_run_id}:{operation.value}",
-                started_at=_now(),
+    orchestration_error: Exception | None = None
+    try:
+        for operation in parsed:
+            attempt = await repo.add_maintenance_task_attempt(
+                MaintenanceTaskAttemptRecord(
+                    scheduler_run_id=run.scheduler_run_id,
+                    workspace_id=workspace_id,
+                    operation=operation,
+                    status=SchedulerTaskStatus.running,
+                    idempotency_key=f"maintenance:{run.scheduler_run_id}:{operation.value}",
+                    started_at=_now(),
+                )
             )
-        )
-        if dry_run:
-            skipped += 1
-            attempt = attempt.model_copy(
-                update={
-                    "status": SchedulerTaskStatus.skipped,
-                    "result": {
-                        "operation": operation.value,
-                        "workspace_id": workspace_id,
-                        "reason": "dry_run",
+            if dry_run:
+                skipped += 1
+                attempt = attempt.model_copy(
+                    update={
+                        "status": SchedulerTaskStatus.skipped,
+                        "result": {
+                            "operation": operation.value,
+                            "workspace_id": workspace_id,
+                            "reason": "dry_run",
+                        },
+                        "finished_at": _now(),
+                        "updated_at": _now(),
                     },
-                    "finished_at": _now(),
-                    "updated_at": _now(),
-                },
-                deep=True,
-            )
+                    deep=True,
+                )
+                await repo.update_maintenance_task_attempt(attempt)
+                continue
+            try:
+                handler = OPERATION_HANDLERS[operation]
+                result = await handler(
+                    repo,
+                    workspace_id=workspace_id,
+                    scheduler_run_id=run.scheduler_run_id,
+                )
+                completed += 1
+                attempt = attempt.model_copy(
+                    update={
+                        "status": SchedulerTaskStatus.completed,
+                        "result": _redacted_dict(result),
+                        "finished_at": _now(),
+                        "updated_at": _now(),
+                    },
+                    deep=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - per-operation failure isolation is intentional
+                failed += 1
+                error_summary = _error_summary(exc)
+                warnings.append(f"{operation.value} failed")
+                attempt = attempt.model_copy(
+                    update={
+                        "status": SchedulerTaskStatus.failed,
+                        "error_summary": error_summary,
+                        "finished_at": _now(),
+                        "updated_at": _now(),
+                    },
+                    deep=True,
+                )
             await repo.update_maintenance_task_attempt(attempt)
-            continue
-        try:
-            handler = OPERATION_HANDLERS[operation]
-            result = await handler(
-                repo,
-                workspace_id=workspace_id,
-                scheduler_run_id=run.scheduler_run_id,
-            )
-            completed += 1
-            attempt = attempt.model_copy(
-                update={
-                    "status": SchedulerTaskStatus.completed,
-                    "result": _redacted_dict(result),
-                    "finished_at": _now(),
-                    "updated_at": _now(),
-                },
-                deep=True,
-            )
-        except Exception as exc:  # noqa: BLE001 - per-operation failure isolation is intentional
-            failed += 1
-            error_summary = _error_summary(exc)
-            warnings.append(f"{operation.value} failed")
-            attempt = attempt.model_copy(
-                update={
-                    "status": SchedulerTaskStatus.failed,
-                    "error_summary": error_summary,
-                    "finished_at": _now(),
-                    "updated_at": _now(),
-                },
-                deep=True,
-            )
-        await repo.update_maintenance_task_attempt(attempt)
+    except Exception as exc:  # noqa: BLE001 - attempt bookkeeping failure must still close the run
+        orchestration_error = exc
+        failed += 1
+        warnings.append("maintenance orchestration error")
 
     finished = _now()
     summary = {
@@ -131,7 +137,7 @@ async def run_workspace_maintenance(
     }
     run = run.model_copy(
         update={
-            "status": SchedulerRunStatus.failed if failed else SchedulerRunStatus.completed,
+            "status": SchedulerRunStatus.failed if (failed or orchestration_error) else SchedulerRunStatus.completed,
             "summary": summary,
             "warnings": warnings,
             "finished_at": finished,
@@ -139,7 +145,10 @@ async def run_workspace_maintenance(
         },
         deep=True,
     )
-    return await repo.update_maintenance_run(run)
+    persisted = await repo.update_maintenance_run(run)
+    if orchestration_error is not None:
+        raise orchestration_error
+    return persisted
 
 
 def _parse_operations(operations: list[MaintenanceOperation | str]) -> list[MaintenanceOperation]:

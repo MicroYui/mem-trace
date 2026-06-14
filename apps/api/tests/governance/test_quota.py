@@ -103,3 +103,43 @@ async def test_workspace_wide_override_applies_when_no_principal_override() -> N
     with pytest.raises(HTTPException) as exc:
         await service.check(_principal(), "ws_quota", QuotaUnit.write_event)
     assert exc.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_override_only_applies_to_its_own_unit() -> None:
+    """A write_event override must NOT bleed into retrieve_context checks.
+
+    The override lookup must filter by unit; otherwise an unrelated unit picks up
+    the earliest-created override for the (workspace, principal) pair.
+    """
+    repo = InMemoryRepository()
+    await repo.upsert_quota_limit(
+        QuotaLimitRecord(
+            workspace_id="ws_quota",
+            principal_id="user_1",
+            unit="write_event",
+            limit=1,
+            window_seconds=60,
+            created_by="admin",
+        )
+    )
+    settings = Settings(
+        governance_enabled=True,
+        quota_enabled=True,
+        quota_write_event_per_window=100,
+        quota_retrieve_context_per_window=5,
+    )
+    service = QuotaService(InMemoryQuotaCounter(), settings, repo=repo)
+
+    # retrieve_context must use its settings default (5), not the write_event override (1).
+    for _ in range(5):
+        await service.check(_principal(), "ws_quota", QuotaUnit.retrieve_context)
+    with pytest.raises(HTTPException) as exc:
+        await service.check(_principal(), "ws_quota", QuotaUnit.retrieve_context)
+    assert exc.value.status_code == 429
+
+    # write_event still honors its own override of 1.
+    await service.check(_principal(), "ws_quota", QuotaUnit.write_event)
+    with pytest.raises(HTTPException) as exc2:
+        await service.check(_principal(), "ws_quota", QuotaUnit.write_event)
+    assert exc2.value.status_code == 429

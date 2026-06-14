@@ -97,8 +97,8 @@ class MemTrace:
     async def retrieve_context(self, request: RetrievalRequest) -> MemoryContext:
         return await self._backend.retrieve_context(request)
 
-    async def flush_session(self, session_id: str) -> FlushResult:
-        return await self._backend.flush_session(session_id)
+    async def flush_session(self, session_id: str, *, workspace_id: str | None = None) -> FlushResult:
+        return await self._backend.flush_session(session_id, workspace_id=workspace_id)
 
     async def get_timeline(self, run_id: str) -> list[AgentEvent]:
         return await self._backend.get_timeline(run_id)

@@ -64,6 +64,37 @@ async def test_trace_bundle_export_redacts_secret_event_and_memory_content():
 
 
 @pytest.mark.asyncio
+async def test_trace_bundle_export_redacts_memory_lifecycle_metadata():
+    """lifecycle_metadata is free-form and may carry secret-like keys/values;
+    the redacted bundle must not leak them (SEC-1)."""
+    repo = InMemoryRepository()
+    runtime = MemoryRuntime(repo)
+    run = await runtime.start_run(StartRunRequest(workspace_id="ws_meta", session_id="s", task="t"))
+    step = await runtime.start_step(StartStepRequest(run_id=run.run_id, intent="seed"))
+    await repo.add_memory(
+        MemoryItem(
+            workspace_id="ws_meta",
+            run_id=run.run_id,
+            source_state_node_id=step.state_node_id,
+            memory_type=MemoryType.episodic,
+            content="benign content",
+            summary="benign",
+            lifecycle_metadata={
+                "password": "opaque-no-pattern-value",
+                "note": "token sk-abcdef1234567890",
+            },
+        )
+    )
+
+    bundle = await runtime.export_trace_bundle(run_id=run.run_id, redacted=True)
+    payload = json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False)
+
+    assert "opaque-no-pattern-value" not in payload
+    assert "sk-abcdef1234567890" not in payload
+    assert "[REDACTED]" in payload
+
+
+@pytest.mark.asyncio
 async def test_trace_bundle_export_redacts_event_string_payload_fields():
     repo = InMemoryRepository()
     runtime = MemoryRuntime(repo)

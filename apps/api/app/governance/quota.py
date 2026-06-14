@@ -61,12 +61,16 @@ class QuotaService:
             return default
         try:
             specific = await self._repo.list_quota_limits(
-                workspace_id=workspace_id, principal_id=principal.principal_id, limit=1, offset=0
+                workspace_id=workspace_id,
+                principal_id=principal.principal_id,
+                unit=unit.value,
+                limit=1,
+                offset=0,
             )
             if specific:
                 return specific[0].limit, specific[0].window_seconds
             workspace_wide = await self._repo.list_quota_limits(
-                workspace_id=workspace_id, principal_id=None, limit=1, offset=0
+                workspace_id=workspace_id, principal_id=None, unit=unit.value, limit=1, offset=0
             )
             if workspace_wide:
                 return workspace_wide[0].limit, workspace_wide[0].window_seconds

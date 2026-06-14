@@ -50,6 +50,7 @@ from app.runtime.models import (
     Principal,
     PublicApiKey,
     ResolveMemoryConflictRequest,
+    SchedulerRunStatus,
     StartMaintenanceRunRequest,
     UpsertQuotaLimitRequest,
     QuotaLimitRecord,
@@ -149,7 +150,25 @@ async def start_maintenance_run(
                 "reason": safe_reason,
             },
         )
-        await maintenance_enqueue(envelope)
+        try:
+            await maintenance_enqueue(envelope)
+        except Exception as exc:  # noqa: BLE001 - mark the orphan run failed, then surface 503
+            run.status = SchedulerRunStatus.failed
+            run.finished_at = datetime.now(timezone.utc)
+            run.summary = "enqueue failed"
+            await repo.update_maintenance_run(run)
+            await _record_admin_audit(
+                repo,
+                workspace_id=req.workspace_id,
+                principal_id=principal.principal_id,
+                action="enqueue_maintenance_run_failed",
+                target_type="maintenance_run",
+                target_id=run.scheduler_run_id,
+                metadata=audit_metadata,
+            )
+            raise HTTPException(
+                status_code=503, detail="failed to enqueue maintenance run"
+            ) from exc
         await _record_admin_audit(
             repo,
             workspace_id=req.workspace_id,

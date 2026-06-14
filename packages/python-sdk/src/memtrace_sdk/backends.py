@@ -61,7 +61,7 @@ class Backend(Protocol):
 
     async def retrieve_context(self, request: RetrievalRequest) -> MemoryContext: ...
 
-    async def flush_session(self, session_id: str) -> FlushResult: ...
+    async def flush_session(self, session_id: str, *, workspace_id: str | None = None) -> FlushResult: ...
 
     async def get_timeline(self, run_id: str) -> list[AgentEvent]: ...
 
@@ -163,8 +163,8 @@ class InProcessBackend:
         except StateTreeError as exc:
             raise BadRequestError(str(exc)) from exc
 
-    async def flush_session(self, session_id: str) -> FlushResult:
-        return await self._runtime.flush_session(session_id)
+    async def flush_session(self, session_id: str, *, workspace_id: str | None = None) -> FlushResult:
+        return await self._runtime.flush_session(session_id, workspace_id=workspace_id)
 
     async def get_timeline(self, run_id: str) -> list[AgentEvent]:
         return await self._runtime.get_timeline(run_id)
@@ -296,7 +296,7 @@ class HttpBackend:
             detail = response.text
         if response.status_code == 404:
             raise NotFoundError(str(detail))
-        if response.status_code == 400:
+        if response.status_code in {400, 422}:
             raise BadRequestError(str(detail))
         if response.status_code in {401, 403}:
             raise ForbiddenError(str(detail))
@@ -340,8 +340,12 @@ class HttpBackend:
     async def retrieve_context(self, request: RetrievalRequest) -> MemoryContext:
         return await self._post_model("/v1/context/retrieve", request, MemoryContext)
 
-    async def flush_session(self, session_id: str) -> FlushResult:
-        return await self._post_model("/v1/sessions/flush", FlushRequest(session_id=session_id), FlushResult)
+    async def flush_session(self, session_id: str, *, workspace_id: str | None = None) -> FlushResult:
+        params = {"workspace_id": workspace_id} if workspace_id is not None else None
+        payload = await self._request(
+            "POST", "/v1/sessions/flush", json=self._body(FlushRequest(session_id=session_id)), params=params
+        )
+        return FlushResult.model_validate(payload)
 
     async def get_timeline(self, run_id: str) -> list[AgentEvent]:
         return await self._get_list(f"/v1/runs/{run_id}/timeline", AgentEvent)

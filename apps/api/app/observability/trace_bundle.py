@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.memory.secrets import redact
+from app.memory.secrets import is_secret_like_key, redact
 from app.retrieval.negative_evidence import SANITIZED_TEMPLATES
 from app.runtime.models import (
     AgentEvent,
@@ -225,7 +225,14 @@ def _redact_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_redact_value(item) for item in value)
     if isinstance(value, dict):
-        return {redact(str(key)): _redact_value(item) for key, item in value.items()}
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            safe_key = redact(str(key))
+            # Secret-like keys (e.g. password/token/authorization) get their whole
+            # value redacted, mirroring reports.py, so non-pattern-matching values
+            # (numbers, opaque strings, nested dicts) cannot leak.
+            out[safe_key] = "[REDACTED]" if is_secret_like_key(str(key)) else _redact_value(item)
+        return out
     return value
 
 
@@ -277,6 +284,7 @@ def _redact_memory(memory: MemoryItem) -> MemoryItem:
             "value": redact(memory.value),
             "content": redact(memory.content),
             "summary": redact(memory.summary),
+            "lifecycle_metadata": _redact_value(memory.lifecycle_metadata),
         }
     )
 
@@ -307,7 +315,12 @@ def _redact_profile(profile: ProfileEvent) -> ProfileEvent:
 
 def _redact_compaction(log: ContextCompactionLog) -> ContextCompactionLog:
     facts = [
-        fact.model_copy(update={"key": redact(fact.key), "value": redact(fact.value)})
+        fact.model_copy(
+            update={
+                "key": redact(fact.key),
+                "value": "[REDACTED]" if is_secret_like_key(fact.key) else redact(fact.value),
+            }
+        )
         if isinstance(fact, RetainedFact)
         else fact
         for fact in log.retained_facts
