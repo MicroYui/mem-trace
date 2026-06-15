@@ -159,6 +159,14 @@ class Settings(BaseSettings):
             raise ValueError("telemetry_sample_rate must be between 0.0 and 1.0")
         return value
 
+    @field_validator("retrieval_fusion")
+    @classmethod
+    def _validate_retrieval_fusion(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"linear", "rrf"}:
+            raise ValueError("retrieval_fusion must be one of: linear, rrf")
+        return normalized
+
 
 @lru_cache
 def get_settings() -> Settings:

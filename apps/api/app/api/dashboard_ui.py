@@ -1,4 +1,4 @@
-"""Self-contained static Dashboard UI for MemTrace (Phase 3-B).
+"""Self-contained read-only static Dashboard UI for MemTrace.
 
 This module renders a single, dependency-free HTML page served by the API at
 ``GET /v1/dashboard/ui``. The page uses only inline CSS and vanilla JavaScript
@@ -10,7 +10,8 @@ and renders the runtime/observability/benchmark tables.
 All dynamic values are inserted with ``textContent`` / DOM APIs in the client
 script, never with ``innerHTML`` of untrusted data, so memory/run content cannot
 inject markup. The page is a thin read-only view over existing semantics; it
-adds no new runtime, retrieval, gate, or persistence behavior.
+adds no new runtime, retrieval, gate, or persistence behavior. It is not the
+future React/TypeScript ``apps/web`` dashboard.
 """
 from __future__ import annotations
 

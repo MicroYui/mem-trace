@@ -246,6 +246,7 @@ class RetrievalController:
         fallback_lite_memory_ids: list[str] | None = None,
         retention_policy_versions: list[str] | None = None,
     ) -> None:
+        fusion = self._effective_policy_fusion()
         snapshot = build_policy_snapshot(
             request,
             gate_config=gatemod.GateConfig.for_strategy(request.strategy),
@@ -259,12 +260,17 @@ class RetrievalController:
             scheduler_signal_memory_ids=scheduler_signal_memory_ids,
             fallback_lite_memory_ids=fallback_lite_memory_ids,
             retention_policy_versions=retention_policy_versions,
-            fusion=self._fusion,
-            rrf_k=self._rrf_k if self._fusion == "rrf" else None,
+            fusion=fusion,
+            rrf_k=self._rrf_k if fusion == "rrf" else None,
         )
         access.policy_version = POLICY_VERSION
         access.policy_snapshot = snapshot
         access.policy_hash = policy_hash(snapshot)
+
+    def _effective_policy_fusion(self) -> str:
+        if self._fusion == "rrf" and not self._use_vector:
+            return "linear"
+        return self._fusion
 
     @property
     def provider_snapshot(self) -> dict[str, Any] | None:

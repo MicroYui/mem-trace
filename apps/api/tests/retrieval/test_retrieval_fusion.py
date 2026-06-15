@@ -6,6 +6,7 @@ weighted blend, and that the retrieval policy snapshot records the fusion mode.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import get_settings
 from app.retrieval.controller import RetrievalController
@@ -99,3 +100,52 @@ def test_policy_snapshot_records_rrf_fusion():
     )
     assert snap["retrieval"]["fusion"] == "rrf"
     assert snap["retrieval"]["rrf_k"] == 60
+
+
+def test_invalid_retrieval_fusion_setting_is_rejected(monkeypatch):
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_FUSION", "weighted-graph")
+    get_settings.cache_clear()
+
+    with pytest.raises(ValidationError, match="retrieval_fusion must be one of"):
+        get_settings()
+
+
+def test_rrf_scores_are_exact_rank_sums_with_stable_ties():
+    controller = RetrievalController(InMemoryRepository())
+    controller._rrf_k = 10  # noqa: SLF001
+    raw = [
+        (_mem("ws", "m_a", "a"), 0.5, 0.1),
+        (_mem("ws", "m_b", "b"), 0.5, 0.9),
+        (_mem("ws", "m_c", "c"), 0.2, 0.9),
+        (_mem("ws", "m_zero", "zero"), 0.0, 0.0),
+    ]
+
+    scores = controller._rrf_scores(raw)  # noqa: SLF001
+
+    assert scores == {
+        "m_a": pytest.approx(1 / 11 + 1 / 13),
+        "m_b": pytest.approx(1 / 12 + 1 / 11),
+        "m_c": pytest.approx(1 / 13 + 1 / 12),
+    }
+    assert "m_zero" not in scores
+
+
+@pytest.mark.asyncio
+async def test_rrf_request_falls_back_to_linear_policy_when_vector_disabled(monkeypatch):
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_FUSION", "rrf")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_rrf_no_vector"
+    await _seed(repo, ws)
+    controller = RetrievalController(repo)
+
+    trace = await controller.trace(
+        RetrievalRequest(run_id="r", query="bun runtime service", strategy=RetrievalStrategy.baseline_1),
+        workspace_id=ws,
+    )
+
+    assert trace.candidates
+    assert all(candidate.vector_score == 0.0 for candidate in trace.candidates)
+    assert trace.candidates[0].relevance_score == trace.candidates[0].lexical_score
+    assert "fusion" not in trace.access_record.policy_snapshot["retrieval"]
