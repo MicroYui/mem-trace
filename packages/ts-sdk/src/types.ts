@@ -21,6 +21,20 @@ export type GateLayer = "hard_policy" | "risk_policy" | "soft_ranking";
 export type GateDecisionType = "accept" | "reject" | "degrade" | "warn";
 export type ProfilePhase = "retrieval" | "gate" | "context_packing" | "context_compaction" | "ingestion" | "construction" | "rerank" | "generation" | "maintenance" | "quality" | "safety";
 export type ExtractionMode = "sync" | "buffered" | "async" | "sync_flush" | "lazy" | "no_extract";
+export type MaintenanceOperation =
+  | "score_memory"
+  | "decay_memory"
+  | "archive_memory"
+  | "quarantine_memory"
+  | "conflict_scan"
+  | "dedup_memory"
+  | "reindex_memory"
+  | "summary_refresh"
+  | "procedural_refresh"
+  | "profile_refresh";
+export type SchedulerRunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type SchedulerTaskStatus = "pending" | "running" | "completed" | "failed" | "skipped";
+export type QuotaUnitName = "write_event" | "retrieve_context" | "report_export" | "replay" | "async_task_enqueue";
 
 export interface StartRunRequest {
   session_id: string;
@@ -311,6 +325,65 @@ export interface MemoryConflictRecord {
   [key: string]: unknown;
 }
 
+export interface MaintenanceRunRecord {
+  scheduler_run_id: string;
+  workspace_id: string;
+  requested_by: string;
+  reason?: string | null;
+  operations: MaintenanceOperation[];
+  dry_run: boolean;
+  status: SchedulerRunStatus;
+  summary: JsonObject;
+  warnings: string[];
+  started_at?: ISODateTime | null;
+  finished_at?: ISODateTime | null;
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
+  [key: string]: unknown;
+}
+
+export interface MaintenanceTaskAttemptRecord {
+  attempt_id: string;
+  scheduler_run_id: string;
+  workspace_id: string;
+  operation: MaintenanceOperation;
+  status: SchedulerTaskStatus;
+  idempotency_key?: string | null;
+  attempt_no: number;
+  result: JsonObject;
+  error_summary?: string | null;
+  started_at?: ISODateTime | null;
+  finished_at?: ISODateTime | null;
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
+  [key: string]: unknown;
+}
+
+export interface AdminActionAuditRecord {
+  admin_action_id: string;
+  workspace_id: string;
+  principal_id: string;
+  action: string;
+  target_type: string;
+  target_id?: string | null;
+  metadata: JsonObject;
+  created_at: ISODateTime;
+  [key: string]: unknown;
+}
+
+export interface QuotaLimitRecord {
+  quota_limit_id: string;
+  workspace_id: string;
+  principal_id?: string | null;
+  unit: QuotaUnitName;
+  limit: number;
+  window_seconds: number;
+  created_by: string;
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
+  [key: string]: unknown;
+}
+
 export interface ProfileEvent {
   profile_id: string;
   run_id?: string | null;
@@ -452,6 +525,10 @@ export interface DashboardTables {
   eval_results: unknown[];
   memory_versions: MemoryVersionRecord[];
   memory_conflicts: MemoryConflictRecord[];
+  maintenance_runs: MaintenanceRunRecord[];
+  maintenance_task_attempts: MaintenanceTaskAttemptRecord[];
+  admin_action_audits: AdminActionAuditRecord[];
+  quota_limits: QuotaLimitRecord[];
   observability_summary?: ObservabilitySummary | null;
   benchmark_summary: Record<string, Record<string, number>>;
   [key: string]: unknown;

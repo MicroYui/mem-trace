@@ -1,0 +1,30 @@
+{
+  "name": "@memtrace/web",
+  "version": "0.1.0",
+  "description": "React dashboard for inspecting MemTrace runs, retrieval, replay, benchmark, and memory evidence.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "screenshots": "node scripts/capture-showcase-screenshots.mjs",
+    "test": "bun test test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@memtrace/sdk": "workspace:*",
+    "@tanstack/react-query": "^5.0.0",
+    "@xyflow/react": "^12.0.0",
+    "echarts": "^6.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "vite": "^7.0.0"
+  }
+}

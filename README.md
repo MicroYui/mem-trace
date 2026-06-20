@@ -22,6 +22,7 @@ Plain vector recall can retrieve text that is semantically similar but operation
 - Phase 4 platform foundations: optional async Redis/Celery, lifecycle/reflection signals, memory versions/conflicts, default-off governance/auth/quota, and redaction state protections.
 - Python SDK, CLI, LangGraph adapter, TypeScript SDK (`@memtrace/sdk`), MCP server (`@memtrace/mcp-server`), and Claude Code / Cursor MCP config templates.
 - Default-off OpenTelemetry/OpenInference-compatible export hooks with noop/JSONL/optional OTLP sinks and a read-only run export endpoint.
+- React/TypeScript dashboard in `apps/web` with Overview, Run Explorer, Access Replay, Benchmark Lab, Memory Atlas, read-only Ops, and fixture-backed Showcase mode.
 
 ## Quickstart: 5-minute no-network demo
 
@@ -72,6 +73,7 @@ uv run --package memtrace-sdk memtrace demo --in-process
 | CLI HTTP demo | `uv run --package memtrace-sdk memtrace --http http://127.0.0.1:8000 demo` | Local service required | Same high-level failed-branch contrast, persisted through `/v1` |
 | TypeScript SDK example | `npm exec --yes --package bun -- bun examples/ts-simple-agent/src/index.ts` | Local service required; set `MEMTRACE_BASE_URL` if not `http://127.0.0.1:8000` | Emits JSON with `run_id`, `step_id`, `event_id`, `access_id`, and `context_block_count` |
 | MCP server | `npm exec --yes --package bun -- bun packages/mcp-server/src/server.ts` | Local service required; MCP client launches stdio server | Tool results are redacted and replay/report output is capped |
+| Web dashboard fixture mode | `npm exec --yes --package bun -- bun run web:dev` | Default/no live API needed after JS deps are installed | Open `/showcase`, `/memories`, `/ops`, `/benchmark`, `/runs/run_showcase_bun_recovery`, or `/access/acc_showcase_gate` |
 
 If Bun is installed globally, replace `npm exec --yes --package bun -- bun ...` with `bun ...`. The repository uses `bun.lock`; npm/pnpm/yarn lockfiles should not be added.
 
@@ -166,7 +168,32 @@ uv run python -m app.observability.reports --output-dir reports
 
 Replay data is also available through the HTTP API, including `/v1/replay/access/{access_id}` when the local service is running.
 
-When the HTTP service is running you can also open the built-in read-only static **Dashboard UI** at `/v1/dashboard/ui`. It is a single self-contained HTML page (no build step, no external JS/CDN) that calls `/v1/dashboard/tables` and `/v1/observability/summary` from the browser to show runs, access logs, profiler events, the observability summary, and per-strategy benchmark metrics. If auth is enabled, paste the token into the page's token field (sent as `Authorization: Bearer` / `X-API-Key`). This viewer is intentionally not the future React/TypeScript `apps/web` dashboard.
+## Web dashboard
+
+The full dashboard lives in `apps/web` and is separate from the built-in static viewer. It is a React/Vite/TypeScript app over `@memtrace/sdk` and existing read-only `/v1` APIs. Fixture mode works without a running API:
+
+```bash
+npm exec --yes --package bun -- bun run web:dev
+```
+
+Open `http://127.0.0.1:5173/showcase` for the guided sample-data walkthrough. The fixture-backed routes include Overview, Run Explorer, Access Replay, Benchmark Lab, Memory Atlas, and read-only Ops panels. API keys are entered only for live mode and are sent as headers, not URLs.
+
+To connect to a live local service, start the HTTP path above, then use the dashboard connection form with an optional workspace id and API key. `VITE_MEMTRACE_API_BASE_URL` defaults to same-origin `/v1`; local Vite dev uses a `/v1` proxy to `http://localhost:8000` unless you configure a direct API origin.
+
+To build static assets:
+
+```bash
+npm exec --yes --package bun -- bun run web:build
+```
+
+Optional screenshot workflow, writing PNGs under `/tmp` by default:
+
+```bash
+MEMTRACE_WEB_SCREENSHOT_URL=http://127.0.0.1:5173 \
+npm exec --yes --package playwright -- node apps/web/scripts/capture-showcase-screenshots.mjs
+```
+
+When the HTTP service is running you can also open the built-in read-only static **Dashboard UI** at `/v1/dashboard/ui`. It is a single self-contained HTML page (no build step, no external JS/CDN) that calls `/v1/dashboard/tables` and `/v1/observability/summary` from the browser to show runs, access logs, profiler events, the observability summary, and per-strategy benchmark metrics. If auth is enabled, paste the token into the page's token field (sent as `Authorization: Bearer` / `X-API-Key`). This viewer is intentionally not the React/TypeScript `apps/web` dashboard.
 
 Generated report artifacts are intentionally ignored by git and can be regenerated:
 

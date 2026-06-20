@@ -179,6 +179,33 @@ When auth/governance is enabled, this endpoint requires report-reader access to 
 
 For MCP templates, use `examples/mcp/claude-code.json` or `examples/mcp/cursor.json` as local-development starting points and replace relative paths with absolute/installed commands when the MCP client launches outside the repository root.
 
+## Web dashboard deployment
+
+The full React dashboard is under `apps/web`. It is a read-only browser client over `@memtrace/sdk` and `/v1`; it does not add runtime semantics or admin mutations.
+
+Local fixture mode:
+
+```bash
+npm exec --yes --package bun -- bun run web:dev
+```
+
+Static production build:
+
+```bash
+npm exec --yes --package bun -- bun run web:build
+```
+
+The preferred deployment is same-origin: serve the built web assets and reverse-proxy `/v1` to the FastAPI service from the same host. `VITE_MEMTRACE_API_BASE_URL` defaults to same-origin and the local Vite dev server proxies `/v1` to `http://localhost:8000`. Direct cross-origin API calls are possible only when the API operator has explicitly configured CORS.
+
+API keys must be entered by the user at runtime and are sent only as request headers. Do not bake API keys into static assets, URLs, screenshot commands, or hosting config. Fixture-backed `/showcase` and screenshot captures use synthetic data and write images to `/tmp` by default:
+
+```bash
+MEMTRACE_WEB_SCREENSHOT_URL=http://127.0.0.1:5173 \
+npm exec --yes --package playwright -- node apps/web/scripts/capture-showcase-screenshots.mjs
+```
+
+The legacy `/v1/dashboard/ui` page remains a small built-in static viewer for environments that do not serve `apps/web`; it should not be expanded into the full dashboard.
+
 ## Release posture
 
 R1 release readiness is complete: public docs, package metadata/package-shape checks, default CI, release hygiene, deterministic benchmark/reproduce closeout, and the maintainer [release checklist](release-checklist.md) are in place. R1 does not publish npm or PyPI packages automatically. Maintainers should explicitly decide when to publish, run the checklist verification commands, verify generated artifact cleanup, and ensure no local reports, package tarballs, lockfile drift, `node_modules`, or TypeScript build info are tracked.

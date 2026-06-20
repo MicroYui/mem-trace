@@ -105,7 +105,26 @@ Expected output is JSON containing these fields:
 
 If the service is not running, the example exits with a connection error. That is expected: this example is not a no-network/in-process demo.
 
-## Track 4: deterministic benchmark and reproducibility
+## Track 4: web dashboard fixture mode
+
+Run the full React dashboard in fixture mode when you want to inspect the product UI without a live API:
+
+```bash
+npm exec --yes --package bun -- bun run web:dev
+```
+
+Open `http://127.0.0.1:5173/showcase`. The fixture route links into the Overview, Run Explorer, Access Replay, Benchmark Lab, Memory Atlas, and read-only Ops pages. Fixture data is synthetic and redacted; no API key is needed.
+
+To connect the dashboard to a live local service, start Track 2 first, then use the connection form in the top bar. The API key field is sent as an Authorization header and is not rendered into URLs or page markup.
+
+Optional screenshot capture, after the dev server is running:
+
+```bash
+MEMTRACE_WEB_SCREENSHOT_URL=http://127.0.0.1:5173 \
+npm exec --yes --package playwright -- node apps/web/scripts/capture-showcase-screenshots.mjs
+```
+
+## Track 5: deterministic benchmark and reproducibility
 
 Run the benchmark only:
 

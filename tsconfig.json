@@ -9,6 +9,10 @@
     "packages/ts-sdk/test/**/*.ts",
     "packages/mcp-server/src/**/*.ts",
     "packages/mcp-server/test/**/*.ts",
-    "examples/ts-simple-agent/src/**/*.ts"
+    "examples/ts-simple-agent/src/**/*.ts",
+    "apps/web/src/**/*.ts",
+    "apps/web/src/**/*.tsx",
+    "apps/web/test/**/*.ts",
+    "apps/web/test/**/*.tsx"
   ]
 }

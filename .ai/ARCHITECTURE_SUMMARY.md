@@ -15,7 +15,8 @@ Agent / demo loop
      -> Profiler
      -> Telemetry projection package (core exporter slice complete)
   -> PostgreSQL + pgvector source of truth
-  -> CLI/JSON/Markdown report first; dashboard later
+  -> CLI/JSON/Markdown reports + built-in static viewer
+  -> apps/web React/TypeScript dashboard (Phase 3-B complete)
 ```
 
 Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React dashboard, and evaluation harness, but the MVP narrows the first hot path.
@@ -34,6 +35,7 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 - **Profiler:** records phase-level latency, candidate counts, gate counts, token/cost fields when available.
 - **Evaluation/Demo:** compares vector-only versus state-aware/gated retrieval on deterministic cases.
 - **Telemetry Projection Package:** `docs/design/OTEL_OPENINFERENCE_EXPORTER_PLAN.md` core exporter slice is complete through Segment 4 closeout and final full-plan review hardening. The package provides redacted `memtrace.*` / OpenInference-compatible spans, noop/in-memory/JSONL/optional OTLP sinks, settings-driven factory construction with strict/header/sample-rate controls, a fail-open `TelemetryService`, post-persistence runtime hooks, and a minimal read-only run export endpoint returning counts/generic warnings only. Runtime hooks must not synchronously perform network OTLP export, must remain fail-open on hot paths (including projection reads), and must avoid duplicate run/step lifecycle span ids; CLI export and richer access/backfill surfaces remain deferred.
+- **Showcase Dashboard:** `docs/design/PHASE3B_DASHBOARD_PLAN.md` defines `apps/web` as a separate React/TypeScript frontend over `@memtrace/sdk` and existing read-only `/v1` APIs. WEB-A through WEB-J are complete as of 2026-06-20: scaffold/build boundary, SDK/query/normalizer layer, visual system, Overview/run gallery, Run Explorer, Access Replay / Memory Flow, Benchmark Lab, Memory Atlas, read-only Ops, fixture-backed Showcase route, screenshot workflow, docs, and closeout. Live API payloads and showcase fixtures pass through the same normalizers before reaching components. Memory Atlas combines `GET /v1/memories` with dashboard-table versions/conflicts and recursively redacts nested version snapshots before display; Ops uses owner-gated dashboard rows and `CapabilityState` without admin mutation UI. The app must continue not to duplicate runtime semantics, infer unavailable DTO fields, add a workspace listing API for selector polish, expand `/v1/dashboard/ui` into a large frontend, or add mutation/admin behavior without a new selected plan.
 
 ## Key Data Structures
 
@@ -63,6 +65,7 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 - Provider capability snapshots and retrieval policy snapshots must stay non-secret.
 - Benchmarks must force deterministic providers even when real-provider env vars are set.
 - Telemetry export is an external egress surface: it must be disabled/noop by default, recursively redacted/capped, best-effort/fail-open on runtime hot paths, no synchronous network export from hot-path hooks, quota-governed for HTTP export surfaces, and read-only when projecting persisted run data. Access-level export/backfill remains future work.
+- Browser dashboard rendering is also an egress surface: consume redacted read-only APIs, preserve authz/quota/workspace isolation, never put API keys in URLs/logs/fixtures, and avoid untrusted HTML rendering.
 
 ## Persistence / Storage Design
 
@@ -72,5 +75,5 @@ Longer-term documents also describe Redis/Celery, Elasticsearch, Neo4j, React da
 ## External Integrations
 
 - Implemented: Python SDK/CLI/LangGraph adapter, TypeScript SDK, MCP server, and MCP config templates.
-- Latest completed feature: OpenTelemetry/OpenInference exporter via `docs/design/OTEL_OPENINFERENCE_EXPORTER_PLAN.md`; Segment 1 contracts/redaction/pure builders, Segment 2 exporters/settings/factory/service, Segment 3 runtime hooks/API/docs, and Segment 4 verification/closeout are complete.
-- Future: React dashboard and dedicated IDE extension if MCP adoption feedback shows editor-specific needs; vendor-specific LangSmith/Phoenix/Langfuse bridges remain deferred until explicitly selected as a separate bridge slice.
+- Latest completed feature: Phase 3-B Showcase Dashboard in `apps/web`; WEB-A through WEB-J are complete and fully rechecked. OpenTelemetry/OpenInference exporter remains previously complete through Segment 4 closeout.
+- Future: select the next roadmap target deliberately. Dedicated IDE extension remains deferred until MCP adoption feedback shows editor-specific needs; vendor-specific LangSmith/Phoenix/Langfuse bridges remain deferred until explicitly selected as a separate bridge slice.
