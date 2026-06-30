@@ -1,5 +1,15 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop Step 2: Phase 5 §4 query-planner micro-slice)
+
+- **Loop Step 2 of 5.** Trigger assessment first: ES/Neo4j/graph-store Phase 5 items stay **deferred** (pgvector has no scale/feature pressure; standing up ES/Neo4j the runtime can't use = inventing unusable infra, against AGENTS.md). Implemented the disciplined, deterministic, no-external-dependency, **default-off** §4 advance instead — mirroring the existing RRF micro-slice.
+- **Feature:** `app/retrieval/query_planner.py` (`plan_query` / `hint_boost`) extracts entity-like query terms (dotted keys `project.runtime`, paths `src/app.py`, separator/digit identifiers `api_key`/`v2.0`) from query + `task_intent`, and gives candidates that mention them a bounded lexical boost (`weight * matched/total`, default `0.1`, capped at 1.0) so structural names outrank generic token overlap.
+- **Wiring:** `MEMTRACE_RETRIEVAL_QUERY_PLANNER=off|hints` (default `off`) + `MEMTRACE_RETRIEVAL_QUERY_PLANNER_WEIGHT` (config validators). `RetrievalController._select_candidates` now takes `task_intent` and applies the boost only in `hints` mode; `task_intent` is now consumed by retrieval (previously access-log only). Policy snapshot writes `query_planner`/`query_planner_weight` **only when enabled** (byte-stable default hash, same rule as fusion).
+- **Default-off ⇒ reproducible:** candidate scoring byte-identical while off; benchmark + `scripts/reproduce.sh` stay **16/16**.
+- **Changed:** `app/config.py`, `app/retrieval/controller.py`, `app/retrieval/policy.py`; new `app/retrieval/query_planner.py`, `tests/retrieval/test_query_planner.py` (12); docs `docs/design/ROADMAP.md` §4 Query Planner line (micro-slice partial).
+- **Verification:** app+SDK pytest **835 passed, 2 skipped** (2 reproducibility tests need cwd=repo root → pass there); compileall clean; benchmark/reproduce **16/16**; `git diff --check` + release hygiene clean.
+- **Next:** loop Step 3 — 评测/真实数据集扩展 (§7): larger real LoCoMo/MemoryArena, opt-in + reproducible.
+
 ## Latest Session (2026-06-30 — loop Step 1: 低价值技术债清理 §1.1/§13.3)
 
 - **Loop Step 1 of 5** (multi-step `/loop`: tech-debt → Phase 5 → real datasets → README). Closed the two remaining low-value debt items from ROADMAP §1.1/§13.3 with TDD; both ROADMAP boxes flipped to `[x]`.

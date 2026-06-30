@@ -34,6 +34,8 @@ def build_policy_snapshot(
     retention_policy_versions: list[str] | None = None,
     fusion: str = "linear",
     rrf_k: int | None = None,
+    query_planner: str = "off",
+    query_planner_weight: float | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-compatible, non-secret retrieval policy snapshot."""
     vector_active = bool(vector_enabled)
@@ -53,6 +55,11 @@ def build_policy_snapshot(
     if fusion and fusion != "linear":
         retrieval["fusion"] = fusion
         retrieval["rrf_k"] = rrf_k
+    # Same byte-stability rule for the default-off query planner (ROADMAP §4):
+    # omit the field entirely while disabled so existing hashes are unchanged.
+    if query_planner and query_planner != "off":
+        retrieval["query_planner"] = query_planner
+        retrieval["query_planner_weight"] = query_planner_weight
     return {
         "policy_version": POLICY_VERSION,
         "strategy": request.strategy.value,

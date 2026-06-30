@@ -17,6 +17,7 @@ from app.retrieval import gate as gatemod
 from app.retrieval.negative_evidence import build_negative_evidence
 from app.retrieval.packer import pack_context
 from app.retrieval.policy import POLICY_VERSION, build_policy_snapshot, policy_hash
+from app.retrieval.query_planner import hint_boost, plan_query
 from app.retrieval.similarity import lexical_similarity, stable_embedding
 from app.config import get_settings
 from app.providers.registry import ProviderRegistry
@@ -148,6 +149,11 @@ class RetrievalController:
         self._stale_warning = settings.stale_warning_enabled
         # ROADMAP §1.1: protect sanitized safety negative evidence from budget drops.
         self._protect_safety_notices = settings.protect_safety_negative_evidence
+        # ROADMAP §4: default-off deterministic query planner (entity/keyword
+        # hints). "off" leaves candidate scoring byte-identical; "hints" boosts
+        # candidates that mention entity-like query terms.
+        self._query_planner = (settings.retrieval_query_planner or "off").lower()
+        self._query_planner_weight = settings.retrieval_query_planner_weight
 
     def _gate_config(self, strategy: RetrievalStrategy) -> "gatemod.GateConfig":
         config = gatemod.GateConfig.for_strategy(strategy)
@@ -261,6 +267,10 @@ class RetrievalController:
             retention_policy_versions=retention_policy_versions,
             fusion=fusion,
             rrf_k=self._rrf_k if fusion == "rrf" else None,
+            query_planner=self._query_planner,
+            query_planner_weight=(
+                self._query_planner_weight if self._query_planner != "off" else None
+            ),
         )
         access.policy_version = POLICY_VERSION
         access.policy_snapshot = snapshot
@@ -349,6 +359,7 @@ class RetrievalController:
             query=request.query,
             top_k=request.top_k,
             include_all=long_context,
+            task_intent=request.task_intent,
         )
         retrieval_ms = int((time.perf_counter() - t0) * 1000)
         phase_profile[ProfilePhase.retrieval.value] = {
@@ -653,6 +664,7 @@ class RetrievalController:
         query: str,
         top_k: int,
         include_all: bool = False,
+        task_intent: str | None = None,
     ) -> list[RetrievalCandidateTrace]:
         # Workspace-scoped retrieval is the permission filter: cross-workspace
         # memories never become candidates, so leakage is impossible by
@@ -674,12 +686,25 @@ class RetrievalController:
         w_vec = self._vector_weight if (self._use_vector and vector_scores) else 0.0
         w_lex = 1.0 - w_vec
 
+        # ROADMAP §4 query planner (default-off): entity-like query terms boost
+        # candidates that mention them, so structural names (dotted keys, paths,
+        # identifiers) outrank generic token overlap. `hints` is empty unless the
+        # planner is enabled, so the boost is a no-op on the default path.
+        hints: tuple[str, ...] = ()
+        if self._query_planner == "hints":
+            hints = plan_query(query, task_intent).hints
+
         # First pass: compute raw lexical/vector signals for retrievable memories.
         raw: list[tuple[MemoryItem, float, float]] = []
         for m in memories:
             if m.status not in _RETRIEVABLE_STATUSES:
                 continue  # skip superseded/archived/dormant/deleted lifecycle states
             lex = lexical_similarity(query, m.content)
+            if hints:
+                lex = min(
+                    1.0,
+                    round(lex + hint_boost(m.content, hints, weight=self._query_planner_weight), 6),
+                )
             vec = vector_scores.get(m.memory_id, 0.0)
             raw.append((m, lex, vec))
 

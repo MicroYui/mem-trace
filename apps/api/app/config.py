@@ -138,6 +138,14 @@ class Settings(BaseSettings):
     retrieval_fusion: str = "linear"
     # RRF damping constant; larger values flatten the contribution of top ranks.
     retrieval_rrf_k: int = 60
+    # Deterministic query planner (ROADMAP §4). "off" (default) leaves retrieval
+    # byte-identical. "hints" extracts entity-like query terms (dotted keys,
+    # paths, identifiers) and gives candidates that mention them a small bounded
+    # lexical boost, so structural names outrank generic token overlap. No model
+    # or network; default-off keeps benchmark/replay reproducible.
+    retrieval_query_planner: str = "off"
+    # Maximum lexical boost a fully-matching candidate earns under "hints" mode.
+    retrieval_query_planner_weight: float = 0.1
     # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
     # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
     # hot paths use the configured embedding provider first, then degrade to the
@@ -186,6 +194,21 @@ class Settings(BaseSettings):
         if normalized not in {"linear", "rrf"}:
             raise ValueError("retrieval_fusion must be one of: linear, rrf")
         return normalized
+
+    @field_validator("retrieval_query_planner")
+    @classmethod
+    def _validate_retrieval_query_planner(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"off", "hints"}:
+            raise ValueError("retrieval_query_planner must be one of: off, hints")
+        return normalized
+
+    @field_validator("retrieval_query_planner_weight")
+    @classmethod
+    def _validate_retrieval_query_planner_weight(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            raise ValueError("retrieval_query_planner_weight must be between 0.0 and 1.0")
+        return value
 
 
 @lru_cache
