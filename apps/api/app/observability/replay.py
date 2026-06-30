@@ -236,6 +236,7 @@ class RetrievalReplayService:
             compaction_notice_reserve_tokens=self._retrieval._compaction_notice_reserve_tokens,
             active_path_summarize_after=self._retrieval._active_path_summarize_after,
             active_path_keep_recent=self._retrieval._active_path_keep_recent,
+            protect_safety_notices=self._retrieval._protect_safety_notices,
         )
         blocks = pack_result.blocks
         return _OriginalReplayView(

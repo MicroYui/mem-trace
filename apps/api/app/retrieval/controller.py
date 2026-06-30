@@ -146,6 +146,8 @@ class RetrievalController:
         # ROADMAP §9.1: stale -> outdated-warning degrade, default-off and only on
         # failure-learning strategies (see _gate_config).
         self._stale_warning = settings.stale_warning_enabled
+        # ROADMAP §1.1: protect sanitized safety negative evidence from budget drops.
+        self._protect_safety_notices = settings.protect_safety_negative_evidence
 
     def _gate_config(self, strategy: RetrievalStrategy) -> "gatemod.GateConfig":
         config = gatemod.GateConfig.for_strategy(strategy)
@@ -448,6 +450,7 @@ class RetrievalController:
             compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
             active_path_summarize_after=self._active_path_summarize_after,
             active_path_keep_recent=self._active_path_keep_recent,
+            protect_safety_notices=self._protect_safety_notices,
         )
         if long_context and pack_result.pre_compaction_tokens > budget:
             # Long-context is the intentional all-context baseline: keep the
@@ -466,6 +469,7 @@ class RetrievalController:
                 compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
                 active_path_summarize_after=self._active_path_summarize_after,
                 active_path_keep_recent=self._active_path_keep_recent,
+            protect_safety_notices=self._protect_safety_notices,
             )
         blocks = pack_result.blocks
         actual_tokens = pack_result.used

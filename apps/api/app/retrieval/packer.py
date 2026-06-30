@@ -172,6 +172,17 @@ def _is_protected(block: ContextBlock) -> bool:
     return block.type in {"active_state", "active_path", "history_summary", "compacted_constraints", "compaction_notice"} or block.source == "project_constraints"
 
 
+def _is_safety_notice(block: ContextBlock) -> bool:
+    """A sanitized negative-evidence block ("do not repeat the destructive/secret
+    attempt"). ROADMAP §1.1 optionally protects these from budget drops."""
+    return (
+        block.type == "avoided_attempts"
+        and block.source == "negative_evidence"
+        and isinstance(block.reason, str)
+        and block.reason.endswith("_sanitized")
+    )
+
+
 def _ordered_blocks(blocks: list[ContextBlock]) -> list[ContextBlock]:
     protected = sorted([block for block in blocks if _is_protected(block)], key=_protected_order)
     ordinary = sorted([block for block in blocks if not _is_protected(block)], key=_block_order)
@@ -452,6 +463,7 @@ def pack_context(
     compaction_notice_reserve_tokens: int = 64,
     active_path_summarize_after: int = 0,
     active_path_keep_recent: int = 3,
+    protect_safety_notices: bool = False,
 ) -> PackResult:
     """Build ordered, budget-bounded context blocks.
 
@@ -551,8 +563,12 @@ def pack_context(
     reserve = _reserve_for_compaction(token_budget, compaction_notice_reserve_tokens)
 
     warnings: list[str] = []
-    protected_blocks = sorted([b for b in blocks if _is_protected(b)], key=_protected_order)
-    ordinary_blocks = [b for b in blocks if not _is_protected(b)]
+
+    def _protected(block: ContextBlock) -> bool:
+        return _is_protected(block) or (protect_safety_notices and _is_safety_notice(block))
+
+    protected_blocks = sorted([b for b in blocks if _protected(b)], key=_protected_order)
+    ordinary_blocks = [b for b in blocks if not _protected(b)]
     protected_floor = min(token_budget, sum(b.tokens for b in protected_blocks))
     effective_budget = max(0, token_budget - reserve, protected_floor)
 
@@ -597,7 +613,7 @@ def pack_context(
             if shrink_index is None:
                 break
             candidate = packed[shrink_index]
-            if not _is_protected(candidate):
+            if not _protected(candidate):
                 used -= candidate.tokens
                 dropped.append(packed.pop(shrink_index))
                 retained_facts = extract_retained_facts(dropped, memory_by_id)

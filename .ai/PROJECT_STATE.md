@@ -1,5 +1,13 @@
 # Project State
 
+## Latest Session (2026-06-30 — §1.1 protect sanitized safety negative evidence)
+
+- **Loop slice #4 (ROADMAP §1.1, previously deferred-by-decision):** default-off option to protect safety-critical `sanitized_risk_notice` negative-evidence blocks from budget drops, so "do not repeat the destructive/secret attempt" guidance is not silently discarded under tight budgets.
+- **Implemented:** config `protect_safety_negative_evidence` (False); `pack_context(protect_safety_notices=...)`; packer `_is_safety_notice(block)` (`avoided_attempts` + `negative_evidence` source + reason endswith `_sanitized`); local `_protected` predicate applied at the drop loop and the reserve-shrink loop; `RetrievalController._protect_safety_notices` threaded to both pack_context calls; `observability/replay` reuses the param. `raw_failed_attempt`/`outdated_warning` stay ordinary.
+- **Verification:** new `tests/retrieval/test_protected_safety_notice.py` (4) green; retrieval/observability/benchmark regression 242; full pytest **807 passed, 2 skipped**; compileall clean; benchmark + reproduce **13/13** unchanged (default-off keeps case_13 retention semantics); `git diff --check` clean.
+- **Files:** +`apps/api/tests/retrieval/test_protected_safety_notice.py`; M `app/config.py`, `app/retrieval/packer.py`, `app/retrieval/controller.py`, `app/observability/replay.py`.
+- **Next:** ROADMAP §7 integration/regression test completion + Docker compose layering (loop task #5), then benchmark expansion with authoritative datasets + real-LLM Q&A (loop task #6).
+
 ## Latest Session (2026-06-30 — §9.1 stale → outdated-warning downgrade)
 
 - **Loop slice #3 (ROADMAP §9.1 derivative):** default-off stale→outdated-warning degrade, mirroring failure-learning `degrade`. A safe stale memory degrades into the warning-only negative-evidence channel instead of a silent reject; never positive context, so `case_9 variant_2_excludes_stale_memory` and default benchmark are unchanged.

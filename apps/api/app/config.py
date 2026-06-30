@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     # to failure-learning strategies (variant_2/variant_3); never positive context,
     # so case_9 (variant_2 excludes stale memory) and default benchmark are unchanged.
     stale_warning_enabled: bool = False
+    # ROADMAP §1.1 (default-off): protect safety-critical sanitized negative
+    # evidence ("a destructive/secret attempt was redacted — do not repeat it")
+    # from being dropped under budget pressure. Default-off so case_13 compaction
+    # retention and benchmark behavior are unchanged.
+    protect_safety_negative_evidence: bool = False
     # Extraction freshness/latency policy (architecture.md §12.1): "sync" extracts
     # inline on write_event (default; keeps demo/benchmark deterministic), while
     # "buffered" defers extraction to an explicit or lazy flush.
