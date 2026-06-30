@@ -194,26 +194,6 @@ class RetrievalController:
         await self._persist_trace_and_mutations(trace)
         return self._context_from_trace(trace)
 
-    async def _retrieve_impl(
-        self,
-        request: RetrievalRequest,
-        *,
-        workspace_id: str,
-        prelude_blocks: list[ContextBlock] | None = None,
-        pending_compaction_logs: list[PendingCompactionLog] | None = None,
-        prelude_warnings: list[str] | None = None,
-    ) -> MemoryContext:
-        trace = await self.trace(
-            request,
-            workspace_id=workspace_id,
-            prelude_blocks=prelude_blocks,
-            pending_compaction_logs=pending_compaction_logs,
-            prelude_warnings=prelude_warnings,
-        )
-        await self._persist_trace(trace)
-        await self._bump_access_counts(trace.accepted_memories)
-        return self._context_from_trace(trace)
-
     async def _persist_trace_and_mutations(self, trace: RetrievalPipelineTrace) -> None:
         await self._persist_trace(trace)
         await self._bump_access_counts(trace.accepted_memories)

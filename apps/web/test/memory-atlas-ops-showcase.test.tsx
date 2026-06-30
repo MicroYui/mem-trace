@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DashboardTables, MemoryItem } from "@memtrace/sdk";
 import { App } from "../src/App";
@@ -98,14 +99,18 @@ describe("WEB-I showcase mode and screenshots", () => {
   });
 
   test("documents a repeatable screenshot capture workflow without committing bulky artifacts", () => {
-    const packageJson = JSON.parse(readFileSync("apps/web/package.json", "utf8")) as {
+    // Resolve from this test file's location (apps/web/test) so the assertions
+    // hold regardless of the cwd the runner is launched from (root `bun test`
+    // vs the package-local `bun run web:test`, which first `cd apps/web`).
+    const webRoot = join(import.meta.dir, "..");
+    const packageJson = JSON.parse(readFileSync(join(webRoot, "package.json"), "utf8")) as {
       scripts?: Record<string, string>;
     };
 
     expect(packageJson.scripts?.screenshots).toBe("node scripts/capture-showcase-screenshots.mjs");
-    expect(existsSync("apps/web/scripts/capture-showcase-screenshots.mjs")).toBe(true);
+    expect(existsSync(join(webRoot, "scripts/capture-showcase-screenshots.mjs"))).toBe(true);
 
-    const script = readFileSync("apps/web/scripts/capture-showcase-screenshots.mjs", "utf8");
+    const script = readFileSync(join(webRoot, "scripts/capture-showcase-screenshots.mjs"), "utf8");
     expect(script).toContain("MEMTRACE_WEB_SCREENSHOT_URL");
     expect(script).toContain("/showcase");
     expect(script).toContain("/memories");

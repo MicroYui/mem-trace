@@ -664,3 +664,44 @@ async def test_llm_summarizer_provider_reuses_and_closes_lazy_client(monkeypatch
 
     await provider.aclose()
     assert provider._client is None
+
+
+async def test_rule_provider_handles_multi_word_retained_fact_values():
+    # Regression: a retained fact whose value contains whitespace (e.g. a shell
+    # test command) must NOT make the rule provider reject its own rendered
+    # output. The summary-prose guard parses a value only up to the first
+    # whitespace, so "project.test_command=uv run pytest -q" was previously
+    # misread as an invented "project.test_command=uv" pair — silently
+    # disabling rolling-history compaction for that run.
+    provider = RuleSummarizerProvider()
+    request = _request(
+        budget=32,
+        facts=[_fact("project.test_command", "uv run pytest -q")],
+    )
+
+    result = await provider.summarize(request)
+
+    assert result.provider == CompactionProvider.rule
+    assert ("project.test_command", "uv run pytest -q") in {
+        (f.key, f.value) for f in result.retained_facts
+    }
+    assert "project.test_command=uv run pytest -q" in result.summary
+
+
+def test_validate_result_accepts_multi_word_fact_values_in_summary():
+    fact = RetainedFact(key="project.test_command", value="uv run pytest -q", source_memory_id="mem_1")
+    request = _request(budget=64, facts=[fact])
+    result = SummarizeResult(
+        summary="project.test_command=uv run pytest -q.",
+        retained_facts=[fact],
+        source_memory_ids=["mem_1", "mem_2"],
+        source_event_ids=["evt_1"],
+        source_state_node_ids=["node_1"],
+        provider=CompactionProvider.llm,
+    )
+
+    validated = _validate_result(request, result)
+
+    assert ("project.test_command", "uv run pytest -q") in {
+        (f.key, f.value) for f in validated.retained_facts
+    }

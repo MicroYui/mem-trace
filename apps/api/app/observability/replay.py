@@ -538,11 +538,14 @@ def _diff_context_blocks(original: list[ContextBlock], replayed: list[ContextBlo
     replayed_sigs = [_block_signature(b) for b in replayed]
     original_set = set(original_sigs)
     replayed_set = set(replayed_sigs)
-    for sig in replayed_set - original_set:
+    # Sort set-difference iteration so diff ordering is deterministic across
+    # processes (Python set iteration order varies by hash seed), matching the
+    # documented deterministic replay-diff semantics.
+    for sig in sorted(replayed_set - original_set):
         diffs.append(ReplayDiffItem(kind="context_block_added", original=None, replayed=sig, severity="warning"))
-    for sig in original_set - replayed_set:
+    for sig in sorted(original_set - replayed_set):
         diffs.append(ReplayDiffItem(kind="context_block_removed", original=sig, replayed=None, severity="warning"))
-    for sig in original_set & replayed_set:
+    for sig in sorted(original_set & replayed_set):
         if original_sigs.index(sig) != replayed_sigs.index(sig):
             diffs.append(
                 ReplayDiffItem(

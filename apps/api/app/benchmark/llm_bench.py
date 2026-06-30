@@ -356,14 +356,30 @@ async def scenario_failed_branch(provider: LLMExtractionProvider) -> ScenarioRes
                          strategy=RetrievalStrategy.variant_2)
     )
     text = _ctx_text(ctx)
-    # The failed npm branch evidence must NOT be recalled; Bun constraint should be.
-    contaminated = "npm" in text and "fail" in text
+    # The failed npm branch must NOT be recalled as POSITIVE / actionable context.
+    # It MAY (and by default does) appear as an explicit negative-evidence
+    # "AVOIDED — do NOT re-execute" block via Failure-aware Negative Memory
+    # Injection (I1-I7); that is the intended behavior, not contamination. So
+    # only positive context blocks are checked for the failed-attempt text.
+    positive_text = "\n".join(
+        b.content
+        for b in ctx.context_blocks
+        if b.type != "avoided_attempts" and (b.source or "") != "negative_evidence"
+    ).lower()
+    contaminated = "npm" in positive_text and "fail" in positive_text
+    has_negative_lesson = any(
+        b.type == "avoided_attempts" or (b.source or "") == "negative_evidence"
+        for b in ctx.context_blocks
+    )
     keeps_bun = "bun" in text
     passed = not contaminated and keeps_bun
     return ScenarioResult(
         name="failed_branch_isolation",
         passed=passed,
-        summary=f"failed npm branch contaminated context={contaminated}; bun kept={keeps_bun}",
+        summary=(
+            f"failed npm branch in POSITIVE context={contaminated}; bun kept={keeps_bun}; "
+            f"surfaced as negative-evidence lesson={has_negative_lesson}"
+        ),
         details={"context_blocks": [b.content for b in ctx.context_blocks]},
     )
 

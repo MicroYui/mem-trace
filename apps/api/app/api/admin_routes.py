@@ -144,6 +144,7 @@ async def start_maintenance_run(
             workspace_id=req.workspace_id,
             dedupe_key=f"admin-maintenance:{run.scheduler_run_id}",
             payload={
+                "scheduler_run_id": run.scheduler_run_id,
                 "operations": [operation.value for operation in operations],
                 "dry_run": req.dry_run,
                 "requested_by": requested_by,
@@ -155,7 +156,7 @@ async def start_maintenance_run(
         except Exception as exc:  # noqa: BLE001 - mark the orphan run failed, then surface 503
             run.status = SchedulerRunStatus.failed
             run.finished_at = datetime.now(timezone.utc)
-            run.summary = "enqueue failed"
+            run.summary = {"error": "enqueue failed"}
             await repo.update_maintenance_run(run)
             await _record_admin_audit(
                 repo,

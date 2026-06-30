@@ -162,6 +162,8 @@ async def write_event(
         return await rt.write_event(req)
     except (RunNotFoundError, StepNotFoundError) as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except StateTreeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/steps/finish", response_model=FinishStepResult)

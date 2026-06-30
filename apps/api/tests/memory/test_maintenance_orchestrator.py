@@ -891,3 +891,56 @@ async def test_run_workspace_maintenance_redacts_run_level_requested_by_and_reas
     assert stored is not None
     assert stored.requested_by == run.requested_by
     assert stored.reason == run.reason
+
+
+@pytest.mark.asyncio
+async def test_run_workspace_maintenance_adopts_pre_created_scheduler_run() -> None:
+    from app.memory.maintenance import run_workspace_maintenance
+
+    repo = InMemoryRepository()
+    await repo.add_memory(_project_memory(memory_id="mem_adopt"))
+    # Simulate the admin enqueue path: a queued run persisted before the worker runs.
+    queued = await repo.add_maintenance_run(
+        MaintenanceRunRecord(workspace_id="ws_1", operations=[MaintenanceOperation.score_memory])
+    )
+    assert queued.status == SchedulerRunStatus.pending
+
+    run = await run_workspace_maintenance(
+        repo,
+        workspace_id="ws_1",
+        operations=[MaintenanceOperation.score_memory],
+        scheduler_run_id=queued.scheduler_run_id,
+    )
+
+    # The worker adopts the pre-created run instead of minting a second one, so
+    # the run id the admin API returned now reflects completion.
+    assert run.scheduler_run_id == queued.scheduler_run_id
+    assert run.status == SchedulerRunStatus.completed
+    all_runs = await repo.list_maintenance_runs(workspace_id="ws_1")
+    assert len(all_runs) == 1
+    assert all_runs[0].scheduler_run_id == queued.scheduler_run_id
+    assert all_runs[0].status == SchedulerRunStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_run_workspace_maintenance_never_adopts_foreign_workspace_run() -> None:
+    from app.memory.maintenance import run_workspace_maintenance
+
+    repo = InMemoryRepository()
+    foreign = await repo.add_maintenance_run(
+        MaintenanceRunRecord(workspace_id="ws_other", operations=[MaintenanceOperation.score_memory])
+    )
+
+    run = await run_workspace_maintenance(
+        repo,
+        workspace_id="ws_1",
+        operations=[MaintenanceOperation.score_memory],
+        scheduler_run_id=foreign.scheduler_run_id,
+    )
+
+    # A scheduler_run_id owned by another workspace must never be adopted.
+    assert run.scheduler_run_id != foreign.scheduler_run_id
+    assert run.workspace_id == "ws_1"
+    untouched = await repo.get_maintenance_run(foreign.scheduler_run_id)
+    assert untouched is not None
+    assert untouched.status == SchedulerRunStatus.pending

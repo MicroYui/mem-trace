@@ -415,3 +415,38 @@ async def test_start_run_consumes_report_export_quota(monkeypatch):
 
     assert first.status_code == 200
     assert second.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_enqueue_failure_marks_run_failed_with_dict_summary(monkeypatch):
+    from app.runtime.models import SchedulerRunStatus
+
+    monkeypatch.setenv("MEMTRACE_ADMIN_API_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_GOVERNANCE_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_ASYNC_TASKS_ENABLED", "true")
+    repo = _override()
+    raw = await _add_owner_key(repo)
+
+    async def boom_enqueue(envelope):
+        raise RuntimeError("broker unavailable")
+
+    app_state.maintenance_enqueue = boom_enqueue
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/admin/maintenance/runs",
+            json={"workspace_id": "ws_1", "operations": ["score_memory"], "enqueue": True},
+            headers={"X-API-Key": raw},
+        )
+
+    assert response.status_code == 503
+    runs = await repo.list_maintenance_runs(workspace_id="ws_1")
+    assert len(runs) == 1
+    # Regression: summary is the typed dict[str, Any], not a bare string, so a
+    # later SQL read-back (model_validate) round-trips without ValidationError.
+    assert isinstance(runs[0].summary, dict)
+    assert runs[0].status == SchedulerRunStatus.failed
+    reread = await repo.get_maintenance_run(runs[0].scheduler_run_id)
+    assert reread is not None
+    assert isinstance(reread.summary, dict)

@@ -40,24 +40,55 @@ async def run_workspace_maintenance(
     requested_by: str = "system",
     dry_run: bool = False,
     reason: str | None = None,
+    scheduler_run_id: str | None = None,
 ) -> MaintenanceRunRecord:
     parsed = _parse_operations(operations)
     validate_operations(parsed)
     now = _now()
     safe_requested_by = redacted_run_text(requested_by)
     safe_reason = None if reason is None else redacted_run_text(reason)
-    run = await repo.add_maintenance_run(
-        MaintenanceRunRecord(
-            workspace_id=workspace_id,
-            requested_by=safe_requested_by,
-            reason=safe_reason,
-            operations=parsed,
-            dry_run=dry_run,
-            status=SchedulerRunStatus.running,
-            started_at=now,
-            updated_at=now,
+    # When a caller (e.g. the admin enqueue path) has already persisted a queued
+    # run record, adopt it so the same scheduler_run_id reflects completion
+    # instead of leaving an orphan 'pending' row beside a freshly minted run.
+    existing = None
+    new_run_id: str | None = None
+    if scheduler_run_id is not None:
+        found = await repo.get_maintenance_run(scheduler_run_id)
+        if found is not None and found.workspace_id == workspace_id:
+            existing = found
+        elif found is None:
+            # A pre-created run id that no longer exists: recreate under it so the
+            # id the caller already holds still resolves. A run id that belongs to
+            # another workspace is ignored entirely — never adopted and never
+            # reused — and a fresh id is minted instead.
+            new_run_id = scheduler_run_id
+    if existing is not None:
+        run = await repo.update_maintenance_run(
+            existing.model_copy(
+                update={
+                    "operations": parsed,
+                    "dry_run": dry_run,
+                    "status": SchedulerRunStatus.running,
+                    "started_at": existing.started_at or now,
+                    "updated_at": now,
+                },
+                deep=True,
+            )
         )
-    )
+    else:
+        run = await repo.add_maintenance_run(
+            MaintenanceRunRecord(
+                **({"scheduler_run_id": new_run_id} if new_run_id else {}),
+                workspace_id=workspace_id,
+                requested_by=safe_requested_by,
+                reason=safe_reason,
+                operations=parsed,
+                dry_run=dry_run,
+                status=SchedulerRunStatus.running,
+                started_at=now,
+                updated_at=now,
+            )
+        )
 
     completed = failed = skipped = 0
     warnings: list[str] = []

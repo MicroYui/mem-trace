@@ -1013,3 +1013,24 @@ async def test_original_context_reconstruction_uses_access_step_not_current_acti
     assert not [b for b in replay.original_context_blocks_reconstructed if b.type == "active_path"]
     assert replayed_active and replayed_active[0].content == "second active step"
     assert any(d.kind in {"context_block_added", "context_block_removed"} for d in replay.diffs)
+
+
+def test_diff_context_blocks_ordering_is_deterministic() -> None:
+    from app.observability.replay import _diff_context_blocks
+    from app.runtime.models import ContextBlock
+
+    def _b(content: str) -> ContextBlock:
+        return ContextBlock(type="memory", content=content, source="s", memory_id=None, tokens=1)
+
+    original = [_b("alpha"), _b("beta")]
+    replayed = [_b("yankee"), _b("xray"), _b("zulu")]
+
+    diffs = _diff_context_blocks(original, replayed)
+    added = [d.replayed for d in diffs if d.kind == "context_block_added"]
+    removed = [d.original for d in diffs if d.kind == "context_block_removed"]
+
+    # Set-difference iteration is sorted so replay diffs are deterministic across
+    # processes (independent of the interpreter hash seed).
+    assert added == sorted(added)
+    assert removed == sorted(removed)
+    assert added and removed

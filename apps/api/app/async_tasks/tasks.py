@@ -141,6 +141,7 @@ async def _process_memory_maintenance(envelope_payload: dict[str, Any]) -> dict[
             requested_by=str(envelope.payload.get("requested_by") or "celery"),
             dry_run=bool(envelope.payload.get("dry_run", False)),
             reason=envelope.payload.get("reason"),
+            scheduler_run_id=envelope.payload.get("scheduler_run_id"),
         )
         metadata = {
             "scheduler_run_id": run.scheduler_run_id,

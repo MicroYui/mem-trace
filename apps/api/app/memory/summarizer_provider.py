@@ -388,7 +388,20 @@ def _validate_result(request: SummarizeRequest, result: SummarizeResult) -> Summ
     if identity_drift:
         raise SummarizerValidationError("summarizer changed retained fact provenance")
 
-    summary_invented = _summary_fact_keys(result.summary) - allowed
+    # The summary-prose guard catches (key, value) pairs asserted in free text
+    # that are not backed by a retained fact. _summary_fact_keys parses a value
+    # only up to the first whitespace, so a legitimately multi-word retained
+    # value (e.g. "project.test_command=uv run pytest -q") would otherwise be
+    # misread as an invented "project.test_command=uv" pair against the rule
+    # provider's own rendered output. Accept the first whitespace token of each
+    # allowed value as an equivalent prose form so structured multi-word values
+    # validate, while genuinely unbacked keys/values are still rejected.
+    allowed_summary_pairs = set(allowed)
+    for key, value in allowed:
+        head = value.split()
+        if head:
+            allowed_summary_pairs.add((key, head[0]))
+    summary_invented = _summary_fact_keys(result.summary) - allowed_summary_pairs
     if summary_invented:
         raise SummarizerValidationError(f"summarizer invented summary facts: {sorted(summary_invented)}")
 

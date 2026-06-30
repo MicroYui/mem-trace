@@ -1,5 +1,26 @@
 # Project State
 
+## Latest Session (2026-06-30 — full core verification + 7-fix correctness-audit slice)
+
+- **User request:** completely verify all implementations — backend and frontend — and confirm every feature is implemented correctly; a local OpenAI-compatible reverse proxy (`http://localhost:4141`, Claude + GPT models) was available for real-LLM checks.
+- **Mechanical verification (all green):** backend `uv run --python 3.12 --extra dev pytest -q` from repo root -> **775 passed, 2 skipped** (768 baseline + 7 new regression tests); `compileall` clean; `app.benchmark.runner` -> `acceptance.passed=true (13/13)`. Frontend toolchain was provisioned this session (`npm i -g bun` -> bun **1.3.14**, then `bun install` 386 pkgs; `git`-tracked `bun.lock` unchanged): `bun run typecheck` clean, root `bun run test` -> **58 passed, 1 skip**, `bun run web:test` -> **27 passed** (was 26/1 before L4 fix), `bun run web:build` (tsc + vite, 1669 modules) green.
+- **Real-LLM verification (proxy `http://localhost:4141`, `gpt-5-mini`):** the proxy is chat-completions-only (Claude models are rejected on the OpenAI `/chat/completions` path; `/embeddings` returns 400). LLM **extraction** validated via `app.benchmark.llm_bench` -> **8/8** scenarios (genuine extraction, e.g. `project.formatting=ruff` the rule writer cannot parse). LLM **summarizer** (config-gated) validated via a direct smoke -> succeeds with provenance/source-id preservation and budget respected. **Embedding** provider against the proxy raises `HTTPStatusError` -> runtime falls back to the deterministic 256-dim embedding (documented degradation, confirmed).
+- **Code-correctness audit:** a 20-agent workflow (`memtrace-correctness-audit`, 1.76M tokens) reviewed 13 module groups against the documented claims and adversarially verified every finding. **147 features confirmed implemented/wired/correct.** 7 raw findings -> 6 confirmed real + 1 refuted (`_summarize` seam = tested, not a defect). All real defects sat in opt-in / default-off / convenience paths; none touched the default runtime, the test suite, or the benchmark.
+- **Fixes applied this slice (all 7 + stale bench, each with regression tests):**
+  - **M1** `memory/summarizer_provider.py` — `_validate_result` summary-prose guard rejected the rule provider's OWN output when a retained-fact value contained whitespace (`project.test_command=uv run pytest -q` parsed as `=uv`), silently disabling rolling-history compaction. Fix: accept the first whitespace token of each allowed value as an equivalent prose form. Independently reproduced before/after.
+  - **M2** `api/admin_routes.py` + `memory/maintenance.py` + `async_tasks/tasks.py` — async maintenance enqueue pre-persisted a `pending` run A while the worker minted a separate run B, so the returned id never reflected completion. Fix: thread `scheduler_run_id` through the `TaskEnvelope`; `run_workspace_maintenance(..., scheduler_run_id=)` adopts the pre-created same-workspace run, recreates under the id only if it no longer exists, and never adopts/reuses a foreign-workspace id (a fresh id is minted).
+  - **M3** `api/admin_routes.py` — enqueue-failure path assigned a bare `str` to the typed `dict` `summary`; now `{"error": "enqueue failed"}` so SQL read-back round-trips.
+  - **L1** `retrieval/controller.py` — removed dead `_retrieve_impl` (zero callers).
+  - **L2** `observability/replay.py` — `_diff_context_blocks` now iterates sorted set-differences so replay diff order is deterministic across processes.
+  - **L3** `api/routes.py` — `/v1/events` now maps `StateTreeError` -> HTTP 400 like every sibling mutating route.
+  - **L4** `apps/web/test/memory-atlas-ops-showcase.test.tsx` — resolves `package.json`/`scripts` paths from `import.meta.dir` so `bun run web:test` passes regardless of cwd (CI `bun test` already passed; the package-local script `cd apps/web` first and broke the repo-root-relative reads).
+  - **bench** `benchmark/llm_bench.py` — `scenario_failed_branch` is now negative-evidence-aware: the failed `npm` attempt appearing as an `AVOIDED` negative-evidence block (I1–I7) is correct, not contamination; only positive context blocks are checked. llm_bench now 8/8.
+- **No default-runtime / gate / retrieval / compaction / governance / benchmark semantics changed.** `git diff --check` clean; `reports/` is gitignored.
+- **Still deferred (ROADMAP §1.1, unchanged):** #2 negative-evidence `avoided_attempts` protected-block; in-memory `access_count`/`raw_event_ids` race (SQL atomic; in-memory is dev/test only); CLI/evaluator duplicate judgment (SDK must not import `apps/api`).
+- **Next recommended action:** select the next roadmap target deliberately; Phase 5 advanced storage/retrieval remains trigger-gated.
+
+---
+
 ## Latest Session (2026-06-30 — tech-debt/hardening closeout: httpx client pooling + tool_sensitive word-boundary)
 
 - **User request:** resume the project and execute the next slice. The full roadmap was complete with no target selected; the user chose the "tech-debt / hardening closeout" direction, then (after verification narrowed scope) the two clean-win items only.

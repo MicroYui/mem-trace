@@ -58,6 +58,19 @@
 
 > **修复优先级建议**：正向脱敏 + variant_1 gate（安全闭环）≈ isomorphism/StateTreeError ＞ sequence_no 并发 + 超时 split-brain（数据一致性）＞ token 预算精度 ＞ 鉴权 ＞ 其余。安全相关的两条（正向脱敏、variant_1）与一致性两条建议优先排期。
 
+### 1.2 全栈核验 + 7 项审计修复（2026-06-30 session 2）
+
+一次覆盖后端 / 前端 / SDK-集成 / 真实大模型路径的完整核验：后端全量 **775 passed, 2 skipped**、benchmark/reproduce **13/13**、前端 `typecheck` + 根 `bun test`(58) + `web:test`(27) + vite 生产构建全绿；真实大模型经本地 OpenAI 兼容反代 `http://localhost:4141`（chat-completions-only，`gpt-5-mini`）验证 LLM 抽取（`llm_bench` 8/8）+ 配置门控 LLM 摘要（provenance 保真）+ embedding 优雅降级（反代无 `/embeddings` → 确定性 256 维回退）。一个 20-agent 代码审计确认 **147** 项文档能力已落地 / 接入 / 正确，并发现 7 项真实但轻量缺陷（**全部在 opt-in / 默认关 / 便捷脚本路径**，均已修复并带回归测试）：
+
+- [x] **[Medium] RuleSummarizerProvider 对自身合法输出误报**：retained fact 值含空格（如 `project.test_command=uv run pytest -q`）时 `_validate_result` 的 summary-prose 守卫把截断的 `=uv` 当作 invented fact 抛错，静默禁用滚动历史压缩。已改为接受每个 allowed 值的首空格 token 作为等价 prose 形式。出处：`memory/summarizer_provider.py`。
+- [x] **[Medium] admin 异步维护 enqueue 产生孤儿 run**：route 预落 `pending` run A，worker 另建 run B，返回的 run id 永不回填完成状态。已把 `scheduler_run_id` 透传进 `TaskEnvelope`，`run_workspace_maintenance(..., scheduler_run_id=)` 采纳同 workspace 预建 run；仅当该 id 已不存在时才以其重建；绝不采纳 / 复用跨 workspace 的 id。出处：`api/admin_routes.py` / `memory/maintenance.py` / `async_tasks/tasks.py`。
+- [x] **[Medium] enqueue 失败把裸 str 赋给 dict summary**：已改为 `{"error": "enqueue failed"}`，SQL 回读不再 ValidationError。出处：`api/admin_routes.py`。
+- [x] **[Low] 死代码 `RetrievalController._retrieve_impl`**：无任何调用方，已删除。出处：`retrieval/controller.py`。
+- [x] **[Low] replay context-block diff 顺序跨进程不确定**：set 差集改为 `sorted(...)` 迭代，diff 顺序确定。出处：`observability/replay.py`。
+- [x] **[Low] `/v1/events` 未映射 `StateTreeError`→400**：已对齐其余所有写路由。出处：`api/routes.py`。
+- [x] **[Low] `bun run web:test` 因 cwd 相对路径失败**：showcase 测试改用 `import.meta.dir` 解析仓库路径（CI 的 `bun test` 从仓库根跑本就通过）。出处：`apps/web/test/memory-atlas-ops-showcase.test.tsx`。
+- [x] **过时 llm_bench failed_branch 断言**：失败 npm 尝试以 `AVOIDED` 负向证据块出现是 I1–I7 的正确行为而非污染；判定改为只检查正向上下文块。`llm_bench` 现 8/8。出处：`benchmark/llm_bench.py`。
+
 ---
 
 ## 2. Phase 3 — 可观测性与可视化（★ 最高性价比，优先做）
