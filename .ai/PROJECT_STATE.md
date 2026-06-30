@@ -1,5 +1,15 @@
 # Project State
 
+## Latest Session (2026-06-30 — §3.3 7-rule conflict policy + provenance 解释链)
+
+- **User request (loop):** complete the recommended remaining-candidate slices in order, each as verify → update memory → commit; benchmark must be expanded with authoritative datasets and more real-LLM Q&A; IDE plugin and Go/Rust skipped. First slice: ROADMAP §3.3 完整 7 条冲突规则 + owner-gated 人工冲突审核 workflow.
+- **Implemented:** new pure module `apps/api/app/memory/conflict_policy.py` (`decide_conflict` + `ConflictDecision`) encoding architecture §6.7 rules with priority R4 user-correction > R5 source-authority (tool/asserted > assistant-inferred) > R6 completed>active>rolled_back>failed > R2 explicit valid-time > legacy trust/recency > R3 uncertain. Wired into `resolver.resolve` single-valued conflict path (replaces inline `max((trust,updated))`) and `conflicts._explanation` (redacted suggested-resolution provenance chain). Added owner-gated admin action `apply_suggested` (`api/admin_routes.py`, model Literal in `runtime/models.py`) that applies the 7-rule winner, supersedes losers (audited `applied_rule`), and 409s on uncertain ties.
+- **Backward compatibility:** policy is a superset of the old resolver; falls through to legacy trust/recency + tie→conflicted when R4/R5/R6/R2 do not discriminate. All prior resolver/conflict/admin tests unchanged; benchmark `case_5` unchanged.
+- **Adversarial self-review fix:** `_deciding_rule` now reports the rule that secured the win over the runner-up (closest competitor), not a misleading `legacy_trust_recency` fallback in 3+-candidate cross-rule cases (RED test `test_deciding_rule_reflects_margin_over_runner_up_not_whole_field`).
+- **Verification (all green):** TDD RED/GREEN for every piece; `tests/memory/test_conflict_policy.py` 11, resolver +2, conflicts +1, admin governance +2; full `uv run --extra dev pytest -q` from repo root -> **791 passed, 2 skipped**; `compileall` clean; `app.benchmark.runner` + `scripts/reproduce.sh` -> **acceptance 13/13** unchanged; `git diff --check` clean. `reports/` stays untracked.
+- **Files:** +`apps/api/app/memory/conflict_policy.py`, +`apps/api/tests/memory/test_conflict_policy.py`; M `resolver.py`, `conflicts.py`, `api/admin_routes.py`, `runtime/models.py`, `tests/memory/test_resolver.py`, `tests/memory/test_conflicts.py`, `tests/api/test_admin_governance.py`.
+- **Next:** ROADMAP §5 completed-subgoal → summary node (loop task #2).
+
 ## Latest Session (2026-06-30 — full core verification + 7-fix correctness-audit slice)
 
 - **User request:** completely verify all implementations — backend and frontend — and confirm every feature is implemented correctly; a local OpenAI-compatible reverse proxy (`http://localhost:4141`, Claude + GPT models) was available for real-LLM checks.

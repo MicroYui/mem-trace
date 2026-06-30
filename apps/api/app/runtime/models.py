@@ -564,7 +564,7 @@ class AdminMemoryStatusRequest(_Base):
 
 
 class ResolveMemoryConflictRequest(_Base):
-    action: Literal["mark_false_positive", "choose_winner"]
+    action: Literal["mark_false_positive", "choose_winner", "apply_suggested"]
     winner_memory_id: Optional[str] = None
     reason: str
 

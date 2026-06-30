@@ -62,6 +62,18 @@ def test_tool_result_evidence_explains_conflict_without_auto_overwriting_higher_
     assert "manual review" in conflicts[0].explanation.lower()
 
 
+def test_conflict_explanation_includes_suggested_resolution_rule_and_winner() -> None:
+    old = _memory("mem_old", key="project.runtime", value="nodejs", trust_score=0.4)
+    new = _memory("mem_new", key="project.runtime", value="bun", trust_score=0.9)
+
+    conflict = detect_memory_conflicts("ws_conflicts", [old, new], detected_by="scan")[0]
+
+    # provenance explanation chain: deciding rule + suggested winner surfaced to admin
+    assert "Suggested resolution" in conflict.explanation
+    assert "legacy_trust_recency" in conflict.explanation
+    assert "mem_new" in conflict.explanation
+
+
 def test_conflict_explanation_redacts_secret_like_values() -> None:
     safe = _memory("mem_safe", key="project.runtime", value="bun")
     unsafe = _memory("mem_secret", key="project.runtime", value="token=sk-1234567890abcdef1234")

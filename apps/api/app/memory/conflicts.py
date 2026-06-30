@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 import hashlib
 
+from app.memory.conflict_policy import decide_conflict
 from app.memory.key_ontology import canonical_memory_key, is_single_valued_key, same_memory_key_identity
 from app.memory.secrets import redact
 from app.runtime.models import MemoryConflictRecord, MemoryItem, MemoryStatus, MemoryType, Sensitivity
@@ -22,15 +23,37 @@ def _group_key(memory: MemoryItem) -> tuple[str, str] | None:
     return (canonical, memory.scope.value)
 
 
+def _suggestion(memories: list[MemoryItem]) -> str:
+    """Append the deterministic 7-rule suggested resolution + deciding rule.
+
+    This is the provenance explanation chain surfaced to owner-gated manual
+    review; it references memory ids and the deciding rule only (never raw
+    values) so no secret-like content can leak through the suggestion clause.
+    """
+    decision = decide_conflict(memories)
+    if decision.winner_id is not None:
+        losers = ", ".join(decision.superseded_ids) or "(none)"
+        return (
+            f"Suggested resolution ({decision.rule}): keep {decision.winner_id}, "
+            f"supersede {losers}."
+        )
+    return (
+        "Suggested resolution (R3_uncertain): no clear winner; "
+        "mark conflicting memories for manual review."
+    )
+
+
 def _explanation(memories: list[MemoryItem]) -> str:
     values = ", ".join(f"{m.memory_id}:{_safe_value(m)}" for m in memories)
     if any(m.memory_type == MemoryType.tool_evidence for m in memories):
-        return (
+        base = (
             f"Single-valued memory key has conflicting values ({values}); "
             "tool evidence can explain the conflict but requires manual review "
             "before overwriting higher-trust project constraints."
         )
-    return f"Single-valued memory key has conflicting active values ({values}); manual review required."
+    else:
+        base = f"Single-valued memory key has conflicting active values ({values}); manual review required."
+    return f"{base} {_suggestion(memories)}"
 
 
 def _safe_value(memory: MemoryItem) -> str:

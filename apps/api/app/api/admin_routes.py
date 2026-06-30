@@ -29,6 +29,7 @@ from app.governance.admin import (
     to_public_api_key,
 )
 from app.governance.quota import QuotaService, QuotaUnit
+from app.memory.conflict_policy import decide_conflict
 from app.memory.lifecycle import transition_memory_status
 from app.memory.maintenance import (
     redacted_run_text,
@@ -515,12 +516,31 @@ async def admin_resolve_memory_conflict(
         )
         return stored
 
-    # choose_winner
-    if not req.winner_memory_id:
-        raise HTTPException(status_code=400, detail="winner_memory_id required for choose_winner")
-    if req.winner_memory_id not in conflict.memory_ids:
-        raise HTTPException(status_code=400, detail="winner_memory_id must belong to the conflict")
-    winner = await repo.get_memory(req.winner_memory_id)
+    # choose_winner / apply_suggested both converge on a single winner id, then
+    # supersede the remaining members. apply_suggested derives the winner from the
+    # deterministic 7-rule policy (architecture §6.7) and refuses uncertain ties.
+    applied_rule: Optional[str] = None
+    if req.action == "apply_suggested":
+        members = [await repo.get_memory(mid) for mid in conflict.memory_ids]
+        active_members = [
+            m for m in members if m is not None and m.status != MemoryStatus.superseded
+        ]
+        decision = decide_conflict(active_members)
+        if decision.winner_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="conflict is uncertain (no discriminating signal); choose_winner manually",
+            )
+        winner_memory_id = decision.winner_id
+        applied_rule = decision.rule
+    else:  # choose_winner
+        if not req.winner_memory_id:
+            raise HTTPException(status_code=400, detail="winner_memory_id required for choose_winner")
+        if req.winner_memory_id not in conflict.memory_ids:
+            raise HTTPException(status_code=400, detail="winner_memory_id must belong to the conflict")
+        winner_memory_id = req.winner_memory_id
+
+    winner = await repo.get_memory(winner_memory_id)
     if winner is None or winner.workspace_id != conflict.workspace_id:
         raise HTTPException(status_code=400, detail="winner_memory_id must resolve to the conflict workspace")
 
@@ -530,7 +550,7 @@ async def admin_resolve_memory_conflict(
     # state window without claiming cross-memory atomicity.)
     planned: list[tuple[MemoryItem, MemoryLifecycleAuditRecord]] = []
     for loser_id in conflict.memory_ids:
-        if loser_id == req.winner_memory_id:
+        if loser_id == winner_memory_id:
             continue
         loser = await repo.get_memory(loser_id)
         if loser is None or loser.status == MemoryStatus.superseded:
@@ -544,7 +564,7 @@ async def admin_resolve_memory_conflict(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        updated = updated.model_copy(update={"superseded_by": req.winner_memory_id})
+        updated = updated.model_copy(update={"superseded_by": winner_memory_id})
         planned.append((updated, audit))
 
     for updated, audit in planned:
@@ -554,14 +574,24 @@ async def admin_resolve_memory_conflict(
         update={"status": "resolved_choose_winner", "resolved_at": datetime.now(timezone.utc)}
     )
     stored = await repo.update_memory_conflict(resolved)
+    if req.action == "apply_suggested":
+        audit_action = "resolve_conflict_apply_suggested"
+        audit_metadata: dict = {
+            "winner_memory_id": winner_memory_id,
+            "applied_rule": applied_rule,
+            "reason": req.reason,
+        }
+    else:
+        audit_action = "resolve_conflict_choose_winner"
+        audit_metadata = {"winner_memory_id": winner_memory_id, "reason": req.reason}
     await _record_admin_audit(
         repo,
         workspace_id=conflict.workspace_id,
         principal_id=principal.principal_id,
-        action="resolve_conflict_choose_winner",
+        action=audit_action,
         target_type="memory_conflict",
         target_id=conflict_id,
-        metadata={"winner_memory_id": req.winner_memory_id, "reason": req.reason},
+        metadata=audit_metadata,
     )
     return stored
 

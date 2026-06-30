@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.memory.conflict_policy import decide_conflict
 from app.memory.key_ontology import canonical_memory_key, is_single_valued_key
 from app.runtime.models import MemoryItem, MemoryStatus
 
@@ -130,25 +131,21 @@ def resolve(incoming: MemoryItem, existing_active: list[MemoryItem]) -> ResolveR
         candidates = [primary] + diff
         for m in candidates:
             _promote_to_canonical_key(m, incoming.key)
-        top = max((m.trust_score, m.updated_at) for m in candidates)
-        tied = [m for m in candidates if (m.trust_score, m.updated_at) == top]
-        if len(tied) == 1:
-            winner = tied[0]
+        decision = decide_conflict(candidates)
+        if decision.winner_id is not None:
             for m in candidates:
-                if m.memory_id != winner.memory_id:
+                if m.memory_id != decision.winner_id:
                     m.status = MemoryStatus.superseded
-                    m.superseded_by = winner.memory_id
+                    m.superseded_by = decision.winner_id
                     m.updated_at = _now()
         else:
-            successor = min(m.memory_id for m in tied)
-            tie_ids = {m.memory_id for m in tied}
-            for m in tied:
-                m.status = MemoryStatus.conflicted
-                m.updated_at = _now()
             for m in candidates:
-                if m.memory_id not in tie_ids:
+                if m.memory_id in decision.conflicted_ids:
+                    m.status = MemoryStatus.conflicted
+                    m.updated_at = _now()
+                elif m.memory_id in decision.superseded_ids:
                     m.status = MemoryStatus.superseded
-                    m.superseded_by = successor
+                    m.superseded_by = decision.successor_id
                     m.updated_at = _now()
         # Record every mutated EXISTING memory (incoming is carried by `add`).
         for m in candidates:

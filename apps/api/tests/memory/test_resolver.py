@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.memory import resolver
-from app.runtime.models import MemoryItem, MemoryScope, MemoryStatus, MemoryType
+from app.runtime.models import BranchStatus, MemoryItem, MemoryScope, MemoryStatus, MemoryType
 
 
 def _mem(value, *, key="project.runtime", trust=0.8, updated=None, source_event_id=None, mid=None):
@@ -167,6 +167,39 @@ def test_alias_conflict_existing_winner_is_promoted_to_canonical_key():
     assert survivor.summary == "project.package_manager=npm"
     assert incoming.status == MemoryStatus.superseded
     assert incoming.superseded_by == "mem_alias"
+
+
+def test_conflict_user_correction_supersedes_higher_trust_old_value():
+    """7-rule policy R4: an explicit user correction supersedes an older,
+    higher-trust value even though its own trust is lower."""
+    existing = _mem("nodejs", trust=0.95, mid="mem_node")
+    incoming = _mem("bun", trust=0.3, mid="mem_bun")
+    incoming.lifecycle_metadata["user_correction"] = True
+
+    result = resolver.resolve(incoming, [existing])
+
+    assert result.add is incoming
+    assert incoming.status == MemoryStatus.active
+    node = next(u for u in result.updates if u.memory_id == "mem_node")
+    assert node.status == MemoryStatus.superseded
+    assert node.superseded_by == "mem_bun"
+
+
+def test_conflict_completed_branch_supersedes_higher_trust_failed_branch():
+    """7-rule policy R6: a completed-branch fact wins over a failed-branch fact
+    regardless of the failed branch's higher trust score."""
+    existing = _mem("nodejs", trust=0.95, mid="mem_node")
+    existing.branch_status = BranchStatus.failed
+    incoming = _mem("bun", trust=0.3, mid="mem_bun")
+    incoming.branch_status = BranchStatus.completed
+
+    result = resolver.resolve(incoming, [existing])
+
+    assert result.add is incoming
+    assert incoming.status == MemoryStatus.active
+    node = next(u for u in result.updates if u.memory_id == "mem_node")
+    assert node.status == MemoryStatus.superseded
+    assert node.superseded_by == "mem_bun"
 
 
 def test_endpoint_current_is_single_valued_but_deprecated_is_multi_valued():

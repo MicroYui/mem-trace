@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -366,6 +368,86 @@ async def test_resolve_conflict_choose_winner_supersedes_losers(monkeypatch):
     assert loser_after.superseded_by == winner.memory_id
     winner_after = await repo.get_memory(winner.memory_id)
     assert winner_after.status == MemoryStatus.active
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflict_apply_suggested_uses_7rule_policy(monkeypatch):
+    _admin_env(monkeypatch)
+    repo = _override()
+    raw = await _add_owner_key(repo)
+    winner = await repo.add_memory(
+        MemoryItem(workspace_id="ws_1", memory_type=MemoryType.project,
+                   key="project.runtime", value="bun", content="bun", trust_score=0.9)
+    )
+    loser = await repo.add_memory(
+        MemoryItem(workspace_id="ws_1", memory_type=MemoryType.project,
+                   key="project.runtime", value="node", content="node", trust_score=0.4)
+    )
+    conflict = await repo.upsert_memory_conflict(
+        MemoryConflictRecord(
+            workspace_id="ws_1",
+            subject_key="project.runtime",
+            memory_ids=sorted([winner.memory_id, loser.memory_id]),
+            status="open",
+        )
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/v1/admin/memory-conflicts/{conflict.conflict_id}/resolve",
+            json={"action": "apply_suggested", "reason": "accept 7-rule suggestion"},
+            headers={"X-API-Key": raw},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "resolved_choose_winner"
+    # the 7-rule policy supersedes the lower-trust value, keeps the winner active
+    loser_after = await repo.get_memory(loser.memory_id)
+    assert loser_after.status == MemoryStatus.superseded
+    assert loser_after.superseded_by == winner.memory_id
+    assert (await repo.get_memory(winner.memory_id)).status == MemoryStatus.active
+    # audit records which rule was applied and the suggested winner
+    audits = await repo.list_admin_action_audits(workspace_id="ws_1")
+    applied = [a for a in audits if a.action == "resolve_conflict_apply_suggested"]
+    assert applied and applied[0].metadata.get("applied_rule") == "legacy_trust_recency"
+    assert applied[0].metadata.get("winner_memory_id") == winner.memory_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflict_apply_suggested_rejects_uncertain_tie(monkeypatch):
+    _admin_env(monkeypatch)
+    repo = _override()
+    raw = await _add_owner_key(repo)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    a = MemoryItem(workspace_id="ws_1", memory_type=MemoryType.project,
+                   key="project.runtime", value="bun", content="bun", trust_score=0.8)
+    a.updated_at = ts
+    b = MemoryItem(workspace_id="ws_1", memory_type=MemoryType.project,
+                   key="project.runtime", value="node", content="node", trust_score=0.8)
+    b.updated_at = ts
+    a = await repo.add_memory(a)
+    b = await repo.add_memory(b)
+    conflict = await repo.upsert_memory_conflict(
+        MemoryConflictRecord(
+            workspace_id="ws_1",
+            subject_key="project.runtime",
+            memory_ids=sorted([a.memory_id, b.memory_id]),
+            status="open",
+        )
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/v1/admin/memory-conflicts/{conflict.conflict_id}/resolve",
+            json={"action": "apply_suggested", "reason": "try auto"},
+            headers={"X-API-Key": raw},
+        )
+
+    # genuine tie -> uncertain -> no auto-winner; owner must choose_winner manually
+    assert resp.status_code == 409
+    assert (await repo.get_memory(a.memory_id)).status == MemoryStatus.active
+    assert (await repo.get_memory(b.memory_id)).status == MemoryStatus.active
+    assert (await repo.get_memory_conflict(conflict.conflict_id)).status == "open"
 
 
 @pytest.mark.asyncio
