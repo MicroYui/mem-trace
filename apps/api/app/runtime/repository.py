@@ -137,7 +137,9 @@ class Repository(Protocol):
     # memories
     async def add_memory(self, memory: MemoryItem) -> MemoryItem: ...
     async def get_memory(self, memory_id: str) -> Optional[MemoryItem]: ...
-    async def update_memory(self, memory: MemoryItem) -> MemoryItem: ...
+    async def update_memory(
+        self, memory: MemoryItem, *, preserve_access_bookkeeping: bool = True
+    ) -> MemoryItem: ...
     async def bump_memory_access(self, memory_id: str, *, accessed_at: datetime) -> None: ...
     async def transition_memory_with_audit(
         self,
@@ -411,22 +413,25 @@ class InMemoryRepository:
         m = self._memories.get(memory_id)
         return m.model_copy(deep=True) if m else None
 
-    async def update_memory(self, memory: MemoryItem) -> MemoryItem:
+    async def update_memory(
+        self, memory: MemoryItem, *, preserve_access_bookkeeping: bool = True
+    ) -> MemoryItem:
         before = self._memories.get(memory.memory_id)
         after = memory
         if before is not None:
-            semantic_change = should_create_memory_version(before, memory)
-            if semantic_change:
-                after = memory.model_copy(
-                    update={
-                        "access_count": before.access_count,
-                        "last_accessed_at": before.last_accessed_at,
-                        **_preserved_lifecycle_fields(before, memory),
-                    },
-                    deep=True,
-                )
-            else:
-                after = memory
+            update_fields: dict = {}
+            if preserve_access_bookkeeping:
+                # `bump_memory_access` is the sole authority on access bookkeeping;
+                # carry `access_count`/`last_accessed_at` from the stored row so a
+                # stale caller copy cannot roll back an atomic access bump (mirrors
+                # the SQL repo's server-side `+1`). The benchmark fairness restore
+                # opts out to rewind state to the seed snapshot.
+                update_fields["access_count"] = before.access_count
+                update_fields["last_accessed_at"] = before.last_accessed_at
+            if should_create_memory_version(before, memory):
+                update_fields.update(_preserved_lifecycle_fields(before, memory))
+            if update_fields:
+                after = memory.model_copy(update=update_fields, deep=True)
         if before is not None and should_create_memory_version(before, after):
             await self.add_memory_version(
                 MemoryVersionRecord(

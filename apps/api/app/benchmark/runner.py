@@ -168,7 +168,13 @@ async def _restore_workspace_memories(repo: Repository, workspace_id: str, snaps
     if missing:
         raise RuntimeError(f"memories missing from benchmark workspace snapshot: {missing}")
     for original in snapshot.values():
-        await repo.update_memory(original.model_copy(deep=True))
+        # Rewind every mutable field to the seed snapshot, including the access
+        # bookkeeping a prior strategy's retrieval bumped, so each strategy sees
+        # identical seed state. This is the one caller that intentionally resets
+        # `access_count`/`last_accessed_at` rather than preserving them.
+        await repo.update_memory(
+            original.model_copy(deep=True), preserve_access_bookkeeping=False
+        )
 
 
 async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | None = None) -> list[CaseMetrics]:

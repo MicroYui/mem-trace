@@ -10,12 +10,12 @@ from typing import Any
 from pydantic import BaseModel
 
 from memtrace_sdk.client import MemTrace
+from memtrace_sdk.context_actions import contaminated as _contaminated, decide_action as _decide_action
 from memtrace_sdk.errors import BadRequestError, MemTraceError, NotFoundError
 from memtrace_sdk.types import (
     EventRole,
     EventType,
     FinishStepRequest,
-    MemoryContext,
     ObservabilityReportRequest,
     RetrievalRequest,
     RetrievalStrategy,
@@ -341,27 +341,6 @@ async def _seed_demo_run(client: MemTrace, *, session_id: str, workspace_id: str
         )
     )
     return run, recovery
-
-
-def _decide_action(context: MemoryContext) -> str:
-    if _contaminated(context):
-        return "npm test"
-    positive_text = " ".join(block.content.lower() for block in _positive_blocks(context))
-    if "bun" in positive_text:
-        return "bun test"
-    return "unknown"
-
-
-def _contaminated(context: MemoryContext) -> bool:
-    return any("npm" in block.content.lower() and "failed" in block.content.lower() for block in _positive_blocks(context))
-
-
-def _positive_blocks(context: MemoryContext):
-    return [
-        block
-        for block in context.context_blocks
-        if block.type != "avoided_attempts" and block.source != "negative_evidence"
-    ]
 
 
 def _print(result: Any, *, json_output: bool) -> None:

@@ -10,45 +10,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.runtime.context_actions import (
+    contaminated,
+    decide_action,
+    negative_blocks as _negative_blocks,
+    positive_blocks as _positive_blocks,
+)
 from app.runtime.models import (
     AccessInspection,
     ContextCompactionLog,
     MemoryContext,
     RetrievalStrategy,
 )
-
-
-def decide_action(ctx: MemoryContext) -> str:
-    """Pick the test/deploy command implied by the packed context."""
-    positive_blocks = _positive_blocks(ctx)
-    if contaminated(ctx):
-        return "npm test"
-    text = " ".join(b.content.lower() for b in positive_blocks)
-    if "bun" in text:
-        return "bun test"
-    return "unknown"
-
-
-def contaminated(ctx: MemoryContext) -> bool:
-    """failed_branch_contamination: failed memory reached positive context."""
-    return any(
-        "npm" in b.content.lower() and "failed" in b.content.lower()
-        for b in _positive_blocks(ctx)
-    )
-
-
-def _positive_blocks(ctx: MemoryContext):
-    return [
-        block for block in ctx.context_blocks
-        if block.type != "avoided_attempts" and block.source != "negative_evidence"
-    ]
-
-
-def _negative_blocks(ctx: MemoryContext):
-    return [
-        block for block in ctx.context_blocks
-        if block.type == "avoided_attempts" or block.source == "negative_evidence"
-    ]
 
 
 @dataclass

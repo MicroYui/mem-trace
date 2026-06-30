@@ -829,7 +829,9 @@ class SqlRepository:
             o = await s.get(orm.MemoryORM, memory_id)
             return _mem_from_orm(o) if o else None
 
-    async def update_memory(self, memory: MemoryItem) -> MemoryItem:
+    async def update_memory(
+        self, memory: MemoryItem, *, preserve_access_bookkeeping: bool = True
+    ) -> MemoryItem:
         ensure_embedding(memory)
         after = memory
         async with self._sf() as s:
@@ -837,16 +839,18 @@ class SqlRepository:
                 current = await s.get(orm.MemoryORM, memory.memory_id, with_for_update=True)
                 if current is not None:
                     before = _mem_from_orm(current)
-                    semantic_change = should_create_memory_version(before, memory)
-                    if semantic_change:
-                        after = memory.model_copy(
-                            update={
-                                "access_count": before.access_count,
-                                "last_accessed_at": before.last_accessed_at,
-                                **_preserved_lifecycle_fields(before, memory),
-                            },
-                            deep=True,
-                        )
+                    update_fields: dict = {}
+                    if preserve_access_bookkeeping:
+                        # `bump_memory_access` is the sole authority on access
+                        # bookkeeping; carry `access_count`/`last_accessed_at` from
+                        # the row-locked current row so an unrelated update can
+                        # never lose a concurrent atomic access bump.
+                        update_fields["access_count"] = before.access_count
+                        update_fields["last_accessed_at"] = before.last_accessed_at
+                    if should_create_memory_version(before, memory):
+                        update_fields.update(_preserved_lifecycle_fields(before, memory))
+                    if update_fields:
+                        after = memory.model_copy(update=update_fields, deep=True)
                     if should_create_memory_version(before, after):
                         max_version = await s.scalar(
                             select(func.max(orm.MemoryVersionORM.version_no)).where(

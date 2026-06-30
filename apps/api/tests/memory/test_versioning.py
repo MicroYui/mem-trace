@@ -195,6 +195,39 @@ async def test_update_memory_preserves_concurrent_access_only_fields_from_curren
 
 
 @pytest.mark.asyncio
+async def test_update_memory_nonsemantic_change_does_not_clobber_bumped_access_fields() -> None:
+    """`bump_memory_access` is the sole authority on access bookkeeping.
+
+    A non-semantic `update_memory` (e.g. a `trust_score` tweak, which is not a
+    versioned field) carried from a stale in-memory copy must not roll the
+    atomically-bumped `access_count`/`last_accessed_at` back to the caller's
+    stale values. Mirrors the SQL repo where `bump_memory_access` does an atomic
+    server-side `+1` that an unrelated update must never lose.
+    """
+    repo = InMemoryRepository()
+    stale = await repo.add_memory(_memory(access_count=0, last_accessed_at=None))
+    accessed_at = datetime(2026, 6, 14, 2, tzinfo=timezone.utc)
+    await repo.bump_memory_access(stale.memory_id, accessed_at=accessed_at)
+
+    nonsemantic_from_stale = stale.model_copy(
+        update={
+            "trust_score": 0.99,
+            "updated_at": datetime(2026, 6, 14, 3, tzinfo=timezone.utc),
+        }
+    )
+    await repo.update_memory(nonsemantic_from_stale)
+
+    current = await repo.get_memory(stale.memory_id)
+    versions = await repo.list_memory_versions(stale.memory_id)
+
+    assert current is not None
+    assert current.trust_score == 0.99
+    assert current.access_count == 1
+    assert current.last_accessed_at == accessed_at
+    assert versions == []  # non-semantic change creates no version history
+
+
+@pytest.mark.asyncio
 async def test_update_memory_preserves_current_lifecycle_status_from_stale_semantic_copy() -> None:
     repo = InMemoryRepository()
     stale = await repo.add_memory(_memory(status=MemoryStatus.active))

@@ -1,5 +1,14 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop Step 1: 低价值技术债清理 §1.1/§13.3)
+
+- **Loop Step 1 of 5** (multi-step `/loop`: tech-debt → Phase 5 → real datasets → README). Closed the two remaining low-value debt items from ROADMAP §1.1/§13.3 with TDD; both ROADMAP boxes flipped to `[x]`.
+- **(a) `access_count` race:** `Repository.update_memory` gained keyword-only `preserve_access_bookkeeping=True` (default). Both semantic + non-semantic paths now carry `access_count`/`last_accessed_at` from the stored/row-locked `before`, so `bump_memory_access` (SQL atomic `+1`; in-memory no-await read/write) is the sole authority — a stale caller copy can't roll back an atomic bump. Fixed symmetrically in `InMemoryRepository` + `SqlRepository` (backend isomorphism). The one explicit reset is `runner._restore_workspace_memories(...)` passing `preserve_access_bookkeeping=False` for benchmark fairness rewind. `raw_event_ids` left as a denormalized cache by design.
+- **(b) CLI/evaluator dedup:** three byte-identical copies of `decide_action`/`contaminated`/`positive_blocks`/`negative_blocks` (benchmark `evaluator.py`, `demo/run_demo.py`, SDK `cli.py`) consolidated into `app/runtime/context_actions.py` (the `app.runtime` DTO tier the SDK already depends on via `memtrace_sdk.types`). CLI reuses through new `memtrace_sdk.context_actions` re-export — respects the SDK↔`app.benchmark` boundary. Locked by identity tests.
+- **Changed:** `app/runtime/repository.py`, `app/storage/sql_repository.py`, `app/benchmark/runner.py`, `app/benchmark/evaluator.py`, `app/demo/run_demo.py`, `packages/python-sdk/src/memtrace_sdk/cli.py`; new `app/runtime/context_actions.py`, `packages/python-sdk/src/memtrace_sdk/context_actions.py`, `tests/runtime/test_context_actions.py`, `packages/python-sdk/tests/test_context_actions.py`; edited `tests/memory/test_versioning.py`; docs `docs/design/ROADMAP.md` §1.1/§13.3.
+- **Verification:** app+SDK pytest **823 passed, 2 skipped** (2 reproducibility tests need cwd=repo root → pass there); compileall clean; deterministic benchmark + `scripts/reproduce.sh` → **16/16**; CLI demo markers unchanged; `git diff --check` clean.
+- **Next:** loop Step 2 — Phase 5 高级检索/存储 (§4); confirm trigger conditions before large work.
+
 ## Latest Session (2026-06-30 — Benchmark 补全 Part B: real-LLM Q&A harness)
 
 - **Loop slice #6 (Part B):** opt-in real-LLM Q&A bench `app/benchmark/qa_bench.py` — QA counterpart to `llm_bench` (extraction). Seeds memory through `MemoryRuntime`, retrieves `baseline_0` (no-memory) vs `variant_2` (gated), asks a real LLM with each context, scores correctness + memory-improvement. Word-boundary marker match (forbidden `npm` ≠ `pnpm`). Env-gated via `MEMTRACE_LLM_*` (`_resolve_endpoints` reused); skips cleanly with no endpoint.

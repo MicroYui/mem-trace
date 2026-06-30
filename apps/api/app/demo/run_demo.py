@@ -20,12 +20,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.runtime.context_actions import contaminated as _contaminated, decide_action as _decide_action
 from app.runtime.memory_runtime import MemoryRuntime
 from app.runtime.models import (
     EventRole,
     EventType,
     FinishStepRequest,
-    MemoryContext,
     RetrievalRequest,
     RetrievalStrategy,
     RollbackRequest,
@@ -82,33 +82,6 @@ def _ev(run_id, step_id, role, etype, *, content=None, tool_name=None, status=No
         run_id=run_id, step_id=step_id, role=role, event_type=etype,
         content=content, tool_name=tool_name, status=status,
     )
-
-
-def _decide_action(ctx: MemoryContext) -> str:
-    """Deterministic rule evaluator (mvp.md 10.3): choose the test command from
-    the packed context.
-
-    A failed-branch ``npm`` memory that survives gating contaminates the context
-    and leads a naive agent to retry the failed ``npm`` path. Only when no failed
-    npm evidence is present does the Bun project constraint win.
-    """
-    if _contaminated(ctx):
-        return "npm test"
-    text = " ".join(b.content.lower() for b in _positive_blocks(ctx))
-    if "bun" in text:
-        return "bun test"
-    return "unknown"
-
-
-def _contaminated(ctx: MemoryContext) -> bool:
-    return any("npm" in b.content.lower() and "failed" in b.content.lower() for b in _positive_blocks(ctx))
-
-
-def _positive_blocks(ctx: MemoryContext):
-    return [
-        block for block in ctx.context_blocks
-        if block.type != "avoided_attempts" and block.source != "negative_evidence"
-    ]
 
 
 async def run_demo(*, use_sql: bool = False) -> dict:
