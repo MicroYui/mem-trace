@@ -149,6 +149,14 @@ class Settings(BaseSettings):
     retrieval_query_planner: str = "off"
     # Maximum lexical boost a fully-matching candidate earns under "hints" mode.
     retrieval_query_planner_weight: float = 0.1
+    # Deterministic multi-hop iterative retrieval (ROADMAP §4 / draft §5).
+    # 0 (default) == single pass, byte-identical to before. When > 0, after the
+    # first pass the controller derives entity cues from the current candidates
+    # and runs that many extra hops to pull in complementary memories the query
+    # never mentions, bounded by the request token budget. No model or network.
+    retrieval_multi_hop_hops: int = 0
+    # Per-hop cap on the number of new entity cues used to expand retrieval.
+    retrieval_multi_hop_max_cues: int = 4
     # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
     # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
     # hot paths use the configured embedding provider first, then degrade to the
@@ -211,6 +219,20 @@ class Settings(BaseSettings):
     def _validate_retrieval_query_planner_weight(cls, value: float) -> float:
         if value < 0.0 or value > 1.0:
             raise ValueError("retrieval_query_planner_weight must be between 0.0 and 1.0")
+        return value
+
+    @field_validator("retrieval_multi_hop_hops")
+    @classmethod
+    def _validate_retrieval_multi_hop_hops(cls, value: int) -> int:
+        if value < 0 or value > 4:
+            raise ValueError("retrieval_multi_hop_hops must be between 0 and 4")
+        return value
+
+    @field_validator("retrieval_multi_hop_max_cues")
+    @classmethod
+    def _validate_retrieval_multi_hop_max_cues(cls, value: int) -> int:
+        if value < 1 or value > 16:
+            raise ValueError("retrieval_multi_hop_max_cues must be between 1 and 16")
         return value
 
 

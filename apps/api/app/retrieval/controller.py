@@ -15,10 +15,11 @@ from typing import Any, Optional
 from app.providers.base import ProviderKind
 from app.retrieval import gate as gatemod
 from app.retrieval.negative_evidence import build_negative_evidence
-from app.retrieval.packer import pack_context
+from app.retrieval.packer import estimate_tokens, pack_context
 from app.retrieval.policy import POLICY_VERSION, build_policy_snapshot, policy_hash
 from app.retrieval.query_planner import (
     decide_need_retrieval,
+    derive_hop_cues,
     hint_boost,
     plan_query,
     rewrite_query,
@@ -91,6 +92,9 @@ class RetrievalCandidateTrace:
     vector_score: float = 0.0
     relevance_score: float = 0.0
     state_match_score: float = 0.0
+    # 0 == retrieved directly for the query; >0 == surfaced by a multi-hop cue
+    # expansion (ROADMAP §4). Default-off retrieval leaves this 0 everywhere.
+    hop: int = 0
 
 
 @dataclass(slots=True)
@@ -159,6 +163,11 @@ class RetrievalController:
         # candidates that mention entity-like query terms.
         self._query_planner = (settings.retrieval_query_planner or "off").lower()
         self._query_planner_weight = settings.retrieval_query_planner_weight
+        # ROADMAP §4: default-off deterministic multi-hop iterative retrieval.
+        # 0 == single pass (unchanged); >0 runs that many cue-driven expansion
+        # hops bounded by the request token budget.
+        self._multi_hop_hops = max(0, settings.retrieval_multi_hop_hops)
+        self._multi_hop_max_cues = max(1, settings.retrieval_multi_hop_max_cues)
 
     def _gate_config(self, strategy: RetrievalStrategy) -> "gatemod.GateConfig":
         config = gatemod.GateConfig.for_strategy(strategy)
@@ -276,6 +285,7 @@ class RetrievalController:
             query_planner_weight=(
                 self._query_planner_weight if self._query_planner != "off" else None
             ),
+            multi_hop_hops=self._multi_hop_hops,
         )
         access.policy_version = POLICY_VERSION
         access.policy_snapshot = snapshot
@@ -358,16 +368,17 @@ class RetrievalController:
         # ---- phase: retrieval (candidate selection) -------------------- #
         t0 = time.perf_counter()
         active_node, active_ids, active_path = await self._load_active_state(request.run_id)
-        candidates = await self._select_candidates(
+        candidates = await self._select_candidates_multi_hop(
             workspace_id=workspace_id,
             run_id=request.run_id,
             query=request.query,
             top_k=request.top_k,
             include_all=long_context,
             task_intent=request.task_intent,
+            token_budget=budget,
         )
         retrieval_ms = int((time.perf_counter() - t0) * 1000)
-        phase_profile[ProfilePhase.retrieval.value] = {
+        retrieval_phase: dict[str, Any] = {
             "latency_ms": retrieval_ms,
             # Preserve the existing profiler operation label for hot-path
             # backward compatibility; component scores in the trace expose the
@@ -377,6 +388,12 @@ class RetrievalController:
             "accepted_count": 0,
             "rejected_count": 0,
         }
+        if self._multi_hop_hops > 0:
+            retrieval_phase["metadata"] = {
+                "multi_hop_hops": self._multi_hop_hops,
+                "multi_hop_candidate_count": sum(1 for c in candidates if c.hop > 0),
+            }
+        phase_profile[ProfilePhase.retrieval.value] = retrieval_phase
 
         # ---- phase: gate ----------------------------------------------- #
         t1 = time.perf_counter()
@@ -660,6 +677,78 @@ class RetrievalController:
         active_candidates.sort(key=lambda n: (n.depth, n.created_at))
         active = active_candidates[-1] if active_candidates else None
         return active, active_ids, chain
+
+    async def _select_candidates_multi_hop(
+        self,
+        *,
+        workspace_id: str,
+        run_id: str,
+        query: str,
+        top_k: int,
+        token_budget: int,
+        include_all: bool = False,
+        task_intent: str | None = None,
+    ) -> list[RetrievalCandidateTrace]:
+        """Single-pass selection, optionally followed by cue-driven hops.
+
+        ROADMAP §4 iterative reconstruction (default-off, deterministic): after
+        the first pass, derive entity cues from the current candidates' content
+        and run extra retrieval hops to pull in complementary memories the query
+        never names (e.g. a fact linked only by a shared ``service.gateway``
+        token). Each hop appends only new, budget-fitting candidates; the request
+        token budget caps cumulative content so expansion stays bounded. With
+        ``hops == 0`` (default) or ``include_all`` this is exactly the single pass.
+        """
+        base = await self._select_candidates(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            query=query,
+            top_k=top_k,
+            include_all=include_all,
+            task_intent=task_intent,
+        )
+        if self._multi_hop_hops <= 0 or include_all:
+            return base
+
+        result = list(base)
+        seen_ids = {c.memory.memory_id for c in result}
+        # Entities the query/rewrite already targets must not seed a hop again.
+        covered: set[str] = set(plan_query(query, task_intent).hints)
+        used_tokens = sum(estimate_tokens(c.memory.content) for c in result)
+        for hop_index in range(1, self._multi_hop_hops + 1):
+            if used_tokens >= token_budget:
+                break
+            cues = derive_hop_cues(
+                [c.memory.content for c in result],
+                exclude=covered,
+                max_cues=self._multi_hop_max_cues,
+            )
+            if not cues:
+                break
+            covered.update(cues)
+            hop_candidates = await self._select_candidates(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                query=" ".join(cues),
+                top_k=top_k,
+                include_all=False,
+                task_intent=None,
+            )
+            added_any = False
+            for cand in hop_candidates:
+                if cand.memory.memory_id in seen_ids:
+                    continue
+                cand_tokens = estimate_tokens(cand.memory.content)
+                if used_tokens + cand_tokens > token_budget:
+                    continue
+                cand.hop = hop_index
+                result.append(cand)
+                seen_ids.add(cand.memory.memory_id)
+                used_tokens += cand_tokens
+                added_any = True
+            if not added_any:
+                break
+        return result
 
     async def _select_candidates(
         self,

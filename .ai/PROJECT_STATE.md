@@ -1,5 +1,11 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 2: §4 multi-hop iterative retrieval)
+
+- **Slice 2 done — ROADMAP §4 multi-hop iterative retrieval (deterministic, default-off).** New `query_planner.derive_hop_cues(contents, exclude, max_cues)` extracts entity-like cues from first-pass candidate content; new `RetrievalController._select_candidates_multi_hop(...)` orchestrates: single pass, then (when `MEMTRACE_RETRIEVAL_MULTI_HOP_HOPS>0`) derive cues → run cue-query hops → append only new, budget-fitting candidates (cumulative `estimate_tokens` capped at the request `token_budget`). Surfaces complementary memories linked only by a shared entity (e.g. `service.gateway`) that the query never names. Candidates carry `hop` provenance (0=direct, >0=expansion); `retrieval_multi_hop_max_cues` (default 4) caps per-hop cues; `long_context` never multi-hops.
+- **Default-off byte-identical:** `hops=0` returns exactly the single pass; policy snapshot writes `multi_hop_hops` only when enabled; retrieval profile adds `multi_hop_*` metadata only when enabled. Config validators reject hops∉[0,4] and max_cues∉[1,16].
+- **Verification:** `tests/retrieval/test_multi_hop.py` 11/11; retrieval+observability+benchmark+conformance 302; full app+SDK **865 passed, 2 skipped**; deterministic benchmark **16/16**; `git diff --check` clean. Commit on `main`. ROADMAP §4 multi-hop item ticked `[x]`.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 1: §4 query planner `full` mode)
 
 - **New `/loop` (dynamic, self-paced):** user asked to implement *all remaining ROADMAP capabilities* — every deferred/candidate item, even default-off ones — verifying and committing each slice. Task list tracks 9 implementation slices + closeout (#1 query-planner remainder → #2 multi-hop retrieval → #3 ES/OpenSearch → #4 Neo4j graph → #5 multi-store consistency/fusion → #6 state-tree node_type/subgoal → #7 MAGE ops → #8 full governance → #9 IDE/Go-Rust → #10 closeout). §8 explicit out-of-scope (multimodal/community-detection/MemGate-training/full-leaderboard/multi-agent-platform) stays intentionally not done.

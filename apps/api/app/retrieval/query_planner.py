@@ -179,6 +179,35 @@ def rewrite_query(query: str | None, task_intent: str | None = None) -> QueryRew
     )
 
 
+def derive_hop_cues(
+    contents: list[str], *, exclude: set[str], max_cues: int
+) -> tuple[str, ...]:
+    """Entity-like cues drawn from candidate contents for the next retrieval hop.
+
+    Multi-hop iterative reconstruction (ROADMAP §4 / draft §5): the contents of
+    the current candidates may reference entities (dotted keys, paths, ids) that
+    link to *complementary* memories the original query never mentions. This
+    returns the new entity cues (not already in ``exclude``), in deterministic
+    first-appearance order across the ordered contents, capped at ``max_cues``.
+    """
+    seen = {token.lower() for token in exclude}
+    cues: list[str] = []
+    for content in contents:
+        if not content:
+            continue
+        for match in _ENTITY_RE.findall(content):
+            token = match.lower()
+            if len(token) < _MIN_LEN or not _is_entity_like(token):
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            cues.append(token)
+            if len(cues) >= max_cues:
+                return tuple(cues)
+    return tuple(cues)
+
+
 __all__ = [
     "QueryPlan",
     "plan_query",
@@ -187,4 +216,5 @@ __all__ = [
     "decide_need_retrieval",
     "QueryRewrite",
     "rewrite_query",
+    "derive_hop_cues",
 ]
