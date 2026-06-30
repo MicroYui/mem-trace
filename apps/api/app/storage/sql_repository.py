@@ -43,6 +43,7 @@ from app.runtime.models import (
     MemoryConflictRecord,
     ProfileEvent,
     QuotaLimitRecord,
+    WorkspaceMembershipRecord,
     RetainedNegativeEvidence,
     RiskFlags,
     StateNode,
@@ -464,6 +465,30 @@ def _quota_limit_from_orm(o: orm.QuotaLimitORM) -> QuotaLimitRecord:
         unit=o.unit,
         limit=o.limit,
         window_seconds=o.window_seconds,
+        created_by=o.created_by,
+        created_at=o.created_at,
+        updated_at=o.updated_at,
+    )
+
+
+def _membership_to_orm(m: WorkspaceMembershipRecord) -> "orm.WorkspaceMembershipORM":
+    return orm.WorkspaceMembershipORM(
+        membership_id=m.membership_id,
+        workspace_id=m.workspace_id,
+        principal_id=m.principal_id,
+        role=m.role,
+        created_by=m.created_by,
+        created_at=m.created_at,
+        updated_at=m.updated_at,
+    )
+
+
+def _membership_from_orm(o: "orm.WorkspaceMembershipORM") -> WorkspaceMembershipRecord:
+    return WorkspaceMembershipRecord(
+        membership_id=o.membership_id,
+        workspace_id=o.workspace_id,
+        principal_id=o.principal_id,
+        role=o.role,
         created_by=o.created_by,
         created_at=o.created_at,
         updated_at=o.updated_at,
@@ -1305,6 +1330,69 @@ class SqlRepository:
         async with self._sf() as s:
             await s.execute(
                 orm.QuotaLimitORM.__table__.delete().where(orm.QuotaLimitORM.quota_limit_id == quota_limit_id)
+            )
+            await s.commit()
+
+    async def upsert_workspace_membership(
+        self, membership: WorkspaceMembershipRecord
+    ) -> WorkspaceMembershipRecord:
+        async with self._sf() as s:
+            existing = (
+                await s.execute(
+                    select(orm.WorkspaceMembershipORM).where(
+                        orm.WorkspaceMembershipORM.workspace_id == membership.workspace_id,
+                        orm.WorkspaceMembershipORM.principal_id == membership.principal_id,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                membership = membership.model_copy(
+                    update={
+                        "membership_id": existing.membership_id,
+                        "created_by": existing.created_by,
+                        "created_at": existing.created_at,
+                    }
+                )
+            await s.merge(_membership_to_orm(membership))
+            await s.commit()
+            return membership
+
+    async def get_workspace_membership(
+        self, *, workspace_id: str, principal_id: str
+    ) -> Optional[WorkspaceMembershipRecord]:
+        async with self._sf() as s:
+            row = (
+                await s.execute(
+                    select(orm.WorkspaceMembershipORM).where(
+                        orm.WorkspaceMembershipORM.workspace_id == workspace_id,
+                        orm.WorkspaceMembershipORM.principal_id == principal_id,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            return _membership_from_orm(row) if row is not None else None
+
+    async def list_workspace_memberships(
+        self, *, workspace_id: str, limit: int = 100, offset: int = 0
+    ) -> list[WorkspaceMembershipRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        async with self._sf() as s:
+            rows = (
+                await s.execute(
+                    select(orm.WorkspaceMembershipORM)
+                    .where(orm.WorkspaceMembershipORM.workspace_id == workspace_id)
+                    .order_by(orm.WorkspaceMembershipORM.created_at, orm.WorkspaceMembershipORM.membership_id)
+                    .limit(limit)
+                    .offset(offset)
+                )
+            ).scalars().all()
+            return [_membership_from_orm(row) for row in rows]
+
+    async def delete_workspace_membership(self, membership_id: str) -> None:
+        async with self._sf() as s:
+            await s.execute(
+                orm.WorkspaceMembershipORM.__table__.delete().where(
+                    orm.WorkspaceMembershipORM.membership_id == membership_id
+                )
             )
             await s.commit()
 

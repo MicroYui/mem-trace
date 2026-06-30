@@ -355,6 +355,25 @@ class QuotaLimitORM(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class WorkspaceMembershipORM(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (
+        Index(
+            "uq_workspace_memberships_workspace_principal",
+            "workspace_id",
+            "principal_id",
+            unique=True,
+        ),
+    )
+    membership_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, index=True)
+    principal_id: Mapped[str] = mapped_column(String, index=True)
+    role: Mapped[str] = mapped_column(String)
+    created_by: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class GateLogORM(Base):
     __tablename__ = "memory_gate_logs"
     gate_id: Mapped[str] = mapped_column(String, primary_key=True)

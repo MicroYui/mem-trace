@@ -37,6 +37,7 @@ from app.runtime.models import (
     MemoryConflictRecord,
     ProfileEvent,
     QuotaLimitRecord,
+    WorkspaceMembershipRecord,
     StateNode,
 )
 from app.memory.versioning import redacted_memory_snapshot, should_create_memory_version
@@ -236,6 +237,18 @@ class Repository(Protocol):
     ) -> list[QuotaLimitRecord]: ...
     async def delete_quota_limit(self, quota_limit_id: str) -> None: ...
 
+    # workspace membership (ROADMAP §3.4)
+    async def upsert_workspace_membership(
+        self, membership: WorkspaceMembershipRecord
+    ) -> WorkspaceMembershipRecord: ...
+    async def get_workspace_membership(
+        self, *, workspace_id: str, principal_id: str
+    ) -> Optional[WorkspaceMembershipRecord]: ...
+    async def list_workspace_memberships(
+        self, *, workspace_id: str, limit: int = 100, offset: int = 0
+    ) -> list[WorkspaceMembershipRecord]: ...
+    async def delete_workspace_membership(self, membership_id: str) -> None: ...
+
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog: ...
     async def get_access_log(self, access_id: str) -> Optional[MemoryAccessLog]: ...
@@ -309,6 +322,7 @@ class InMemoryRepository:
         self._maintenance_task_attempts: dict[str, MaintenanceTaskAttemptRecord] = {}
         self._admin_action_audits: dict[str, AdminActionAuditRecord] = {}
         self._quota_limits: dict[str, QuotaLimitRecord] = {}
+        self._memberships: dict[str, WorkspaceMembershipRecord] = {}
         self._access_logs: dict[str, MemoryAccessLog] = {}
         self._gate_logs: list[MemoryGateLog] = []
         self._profile_events: list[ProfileEvent] = []
@@ -817,6 +831,47 @@ class InMemoryRepository:
 
     async def delete_quota_limit(self, quota_limit_id: str) -> None:
         self._quota_limits.pop(quota_limit_id, None)
+
+    async def upsert_workspace_membership(
+        self, membership: WorkspaceMembershipRecord
+    ) -> WorkspaceMembershipRecord:
+        # Identity is (workspace_id, principal_id): an upsert for an existing pair
+        # updates the role in place and preserves membership_id/created fields.
+        for membership_id, existing in list(self._memberships.items()):
+            if (
+                existing.workspace_id == membership.workspace_id
+                and existing.principal_id == membership.principal_id
+            ):
+                membership = membership.model_copy(
+                    update={
+                        "membership_id": existing.membership_id,
+                        "created_by": existing.created_by,
+                        "created_at": existing.created_at,
+                    }
+                )
+                del self._memberships[membership_id]
+                break
+        self._memberships[membership.membership_id] = membership.model_copy(deep=True)
+        return membership
+
+    async def get_workspace_membership(
+        self, *, workspace_id: str, principal_id: str
+    ) -> Optional[WorkspaceMembershipRecord]:
+        for membership in self._memberships.values():
+            if membership.workspace_id == workspace_id and membership.principal_id == principal_id:
+                return membership.model_copy(deep=True)
+        return None
+
+    async def list_workspace_memberships(
+        self, *, workspace_id: str, limit: int = 100, offset: int = 0
+    ) -> list[WorkspaceMembershipRecord]:
+        _validate_pagination(limit=limit, offset=offset)
+        rows = [m for m in self._memberships.values() if m.workspace_id == workspace_id]
+        rows.sort(key=lambda m: (m.created_at, m.membership_id))
+        return [row.model_copy(deep=True) for row in rows[offset : offset + limit]]
+
+    async def delete_workspace_membership(self, membership_id: str) -> None:
+        self._memberships.pop(membership_id, None)
 
     # logs / profile
     async def add_access_log(self, log: MemoryAccessLog) -> MemoryAccessLog:

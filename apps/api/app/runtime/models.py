@@ -537,6 +537,23 @@ class StartMaintenanceRunRequest(_Base):
     enqueue: bool = False
 
 
+class WorkspaceMembershipRecord(_Base):
+    """A principal's membership + role in a workspace (ROADMAP §3.4).
+
+    Augments API-key-embedded roles: a principal authenticated by any method
+    (api_key / jwt) can be granted a workspace role via membership. Identity is
+    ``(workspace_id, principal_id)``; ``role`` is a ``WorkspacePermission`` value.
+    """
+
+    membership_id: str = Field(default_factory=lambda: _new_id("wsmem"))
+    workspace_id: str
+    principal_id: str
+    role: str
+    created_by: str
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
 class CreateApiKeyRequest(_Base):
     workspace_id: str
     principal_id: str

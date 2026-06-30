@@ -112,5 +112,8 @@ async def test_jwt_off_by_default_ignores_jwt_shape(monkeypatch):
     monkeypatch.delenv("MEMTRACE_JWT_AUTH_ENABLED", raising=False)
     monkeypatch.setenv("MEMTRACE_API_KEY", "legacy-key")
     get_settings.cache_clear()
+    # The legacy token gate is the no-repository path; ensure app_state has no
+    # repository leaked in from another test in the full-suite run.
+    monkeypatch.setattr(deps.app_state, "repository", None, raising=False)
     principal = await deps.require_api_key(authorization="Bearer legacy-key", x_api_key=None)
     assert principal.kind == "legacy_api_key"

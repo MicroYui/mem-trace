@@ -1,5 +1,13 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 8: §3.4 full multi-tenant governance)
+
+- **Slice 8 done — ROADMAP §3.4 remaining governance, all default-off.** Two commits:
+  - **Part 1 (no migration):** JWT/OIDC bearer auth (`app/governance/jwt_auth.py` — native HS256 via stdlib, optional RS256/ES256 via `jwt` extra; wired into `require_api_key`; new `Principal.kind="jwt"`); distributed scheduler lease (`app/async_tasks/lease.py` — NoOp/InMemory/Redis, degrade-safe); Celery beat (optional periodic maintenance sweep in `make_celery_app`); encrypted raw-payload store (`app/governance/raw_payload_store.py` — Fernet via optional `crypto` extra, ADR-017 guard). Added `jwt`/`crypto` extras.
+  - **Part 2 (membership table + migration):** `WorkspaceMembershipRecord` model + `WorkspaceMembershipORM` + in-memory & SQL repo CRUD (upsert/get/list/delete, identity `(workspace_id, principal_id)`) + migration `0013_workspace_membership` (unique partial-free index on workspace+principal) + `permissions.principal_with_membership(...)` merging a membership role into a principal's effective roles.
+- **All default-off:** auth/scheduling/storage behavior unchanged unless explicitly enabled; benchmark **16/16**.
+- **Verification:** jwt 10/10, lease+beat 8/8, store 4 (1 skip), membership 6/6, migrations 26 (1 skip); full app+SDK **947 passed, 3 skipped**; compileall + `git diff --check` clean. Commits on `main`. ROADMAP §3.4 JWT/membership/lease/beat/encrypted-store noted complete.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 7: §5/§9 MAGE planner)
 
 - **Slice 7 done — ROADMAP §5 MAGE four operations + §9 cross-reference coordination (deterministic, default-off).** New `app/runtime/mage.py` `plan_mage(nodes, memories)` → `MagePlan`: **Grow** = active non-root frontier leaves; **Compress** = fully-completed inferred subgoals ≥ N steps → summary node; **Maintain** = stale/dormant/archived memories anchored to completed nodes → decay/archive; **Revise** = failed/rolled_back branches → revise anchored memories. `MemoryRuntime.plan_run_mage(run_id)` gated by `MEMTRACE_STATE_TREE_MAGE_ENABLED` (default → empty plan; read-only, nothing mutated).
