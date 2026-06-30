@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from app.providers.base import ProviderKind
 from app.retrieval import gate as gatemod
+from app.retrieval.hybrid import HybridBackend, build_hybrid_backend
 from app.retrieval.negative_evidence import build_negative_evidence
 from app.retrieval.packer import estimate_tokens, pack_context
 from app.retrieval.policy import POLICY_VERSION, build_policy_snapshot, policy_hash
@@ -90,6 +91,7 @@ class RetrievalCandidateTrace:
     memory: MemoryItem
     lexical_score: float = 0.0
     vector_score: float = 0.0
+    bm25_score: float = 0.0
     relevance_score: float = 0.0
     state_match_score: float = 0.0
     # 0 == retrieved directly for the query; >0 == surfaced by a multi-hop cue
@@ -168,6 +170,12 @@ class RetrievalController:
         # hops bounded by the request token budget.
         self._multi_hop_hops = max(0, settings.retrieval_multi_hop_hops)
         self._multi_hop_max_cues = max(1, settings.retrieval_multi_hop_max_cues)
+        # ROADMAP §4: optional hybrid BM25 backend (default-off). None unless a
+        # backend is configured; when present and available, BM25 joins the
+        # lexical/vector blend as a third signal.
+        self._hybrid_backend: HybridBackend | None = build_hybrid_backend(settings)
+        self._hybrid_weight = settings.retrieval_hybrid_weight
+        self._hybrid_backend_name = (settings.retrieval_hybrid_backend or "off").lower()
 
     def _gate_config(self, strategy: RetrievalStrategy) -> "gatemod.GateConfig":
         config = gatemod.GateConfig.for_strategy(strategy)
@@ -286,6 +294,12 @@ class RetrievalController:
                 self._query_planner_weight if self._query_planner != "off" else None
             ),
             multi_hop_hops=self._multi_hop_hops,
+            hybrid_backend=(
+                self._hybrid_backend_name if self._hybrid_backend is not None else None
+            ),
+            hybrid_weight=(
+                self._hybrid_weight if self._hybrid_backend is not None else None
+            ),
         )
         access.policy_version = POLICY_VERSION
         access.policy_snapshot = snapshot
@@ -808,11 +822,28 @@ class RetrievalController:
         if self._query_planner in ("hints", "full"):
             hints = plan_query(query, task_intent).hints
 
+        retrievable = [m for m in memories if m.status in _RETRIEVABLE_STATUSES]
+
+        # ROADMAP §4 hybrid BM25 (default-off): an optional third lexical signal
+        # from an external/deterministic backend. When it returns scores, scale
+        # the lexical/vector weights by (1 - hybrid_weight) so the blend sums to 1.
+        bm25_scores: dict[str, float] = {}
+        w_bm25 = 0.0
+        if self._hybrid_backend is not None and self._hybrid_backend.available:
+            bm25_scores = await self._hybrid_backend.bm25_scores(
+                query=lexical_query,
+                memories=retrievable,
+                workspace_id=workspace_id,
+                top_k=max(top_k * 2, top_k),
+            )
+            if bm25_scores:
+                w_bm25 = self._hybrid_weight
+                w_lex *= 1.0 - w_bm25
+                w_vec *= 1.0 - w_bm25
+
         # First pass: compute raw lexical/vector signals for retrievable memories.
         raw: list[tuple[MemoryItem, float, float]] = []
-        for m in memories:
-            if m.status not in _RETRIEVABLE_STATUSES:
-                continue  # skip superseded/archived/dormant/deleted lifecycle states
+        for m in retrievable:
             lex = lexical_similarity(lexical_query, m.content)
             if hints:
                 lex = min(
@@ -822,7 +853,7 @@ class RetrievalController:
             vec = vector_scores.get(m.memory_id, 0.0)
             raw.append((m, lex, vec))
 
-        # Fusion: blend the two signals into a single relevance score. "linear"
+        # Fusion: blend the signals into a single relevance score. "linear"
         # is the default weighted blend; "rrf" uses Reciprocal Rank Fusion over
         # each signal's ranking, which is robust when lexical/vector scores live
         # on different scales (ROADMAP §4 multi-signal fusion).
@@ -832,11 +863,12 @@ class RetrievalController:
 
         scored: list[RetrievalCandidateTrace] = []
         for m, lex, vec in raw:
+            bm25 = bm25_scores.get(m.memory_id, 0.0)
             if self._fusion == "rrf" and w_vec > 0.0:
                 rel = round(rrf_scores.get(m.memory_id, 0.0), 6)
                 positive = rel > 0.0
             else:
-                rel = round(w_lex * lex + w_vec * vec, 6)
+                rel = round(w_lex * lex + w_vec * vec + w_bm25 * bm25, 6)
                 positive = rel > 0.0
             # project constraints are always relevant to coding queries
             if m.memory_type.value == "project" and not positive:
@@ -848,6 +880,7 @@ class RetrievalController:
                         memory=m,
                         lexical_score=lex,
                         vector_score=vec,
+                        bm25_score=bm25,
                         relevance_score=rel,
                     )
                 )

@@ -1,5 +1,13 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 3: §4 optional hybrid BM25 backend)
+
+- **Slice 3 done — ROADMAP §4 ES/OpenSearch hybrid retrieval (default-off, degrade-safe).** New `app/retrieval/hybrid.py`: `HybridBackend` protocol; `InMemoryBM25Backend` (real deterministic Okapi BM25 over candidate content, IDF favors rare terms, no network); `ElasticsearchBM25Backend` (lazy-imports `elasticsearch`, per-workspace index upsert + filtered `match` query, degrades to `available=False`/`{}` on missing dep/endpoint or any query error — injectable client for tests); `build_hybrid_backend(settings)`.
+- **Controller blend:** when `MEMTRACE_RETRIEVAL_HYBRID_BACKEND` ∈ {inmemory, elasticsearch, opensearch} and the backend returns scores, BM25 joins as a third linear signal `rel = w_lex*lex + w_vec*vec + w_bm25*bm25` with lex/vec scaled by `(1 - hybrid_weight)`. Candidates carry `bm25_score`. `pyproject.toml` gains `search` (elasticsearch) + `graph` (neo4j) optional extras.
+- **Default-off byte-identical:** `off` (default) → `_hybrid_backend is None`, `bm25_score=0` everywhere, scoring unchanged; policy snapshot writes `hybrid_backend`/`hybrid_weight` only when enabled. Config validators reject unknown backends and weight∉[0,1].
+- **Deferred to Slice 5 (multi-store consistency + fusion):** BM25 into RRF 3-way fusion, write-path ES indexing (`index_status`/`last_indexed_at` + background reindex), valid_time/branch_status filter pushdown.
+- **Verification:** `tests/retrieval/test_hybrid.py` 12/12; retrieval+observability+benchmark+conformance 314; full app+SDK **877 passed, 2 skipped**; benchmark **16/16**; compileall + `git diff --check` clean. Commit on `main`. ROADMAP §4 ES item ticked `[x]`.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 2: §4 multi-hop iterative retrieval)
 
 - **Slice 2 done — ROADMAP §4 multi-hop iterative retrieval (deterministic, default-off).** New `query_planner.derive_hop_cues(contents, exclude, max_cues)` extracts entity-like cues from first-pass candidate content; new `RetrievalController._select_candidates_multi_hop(...)` orchestrates: single pass, then (when `MEMTRACE_RETRIEVAL_MULTI_HOP_HOPS>0`) derive cues → run cue-query hops → append only new, budget-fitting candidates (cumulative `estimate_tokens` capped at the request `token_budget`). Surfaces complementary memories linked only by a shared entity (e.g. `service.gateway`) that the query never names. Candidates carry `hop` provenance (0=direct, >0=expansion); `retrieval_multi_hop_max_cues` (default 4) caps per-hop cues; `long_context` never multi-hops.

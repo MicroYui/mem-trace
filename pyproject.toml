@@ -43,6 +43,12 @@ telemetry = [
     "opentelemetry-sdk>=1.25",
     "opentelemetry-exporter-otlp>=1.25",
 ]
+search = [
+    "elasticsearch>=8.0",
+]
+graph = [
+    "neo4j>=5.0",
+]
 
 [build-system]
 requires = ["hatchling"]

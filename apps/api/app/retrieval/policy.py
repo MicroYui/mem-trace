@@ -37,6 +37,8 @@ def build_policy_snapshot(
     query_planner: str = "off",
     query_planner_weight: float | None = None,
     multi_hop_hops: int = 0,
+    hybrid_backend: str | None = None,
+    hybrid_weight: float | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-compatible, non-secret retrieval policy snapshot."""
     vector_active = bool(vector_enabled)
@@ -64,6 +66,10 @@ def build_policy_snapshot(
     # Same byte-stability rule for default-off multi-hop iterative retrieval.
     if multi_hop_hops and multi_hop_hops > 0:
         retrieval["multi_hop_hops"] = multi_hop_hops
+    # Same byte-stability rule for the default-off hybrid BM25 backend.
+    if hybrid_backend and hybrid_backend != "off":
+        retrieval["hybrid_backend"] = hybrid_backend
+        retrieval["hybrid_weight"] = hybrid_weight
     return {
         "policy_version": POLICY_VERSION,
         "strategy": request.strategy.value,

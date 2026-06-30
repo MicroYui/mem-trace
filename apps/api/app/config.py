@@ -157,6 +157,19 @@ class Settings(BaseSettings):
     retrieval_multi_hop_hops: int = 0
     # Per-hop cap on the number of new entity cues used to expand retrieval.
     retrieval_multi_hop_max_cues: int = 4
+    # Optional hybrid BM25 retrieval backend (ROADMAP §4, default-off). "off"
+    # (default) leaves candidate scoring byte-identical. "inmemory" enables a
+    # deterministic Okapi BM25 over candidate content (no network). "elasticsearch"
+    # / "opensearch" query a per-workspace index via the optional 'search' extra,
+    # degrading cleanly to lexical/vector when the dependency or endpoint is absent.
+    retrieval_hybrid_backend: str = "off"
+    # Weight of the BM25 signal when the hybrid backend is active; the lexical and
+    # vector weights are scaled by (1 - this) so the blend still sums to 1.
+    retrieval_hybrid_weight: float = 0.3
+    # Elasticsearch/OpenSearch endpoint + index name prefix (only used when the
+    # hybrid backend is "elasticsearch"/"opensearch").
+    es_url: str = ""
+    es_index_prefix: str = "memtrace"
     # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
     # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
     # hot paths use the configured embedding provider first, then degrade to the
@@ -233,6 +246,23 @@ class Settings(BaseSettings):
     def _validate_retrieval_multi_hop_max_cues(cls, value: int) -> int:
         if value < 1 or value > 16:
             raise ValueError("retrieval_multi_hop_max_cues must be between 1 and 16")
+        return value
+
+    @field_validator("retrieval_hybrid_backend")
+    @classmethod
+    def _validate_retrieval_hybrid_backend(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"off", "inmemory", "elasticsearch", "opensearch"}:
+            raise ValueError(
+                "retrieval_hybrid_backend must be one of: off, inmemory, elasticsearch, opensearch"
+            )
+        return normalized
+
+    @field_validator("retrieval_hybrid_weight")
+    @classmethod
+    def _validate_retrieval_hybrid_weight(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            raise ValueError("retrieval_hybrid_weight must be between 0.0 and 1.0")
         return value
 
 
