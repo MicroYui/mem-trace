@@ -580,7 +580,7 @@ class ResolveMemoryConflictRequest(_Base):
 
 class Principal(_Base):
     principal_id: str
-    kind: Literal["anonymous", "legacy_api_key", "api_key"]
+    kind: Literal["anonymous", "legacy_api_key", "api_key", "jwt"]
     workspace_ids: list[str] = Field(default_factory=list)
     roles: list[str] = Field(default_factory=list)
     api_key_id: Optional[str] = None

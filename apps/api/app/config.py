@@ -28,6 +28,25 @@ class Settings(BaseSettings):
     governance_enabled: bool = False
     allow_legacy_api_key: bool = False
     api_key_digest_salt: str = ""
+    # Full multi-tenant governance (ROADMAP §3.4, all default-off). JWT/OIDC
+    # bearer auth alongside API keys; HS256 is verified natively (no dependency),
+    # RS256/ES256 use the optional PyJWT 'jwt' extra. Workspace membership table
+    # augments API-key roles. A distributed scheduler lease and Celery beat make
+    # maintenance safe to run periodically across workers. An encrypted raw-payload
+    # store backs ADR-017 retention. None of these change default behavior.
+    jwt_auth_enabled: bool = False
+    jwt_algorithm: str = "HS256"
+    jwt_secret: str = ""
+    jwt_public_key: str = ""
+    jwt_issuer: str = ""
+    jwt_audience: str = ""
+    workspace_membership_enabled: bool = False
+    scheduler_lease_backend: str = "off"  # off | inmemory | redis
+    scheduler_lease_ttl_seconds: int = 300
+    celery_beat_enabled: bool = False
+    maintenance_beat_interval_seconds: int = 3600
+    maintenance_beat_workspace: str = ""
+    raw_payload_encryption_key: str = ""
     quota_enabled: bool = False
     quota_window_seconds: int = 60
     quota_write_event_per_window: int = 600

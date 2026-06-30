@@ -155,6 +155,19 @@ async def require_api_key(
         supplied = x_api_key
     if not supplied:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing api key")
+    # ROADMAP §3.4: optional JWT/OIDC bearer auth alongside API keys. Only tokens
+    # shaped like a JWT are tried here; everything else falls through to API-key
+    # auth so both methods coexist. Default-off (jwt_auth_enabled=False).
+    if settings.jwt_auth_enabled:
+        from app.governance.jwt_auth import JwtError, looks_like_jwt, verify_jwt
+
+        if looks_like_jwt(supplied):
+            try:
+                return verify_jwt(supplied, settings)
+            except JwtError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, detail="invalid jwt"
+                ) from exc
     if app_state.repository is None and settings.api_key and not settings.governance_enabled:
         from secrets import compare_digest
 

@@ -27,6 +27,25 @@ def make_celery_app(settings: Settings) -> Celery:
     )
     app.task(name="memory.extract_event", queue=settings.memory_queue_name)(process_event_extraction)
     app.task(name="maintenance.memory", queue=settings.maintenance_queue_name)(process_memory_maintenance)
+    # ROADMAP §3.4: optional periodic maintenance via Celery beat (default-off).
+    # When enabled, beat enqueues a maintenance sweep for the configured workspace
+    # every `maintenance_beat_interval_seconds`. A distributed scheduler lease
+    # (app.async_tasks.lease) gives operators cross-worker mutual exclusion.
+    if getattr(settings, "celery_beat_enabled", False) and settings.maintenance_beat_workspace:
+        app.conf.beat_schedule = {
+            "maintenance-sweep": {
+                "task": "maintenance.memory",
+                "schedule": float(max(1, settings.maintenance_beat_interval_seconds)),
+                "options": {"queue": settings.maintenance_queue_name},
+                "kwargs": {
+                    "payload": {
+                        "workspace_id": settings.maintenance_beat_workspace,
+                        "operations": list(settings.maintenance_default_operations),
+                        "requested_by": "celery-beat",
+                    }
+                },
+            }
+        }
     return app
 
 

@@ -49,6 +49,12 @@ search = [
 graph = [
     "neo4j>=5.0",
 ]
+jwt = [
+    "PyJWT>=2.8",
+]
+crypto = [
+    "cryptography>=42.0",
+]
 
 [build-system]
 requires = ["hatchling"]
