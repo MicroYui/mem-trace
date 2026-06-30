@@ -143,6 +143,15 @@ class RetrievalController:
         else:
             self._active_path_summarize_after = 0
             self._active_path_keep_recent = settings.active_path_summary_keep_recent
+        # ROADMAP §9.1: stale -> outdated-warning degrade, default-off and only on
+        # failure-learning strategies (see _gate_config).
+        self._stale_warning = settings.stale_warning_enabled
+
+    def _gate_config(self, strategy: RetrievalStrategy) -> "gatemod.GateConfig":
+        config = gatemod.GateConfig.for_strategy(strategy)
+        if self._stale_warning and config.enable_failure_learning:
+            config.enable_stale_warning = True
+        return config
 
     async def retrieve(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
         # Hot-path timeout (architecture.md §11 / §12.3: retrieve_context should
@@ -237,7 +246,7 @@ class RetrievalController:
         fusion = self._effective_policy_fusion()
         snapshot = build_policy_snapshot(
             request,
-            gate_config=gatemod.GateConfig.for_strategy(request.strategy),
+            gate_config=self._gate_config(request.strategy),
             effective_token_budget=effective_token_budget,
             vector_enabled=self._use_vector,
             vector_weight=self._vector_weight,
@@ -314,7 +323,7 @@ class RetrievalController:
             token_budget=budget,
             top_k=request.top_k,
         )
-        config = gatemod.GateConfig.for_strategy(request.strategy)
+        config = self._gate_config(request.strategy)
         self._attach_policy_snapshot(access, request, effective_token_budget=budget)
         phase_profile: dict[str, dict[str, Any]] = {}
 

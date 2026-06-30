@@ -117,7 +117,14 @@ def build_negative_evidence(
     items: list[NegativeEvidence] = []
     for outcome in outcomes:
         mem = memories_by_id.get(outcome.memory.memory_id)
-        if mem is None or not is_failedish(mem):
+        if mem is None:
+            continue
+        # ROADMAP §9.1: a degraded *stale* memory is not failedish; surface it as
+        # a warning-only outdated notice rather than an avoided-failure block.
+        if outcome.degraded and outcome.reject_reason == "stale_outdated":
+            items.append(_outdated_warning(mem))
+            continue
+        if not is_failedish(mem):
             continue
         if outcome.degraded:
             if is_unsafe_failed(mem):
@@ -189,6 +196,32 @@ def _raw_or_secret_sanitized(mem: MemoryItem, reason: str) -> NegativeEvidence:
         risk_kind=None,
         reason=reason,
         safe_text=redacted,
+        provenance=_provenance(mem),
+    )
+
+
+def _outdated_warning(mem: MemoryItem) -> NegativeEvidence:
+    """Render a stale memory as a warning-only outdated notice (ROADMAP §9.1).
+
+    Defense-in-depth: even though the gate's safety floor rejects
+    secret/destructive/tool-sensitive memories before they can reach the stale
+    branch, secret-bearing content is still collapsed to a generic notice here so
+    no raw value can leak through this read path.
+    """
+    redacted = redact(mem.content)
+    if contains_secret(mem.content) or redacted != mem.content:
+        safe = "Previously recorded information has expired and was withheld as potentially outdated."
+    else:
+        safe = f"OUTDATED — previously recorded but now expired; verify before relying on it: {redacted}"
+    return NegativeEvidence(
+        source_memory_id=mem.memory_id,
+        source_state_node_id=mem.source_state_node_id,
+        memory_type=mem.memory_type,
+        branch_status=mem.branch_status,
+        mode="outdated_warning",
+        risk_kind=None,
+        reason="stale_outdated",
+        safe_text=safe,
         provenance=_provenance(mem),
     )
 

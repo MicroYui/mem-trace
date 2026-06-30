@@ -753,7 +753,7 @@ class NegativeEvidence(_Base):
     source_state_node_id: Optional[str] = None
     memory_type: Optional[MemoryType] = None
     branch_status: BranchStatus
-    mode: Literal["raw_failed_attempt", "sanitized_risk_notice"]
+    mode: Literal["raw_failed_attempt", "sanitized_risk_notice", "outdated_warning"]
     risk_kind: Optional[Literal["secret", "destructive", "tool_sensitive", "unknown"]] = None
     reason: str
     safe_text: str
@@ -769,7 +769,7 @@ class RetainedNegativeEvidence(_Base):
 
     source_memory_id: Optional[str] = None
     source_state_node_id: Optional[str] = None
-    mode: Literal["raw_failed_attempt", "sanitized_risk_notice"]
+    mode: Literal["raw_failed_attempt", "sanitized_risk_notice", "outdated_warning"]
     risk_kind: Optional[str] = None
     reason: str
     safe_text: str

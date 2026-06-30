@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     summary_node_compression_enabled: bool = False
     active_path_summary_threshold: int = 8
     active_path_summary_keep_recent: int = 3
+    # ROADMAP §9.1 (default-off): degrade stale-but-safe memory into a warning-only
+    # "outdated" negative-evidence notice instead of a silent reject. Only applies
+    # to failure-learning strategies (variant_2/variant_3); never positive context,
+    # so case_9 (variant_2 excludes stale memory) and default benchmark are unchanged.
+    stale_warning_enabled: bool = False
     # Extraction freshness/latency policy (architecture.md §12.1): "sync" extracts
     # inline on write_event (default; keeps demo/benchmark deterministic), while
     # "buffered" defers extraction to an explicit or lazy flush.

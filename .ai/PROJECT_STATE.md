@@ -1,5 +1,13 @@
 # Project State
 
+## Latest Session (2026-06-30 — §9.1 stale → outdated-warning downgrade)
+
+- **Loop slice #3 (ROADMAP §9.1 derivative):** default-off stale→outdated-warning degrade, mirroring failure-learning `degrade`. A safe stale memory degrades into the warning-only negative-evidence channel instead of a silent reject; never positive context, so `case_9 variant_2_excludes_stale_memory` and default benchmark are unchanged.
+- **Implemented:** `GateConfig.enable_stale_warning` (False) + gate stale branch → `degrade "stale_outdated"` when enabled and memory safe; `negative_evidence._outdated_warning` (new `outdated_warning` mode, redacted, secret→generic template); `outdated_warning` added to `NegativeEvidence.mode` + `RetainedNegativeEvidence.mode`; config `stale_warning_enabled` (False); `RetrievalController._gate_config(strategy)` enables it only for failure-learning strategies (variant_2/3); both gate-config call sites routed through the helper. Packer renders the new mode via `safe_text` directly (`avoided_attempts`, ordinary/droppable).
+- **Verification:** new `tests/retrieval/test_stale_warning.py` (6) green; retrieval/observability/benchmark regression 238; full pytest **803 passed, 2 skipped**; compileall clean; benchmark + reproduce **13/13** unchanged (default-off); `git diff --check` clean.
+- **Files:** +`apps/api/tests/retrieval/test_stale_warning.py`; M `app/runtime/models.py`, `app/retrieval/gate.py`, `app/retrieval/negative_evidence.py`, `app/config.py`, `app/retrieval/controller.py`.
+- **Next:** ROADMAP §1.1 avoided_attempts 受保护块 (loop task #4).
+
 ## Latest Session (2026-06-30 — §5 completed-subgoal → bounded active-path summary)
 
 - **Loop slice #2 (ROADMAP §5):** default-off compression of completed subgoals on the active path so the *protected* `active_path` block stays bounded on long-horizon runs (coordinates with §9). No state-tree enum/schema/migration change — `StateNode.summary` already existed and `build_active_path_block` already rendered `summary or goal`.

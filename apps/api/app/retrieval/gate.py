@@ -49,6 +49,11 @@ class GateConfig:
     enable_state_match: bool = True
     enable_failure_learning: bool = False
     enable_reflection_rerank: bool = False
+    # ROADMAP §9.1 derivative (default-off): when enabled, a stale but otherwise
+    # safe memory degrades into the warning-only negative-evidence channel as an
+    # "outdated warning" instead of a silent hard reject. Never makes stale memory
+    # positive context, so case_9 (variant_2 excludes stale memory) is preserved.
+    enable_stale_warning: bool = False
     # failed-branch downweight factor for variant_1 (no hard reject)
     failed_branch_penalty: float = 0.5
 
@@ -199,6 +204,12 @@ def evaluate(
     # ---- Layer 2: risk policy ------------------------------------------- #
     if config.enable_risk_policy:
         if memory.expires_at is not None and memory.expires_at < _now():
+            # ROADMAP §9.1: degrade a safe stale memory into the warning-only
+            # negative-evidence channel instead of a silent reject (default-off).
+            # secret/destructive/tool_sensitive are already rejected by the safety
+            # floor above, so this only ever degrades otherwise-safe stale facts.
+            if config.enable_stale_warning and not _is_unsafe_failed(memory):
+                return _degrade(memory, GateLayer.risk_policy, "stale_outdated", relevance, state_match, freshness, trust, risk)
             return _reject(memory, GateLayer.risk_policy, "stale", relevance, state_match, freshness, trust, risk)
         flags = memory.risk_flags
         if flags.destructive_command:
