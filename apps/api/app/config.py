@@ -197,6 +197,10 @@ class Settings(BaseSettings):
     # steps into inferred subgoal nodes (read-side analysis; the stored tree is
     # unchanged). Default-off returns no inferred subgoals.
     state_tree_subgoal_inference_enabled: bool = False
+    # Deterministic MAGE state-tree operation planner (ROADMAP §5/§9, default-off).
+    # When enabled, MemoryRuntime.plan_run_mage proposes Grow/Compress/Maintain/
+    # Revise operations from the tree + memories (read-only; nothing is mutated).
+    state_tree_mage_enabled: bool = False
     # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
     # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
     # hot paths use the configured embedding provider first, then degrade to the

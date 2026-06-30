@@ -1212,6 +1212,24 @@ class MemoryRuntime:
 
         return infer_subgoals(await self._repo.list_state_nodes(run_id))
 
+    async def plan_run_mage(self, run_id: str):
+        """Deterministic MAGE operation plan for a run (ROADMAP §5/§9).
+
+        Proposes Grow/Compress/Maintain/Revise operations from the state tree and
+        memories. Read-only — nothing is mutated. Returns an empty plan when
+        ``state_tree_mage_enabled`` is off (the default).
+        """
+        from app.runtime.mage import MagePlan, plan_mage
+
+        if not self._settings.state_tree_mage_enabled:
+            return MagePlan()
+        run = await self._repo.get_run(run_id)
+        if run is None:
+            raise RunNotFoundError(run_id)
+        nodes = await self._repo.list_state_nodes(run_id)
+        memories = await self._repo.list_memories(workspace_id=run.workspace_id)
+        return plan_mage(nodes, memories)
+
     async def get_steps(self, run_id: str) -> list[AgentStep]:
         return await self._repo.list_steps(run_id)
 

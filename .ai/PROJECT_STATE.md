@@ -1,5 +1,11 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 7: §5/§9 MAGE planner)
+
+- **Slice 7 done — ROADMAP §5 MAGE four operations + §9 cross-reference coordination (deterministic, default-off).** New `app/runtime/mage.py` `plan_mage(nodes, memories)` → `MagePlan`: **Grow** = active non-root frontier leaves; **Compress** = fully-completed inferred subgoals ≥ N steps → summary node; **Maintain** = stale/dormant/archived memories anchored to completed nodes → decay/archive; **Revise** = failed/rolled_back branches → revise anchored memories. `MemoryRuntime.plan_run_mage(run_id)` gated by `MEMTRACE_STATE_TREE_MAGE_ENABLED` (default → empty plan; read-only, nothing mutated).
+- **Unifies the §9 cross-reference:** §5 active-path summary compression (done), §5 subgoal inference (Slice 6), and §3.2 lifecycle decay are now surfaced together by Compress + Maintain as one deterministic plan — the "memory/context compression" coordination point.
+- **Verification:** `tests/runtime/test_mage.py` 8/8; full app+SDK **921 passed, 2 skipped**; benchmark **16/16**; compileall + `git diff --check` clean. Commit on `main`. ROADMAP §5 MAGE + §9 coordination items ticked `[x]`.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 6: §5 node_type + subgoal inference)
 
 - **Slice 6 done — ROADMAP §5 full node_type + subgoal auto-inference (deterministic, default-off).** Expanded `StateNodeType` to `root/step/recovery/subgoal/tool_call/summary` (`node_type` is a plain String column → no migration). New `app/runtime/subgoal_inference.py` `infer_subgoals(nodes)` groups consecutive step/recovery nodes sharing a normalized `goal` into `InferredSubgoal`s (ordered by path/created_at, case-insensitive, skips root). New read method `MemoryRuntime.infer_run_subgoals(run_id)` gated by `MEMTRACE_STATE_TREE_SUBGOAL_INFERENCE_ENABLED` (default → `[]`; the stored tree is never mutated).

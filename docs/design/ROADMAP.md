@@ -164,7 +164,7 @@ architecture §6.3、draft §3（MAGE 方向）、ADR-004 推迟。
 - [x] **Completed subgoal 压缩成 summary node**。**已完成（2026-06-30，默认关闭的最小子集，与 §9 Context Compaction 协同）。** 新增 config `summary_node_compression_enabled`（默认 `False`）+ `active_path_summary_threshold`（默认 8）+ `active_path_summary_keep_recent`（默认 3）。`build_active_path_block(..., summarize_after, keep_recent)` 在启用且活动路径上 completed step 数超过阈值时，把最旧的 completed subgoal 折叠成单个确定性 summary 段（`[N earlier completed steps summarized]`），仅保留最近 N 个原样展示，使这个**受保护**块在长程任务下有界；默认 `summarize_after=0` 时逐个列出（行为不变）。Controller 仅在启用时传非零参数，replay 复用同一 controller 的参数避免假漂移。无 enum/schema/migration 改动，benchmark/reproduce 仍 13/13。`StateNodeType` 仍为 `root/step/recovery`；完整 node_type（含 `summary`/`subgoal`/`tool_call`）与 subgoal 自动推断仍后置。
 - [x] **Subgoal 自动推断**（当前仅显式 `root/step/recovery`）。**已完成（deterministic、默认关闭的读侧分析）**：新增 `app/runtime/subgoal_inference.py` `infer_subgoals(nodes)` —— 把连续、共享归一化 `goal` 的 step/recovery 节点确定性分组为 `InferredSubgoal`（按 `path`/created_at 排序，大小写不敏感，跳过 root）。`MemoryRuntime.infer_run_subgoals(run_id)` 读侧暴露，`MEMTRACE_STATE_TREE_SUBGOAL_INFERENCE_ENABLED=true` 启用（默认 `[]`，绝不改动已存储的树）。
 - [x] **完整 node_type**：`root/subgoal/step/tool_call/recovery/summary`。**已完成**：`StateNodeType` 扩展为 `root/step/recovery/subgoal/tool_call/summary`（`node_type` 为 String 列，无需迁移）；默认执行树仍只产出 `root/step/recovery`，新增值供 opt-in 分析/压缩（§9 summary-node 压缩已完成、§5 subgoal 推断、§5/§9 MAGE）使用，默认行为不变。
-- [ ] **MAGE 四类操作**：Grow / Compress / Maintain / Revise。**后置。**
+- [x] **MAGE 四类操作**：Grow / Compress / Maintain / Revise。**已完成（deterministic、默认关闭的读侧 planner）**：新增 `app/runtime/mage.py` `plan_mage(nodes, memories)` → `MagePlan`（Grow=活动前沿叶节点、Compress=已完成且 ≥N 步的推断 subgoal→summary node、Maintain=锚定在已完成节点上的陈旧/dormant/archived 记忆→decay/archive、Revise=failed/rolled_back 分支→修订/负向）。`MemoryRuntime.plan_run_mage(run_id)` 经 `MEMTRACE_STATE_TREE_MAGE_ENABLED` 启用（默认空 plan，绝不改动树/记忆）。这是 §9 交叉引用项的统一落点（见下）。
 
 ---
 
@@ -229,7 +229,7 @@ mem-trace 定位为「long-horizon agent 的状态感知记忆运行时」，而
 - [x] **运行中长历史折叠**：当一个 run 的 active-path 事件历史超过阈值时，对安全过滤后的早期历史做 rolling summary，再以 protected `history_summary` block 注入上下文；持久化 `ContextCompactionLog(kind=history_summary)`，timeout/error 降级为 no-fold + warning，replay 读取持久化快照不 rerun summarizer。
 - [x] **可配置 summarizer（规则 / LLM 双路）**：compaction 的摘要器需 config-gate（默认规则保 benchmark 可复现；启用 LLM 走 `LLMExtractionProvider` 同款注入 + 失败降级），与 extraction 管线对齐。C3 已实现 `SummarizerProvider` Protocol、deterministic `RuleSummarizerProvider`、OpenAI-compatible `LLMSummarizerProvider`、保守 retained-fact validation、DI wiring 与 runtime fallback。
 - [x] **压缩质量指标**：benchmark 新增 `case_9_over_budget_compaction`，runner 输出 `compaction_trigger_rate` / `constraint_retention_hit_rate` / `unsafe_compaction_leakage_rate` / `avg_compression_ratio`，acceptance 检查 `variant_2_retains_constraints_under_compaction`；observability report 新增 Compaction section，replay 端到端覆盖 `compaction_drift`。出处：architecture §6.8 `compression_gain`。
-- [ ] **协同项（交叉引用）**：state tree 的 completed subgoal → summary node（§5）、生命周期 decay/archive 把旧记忆降级压缩（§3.2）。这三处共同构成完整的「记忆/上下文压缩」体系，建议一并设计。
+- [x] **协同项（交叉引用）**：state tree 的 completed subgoal → summary node（§5）、生命周期 decay/archive 把旧记忆降级压缩（§3.2）。这三处共同构成完整的「记忆/上下文压缩」体系，建议一并设计。**已完成（统一落点）**：§5 active-path summary 压缩（已完成）、§5 subgoal 自动推断（Slice 6）、§3.2 生命周期 decay/archive（已有维护算子）现由 §5/§9 `app/runtime/mage.py` `plan_mage` 的 Compress（subgoal→summary）+ Maintain（completed 节点上的陈旧记忆→decay/archive）两类操作统一surface为一个确定性计划，把「记忆/上下文压缩」三处协同显式化（默认关闭，读侧只读）。
 
 ---
 
