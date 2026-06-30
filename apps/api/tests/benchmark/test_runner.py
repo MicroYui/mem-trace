@@ -41,7 +41,7 @@ from app.runtime.repository import InMemoryRepository
 async def test_run_benchmark_writes_markdown_and_json_reports(tmp_path):
     report = await run_benchmark(output_dir=tmp_path)
 
-    assert len(report["cases"]) == 13
+    assert len(report["cases"]) == 16
     assert {c["case_id"] for c in report["cases"]} == {
         "case_1_project_preference",
         "case_2_failed_branch",
@@ -56,8 +56,11 @@ async def test_run_benchmark_writes_markdown_and_json_reports(tmp_path):
         "case_11_sanitized_failed_destructive_attempt",
         "case_12_reflection_retention",
         "case_13_compaction_retains_negative_lesson",
+        "case_14_long_horizon_recall",
+        "case_15_temporal_knowledge_update",
+        "case_16_multi_hop_recall",
     }
-    assert len(report["results"]) == 78  # 13 cases x 6 strategies
+    assert len(report["results"]) == 96  # 16 cases x 6 strategies
 
     json_path = tmp_path / "benchmark_results.json"
     md_path = tmp_path / "benchmark_report.md"
@@ -121,9 +124,9 @@ async def test_acceptance_includes_reflection_and_long_context_checks(tmp_path):
 async def test_compaction_retains_negative_lesson_case_and_acceptance(tmp_path):
     report = await run_benchmark(output_dir=tmp_path)
 
-    assert len(report["cases"]) == 13
+    assert len(report["cases"]) == 16
     assert {c["case_id"] for c in report["cases"]} >= {"case_13_compaction_retains_negative_lesson"}
-    assert len(report["results"]) == 78  # 13 cases x 6 strategies
+    assert len(report["results"]) == 96  # 16 cases x 6 strategies
     assert report["acceptance"]["checks"]["variant_2_retains_negative_lesson_under_compaction"] is True
 
     row = next(
@@ -217,8 +220,8 @@ async def test_run_benchmark_persists_cases_and_results(tmp_path):
 
     cases = await repo.list_benchmark_cases()
     results = await repo.list_benchmark_results()
-    assert len(cases) == 13
-    assert len(results) == 78
+    assert len(cases) == 16
+    assert len(results) == 96
     assert {r.strategy for r in results} == {
         "baseline_0",
         "long_context",
@@ -278,7 +281,7 @@ async def test_run_benchmark_persists_eval_records(tmp_path):
 
     eval_cases = await repo.list_eval_cases()
     eval_runs = await repo.list_eval_runs()
-    assert len(eval_cases) == 13
+    assert len(eval_cases) == 16
     assert len(eval_runs) == 1
     eval_run = eval_runs[0]
     assert eval_run.name == "deterministic_benchmark"
@@ -295,7 +298,7 @@ async def test_run_benchmark_persists_eval_records(tmp_path):
     assert eval_run.finished_at is not None
 
     results = await repo.list_eval_results(eval_run_id=eval_run.eval_run_id)
-    assert len(results) == 78  # 13 cases x 6 strategies
+    assert len(results) == 96  # 16 cases x 6 strategies
     assert {r.eval_case_id for r in eval_cases} >= {
         "case_12_reflection_retention",
         "case_13_compaction_retains_negative_lesson",
@@ -333,9 +336,9 @@ async def test_run_benchmark_eval_persistence_is_repeatable(tmp_path):
         for strategy, fields in second["summary"].items()
     }
     assert deterministic_first == deterministic_second
-    assert len(await repo.list_eval_cases()) == 13
+    assert len(await repo.list_eval_cases()) == 16
     assert len(await repo.list_eval_runs()) == 2
-    assert len(await repo.list_eval_results()) == 156  # 2 runs x 78
+    assert len(await repo.list_eval_results()) == 192  # 2 runs x 96
 
 
 async def test_workspace_memory_snapshot_restores_all_mutable_retrieval_fields():

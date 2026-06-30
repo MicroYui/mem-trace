@@ -33,6 +33,7 @@ from app.runtime.models import (
     EventType,
     FinishStepRequest,
     MemoryItem,
+    MemoryStatus,
     MemoryType,
     RetrievalStrategy,
     RiskFlags,
@@ -550,6 +551,111 @@ async def _seed_compaction_retains_negative_lesson(rt: MemoryRuntime, ws: str) -
     )
 
 
+# --------------------------------------------------------------------------- #
+# Case 14: long-horizon single-hop recall (LoCoMo-style). A fact recorded early
+# must still be recalled after intervening steps and amid distractor memories,
+# where a no-memory baseline cannot recall it at all.
+# --------------------------------------------------------------------------- #
+async def _seed_long_horizon_recall(rt: MemoryRuntime, ws: str) -> SeedResult:
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="recall deployment target", workspace_id=ws))
+    await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+        MemoryItem(
+            workspace_id=ws, run_id=run.run_id, memory_type=MemoryType.project,
+            key="project.deploy_target", value="flyio",
+            content="deployment target platform is flyio",
+            branch_status=BranchStatus.completed,
+        )
+    )
+    distractors = [
+        "office wifi rotates monthly", "standup meeting is at nine",
+        "the mascot is an otter", "lunch is catered on fridays",
+        "parking garage closes at ten", "the brand uses two shades",
+        "quarterly review is in march", "the kitchen has free coffee",
+        "badge access expires yearly", "newsletter ships on mondays",
+        "the elevator is slow today", "plants are watered weekly",
+    ]
+    for text in distractors:
+        await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+            MemoryItem(
+                workspace_id=ws, run_id=run.run_id, memory_type=MemoryType.episodic,
+                content=text, branch_status=BranchStatus.completed,
+            )
+        )
+    for intent in ("planning", "coding", "review"):
+        s = await rt.start_step(StartStepRequest(run_id=run.run_id, intent=intent))
+        await rt.finish_step(FinishStepRequest(run_id=run.run_id, step_id=s.step_id, status=StepStatus.completed))
+    q = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="deploying", goal="deploy the service"))
+    return SeedResult(
+        run.run_id, q.step_id,
+        "what is the deployment target platform for this service",
+        ws,
+        extra={"recall_markers": ["flyio"]},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Case 15: temporal knowledge update (LoCoMo-style). A fact is updated across
+# sessions; only the current value may be recalled, never the superseded
+# historical values.
+# --------------------------------------------------------------------------- #
+async def _seed_temporal_knowledge_update(rt: MemoryRuntime, ws: str) -> SeedResult:
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="recall current api version", workspace_id=ws))
+    history = [
+        ("apiv1old", MemoryStatus.superseded),
+        ("apiv2mid", MemoryStatus.superseded),
+        ("apiv3new", MemoryStatus.active),
+    ]
+    for value, status in history:
+        await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+            MemoryItem(
+                workspace_id=ws, run_id=run.run_id, memory_type=MemoryType.project,
+                key="project.api_version", value=value,
+                content=f"the service api version is {value}",
+                branch_status=BranchStatus.completed, status=status,
+            )
+        )
+    q = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning", goal="target the current api version"))
+    return SeedResult(
+        run.run_id, q.step_id,
+        "which api version should the service target now",
+        ws,
+        extra={"recall_markers": ["apiv3new"], "recall_distractor_markers": ["apiv1old", "apiv2mid"]},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Case 16: multi-hop recall (LoCoMo-style). Answering needs two complementary
+# facts; both must be retrieved into context.
+# --------------------------------------------------------------------------- #
+async def _seed_multi_hop_recall(rt: MemoryRuntime, ws: str) -> SeedResult:
+    run = await rt.start_run(StartRunRequest(session_id="bench", task="recall database chain", workspace_id=ws))
+    facts = [
+        ("project.api_db", "ordersdb", "the api service depends on the ordersdb database"),
+        ("project.db_engine", "postgres16", "the ordersdb database runs on postgres16 engine"),
+    ]
+    for key, value, content in facts:
+        await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+            MemoryItem(
+                workspace_id=ws, run_id=run.run_id, memory_type=MemoryType.project,
+                key=key, value=value, content=content, branch_status=BranchStatus.completed,
+            )
+        )
+    for text in ("the frontend uses a cdn", "logs ship to a bucket"):
+        await rt._repo.add_memory(  # noqa: SLF001 - deterministic benchmark seeding
+            MemoryItem(
+                workspace_id=ws, run_id=run.run_id, memory_type=MemoryType.episodic,
+                content=text, branch_status=BranchStatus.completed,
+            )
+        )
+    q = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="planning", goal="describe database setup"))
+    return SeedResult(
+        run.run_id, q.step_id,
+        "what database does the api service depend on and what engine does it run",
+        ws,
+        extra={"recall_markers": ["ordersdb", "postgres16"]},
+    )
+
+
 CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_1_project_preference", "Project preference persistence",
                   "User states Bun, not Node.js; later commands should use bun.",
@@ -590,6 +696,15 @@ CASES: list[BenchmarkCase] = [
     BenchmarkCase("case_13_compaction_retains_negative_lesson", "Compaction retains negative lesson",
                   "A dropped avoided-attempt block is retained as safe compaction metadata without prompt injection.",
                   _seed_compaction_retains_negative_lesson),
+    BenchmarkCase("case_14_long_horizon_recall", "Long-horizon single-hop recall (LoCoMo-style)",
+                  "A fact recorded early is recalled after intervening steps amid distractors; a no-memory baseline cannot.",
+                  _seed_long_horizon_recall),
+    BenchmarkCase("case_15_temporal_knowledge_update", "Temporal knowledge update (LoCoMo-style)",
+                  "A fact is updated across sessions; only the current value is recalled, never the superseded history.",
+                  _seed_temporal_knowledge_update),
+    BenchmarkCase("case_16_multi_hop_recall", "Multi-hop recall (LoCoMo-style)",
+                  "Answering needs two complementary facts; both must be retrieved into context.",
+                  _seed_multi_hop_recall),
 ]
 
 ALL_STRATEGIES = [

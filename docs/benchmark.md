@@ -35,7 +35,7 @@ The benchmark acceptance summary should report `passed=true`. Reproducibility cu
 
 ## Cases
 
-The current suite has 13 cases:
+The current suite has 16 cases:
 
 1. Project preference retention.
 2. Failed-branch isolation.
@@ -50,6 +50,9 @@ The current suite has 13 cases:
 11. Sanitized destructive-failure handling.
 12. Reflection-retention under tight budget.
 13. Retained negative lessons through compaction metadata.
+14. Long-horizon single-hop recall (LoCoMo-style): a fact recorded early is recalled after intervening steps and amid distractor memories, where a no-memory baseline cannot.
+15. Temporal knowledge update (LoCoMo-style): only the current value of an updated fact is recalled, never the superseded history.
+16. Multi-hop recall (LoCoMo-style): two complementary facts are both retrieved into context.
 
 ## How to interpret key metrics
 
@@ -62,6 +65,7 @@ The current suite has 13 cases:
 - **Compaction trigger / retained constraints:** over-budget retrieval compacted ordinary context while retaining protected facts and notices.
 - **Retained negative evidence count:** metadata about dropped negative evidence was preserved in compaction logs. This does not mean the evidence entered the prompt.
 - **Reflection retention hit rate:** `variant_3` retained a high-value memory under budget pressure. Current reflection-lite behavior is deterministic and intentionally simpler than a future scheduler-backed implementation.
+- **Target recall hit rate:** the LoCoMo/MemoryArena-style cases (14–16) recalled the expected fact(s) into positive context; the no-memory baseline cannot, and historical/superseded values must not leak.
 - **Token overhead:** `long_context` should show why unbounded recall is expensive and risky.
 
 ## Persisted rows and dashboard parity

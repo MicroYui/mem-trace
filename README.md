@@ -202,7 +202,7 @@ Generated report artifacts are intentionally ignored by git and can be regenerat
 - `reports/benchmark_results.json`
 - `reports/observability_report.{json,md,html}`
 
-The benchmark currently compares six strategies (`baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`) across 13 cases, including failed-branch isolation, tool safety, context compaction, safe negative evidence, sanitized destructive failures, reflection-lite retention, and retained negative lessons through compaction metadata.
+The benchmark currently compares six strategies (`baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`) across 16 cases, including failed-branch isolation, tool safety, context compaction, safe negative evidence, sanitized destructive failures, reflection-lite retention, retained negative lessons through compaction metadata, and LoCoMo/MemoryArena-style long-horizon, temporal-update, and multi-hop recall.
 
 ## User docs
 

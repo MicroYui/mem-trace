@@ -1,5 +1,15 @@
 # Project State
 
+## Latest Session (2026-06-30 — Benchmark 补全 Part A: LoCoMo/MemoryArena-style recall cases)
+
+- **Loop slice #6 (Part A):** expanded the deterministic benchmark **13 → 16 cases × 6 = 96 rows**, acceptance **16/16**, fully reproducible (forced deterministic registry, no network, no external dataset files shipped).
+- **New cases (authoritative-dataset methodology):** `case_14_long_horizon_recall`, `case_15_temporal_knowledge_update`, `case_16_multi_hop_recall` — seeded directly via `rt._repo.add_memory` for precise control.
+- **New metrics:** generic `target_recall_hit`/`recall_distractor_leakage` (+ `_present` flags), summary `target_recall_hit_rate`/`recall_distractor_leakage_rate`, evaluator params `recall_markers`/`recall_distractor_markers`, runner wiring from `seed.extra`, and 3 acceptance checks (long-horizon recall w/ baseline_0 contrast, current-value-after-updates, multi-hop).
+- **Count/doc updates:** `test_runner.py` (13→16/78→96/156→192 + case-id set), `test_dashboard.py` (15→18 runs / 78→96), `AGENTS.md`, `README.md`, `docs/benchmark.md`, `docs/design/ROADMAP.md` §7.
+- **Verification:** full pytest **812 passed, 2 skipped**; compileall clean; benchmark + `scripts/reproduce.sh` → **16/16**; `git diff --check` clean.
+- **Files:** M `app/benchmark/{cases,evaluator,runner}.py`, `tests/benchmark/test_runner.py`, `tests/api/test_dashboard.py`, `AGENTS.md`, `README.md`, `docs/benchmark.md`, `docs/design/ROADMAP.md`, `.ai/*`.
+- **Next (Part B):** opt-in real-LLM Q&A harness over the local proxy (`:4141`) to validate real-world effectiveness, env-gated and skipped by default.
+
 ## Latest Session (2026-06-30 — §7 integration/regression test completion + compose layering)
 
 - **Loop slice #5 (ROADMAP §7):** closed out test-completion + Docker compose layering honestly, without inventing infra.

@@ -47,13 +47,13 @@ async def test_dashboard_tables_endpoint_exposes_benchmark_and_runtime_rows(tmp_
 
     assert resp.status_code == 200
     payload = resp.json()
-    # Thirteen benchmark cases: case 3 seeds a competing workspace run, case 6
+    # Sixteen benchmark cases: case 3 seeds a competing workspace run, case 6
     # seeds a prior completed run plus a follow-up run, and each remaining case
-    # (including case 12/13) seeds one benchmark run, for 15 runs total.
-    assert len(payload["runs"]) == 15
-    assert len(payload["accesses"]) == 78
-    assert len(payload["benchmark_cases"]) == 13
-    assert len(payload["benchmark_results"]) == 78
+    # (including cases 14/15/16) seeds one benchmark run, for 18 runs total.
+    assert len(payload["runs"]) == 18
+    assert len(payload["accesses"]) == 96
+    assert len(payload["benchmark_cases"]) == 16
+    assert len(payload["benchmark_results"]) == 96
     assert payload["benchmark_summary"]["variant_2"]["failed_branch_contamination_rate"] == 0
     assert payload["benchmark_summary"]["variant_2"]["constraint_retention_hit_rate"] == 1
     for field in [

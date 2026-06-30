@@ -96,6 +96,11 @@ class CaseMetrics:
     sanitized_notice_present_present: int = 0
     reflection_retention_hit: int = 0
     reflection_retention_hit_present: int = 0
+    # LoCoMo/MemoryArena-style recall metrics (authoritative-dataset-inspired).
+    target_recall_hit: int = 0
+    target_recall_present: int = 0
+    recall_distractor_leakage: int = 0
+    recall_distractor_leakage_present: int = 0
     retained_negative_evidence_count: int = 0
     retained_negative_evidence_count_present: int = 0
     compaction_negative_lesson_retained: int = 0
@@ -156,6 +161,8 @@ def evaluate_case(
     reflection_marker: Optional[str] = None,
     reflection_case: bool = False,
     compaction_negative_learning_case: bool = False,
+    recall_markers: Optional[list[str]] = None,
+    recall_distractor_markers: Optional[list[str]] = None,
 ) -> CaseMetrics:
     """Build metrics for one (case, strategy) run.
 
@@ -321,6 +328,18 @@ def evaluate_case(
         marker = (reflection_marker or "").lower()
         m.reflection_retention_hit_present = 1
         m.reflection_retention_hit = 1 if marker and marker in joined else 0
+
+    # LoCoMo/MemoryArena-style recall: did the expected fact(s) reach POSITIVE
+    # context (target_recall), and did any superseded/historical distractor leak
+    # in (recall_distractor_leakage)? Scored only when a case declares markers.
+    if recall_markers is not None:
+        positive_text = " ".join(block.content.lower() for block in positive_blocks)
+        m.target_recall_present = 1
+        m.target_recall_hit = 1 if all(mk.lower() in positive_text for mk in recall_markers) else 0
+    if recall_distractor_markers is not None:
+        positive_text = " ".join(block.content.lower() for block in positive_blocks)
+        m.recall_distractor_leakage_present = 1
+        m.recall_distractor_leakage = 1 if any(mk.lower() in positive_text for mk in recall_distractor_markers) else 0
 
     return m
 

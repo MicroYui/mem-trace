@@ -117,6 +117,12 @@ def _summarize(results: list[CaseMetrics]) -> dict[str, dict[str, float]]:
             "reflection_retention_hit_rate": _average(
                 [r.reflection_retention_hit for r in rows if r.reflection_retention_hit_present]
             ),
+            "target_recall_hit_rate": _average(
+                [r.target_recall_hit for r in rows if r.target_recall_present]
+            ),
+            "recall_distractor_leakage_rate": _average(
+                [r.recall_distractor_leakage for r in rows if r.recall_distractor_leakage_present]
+            ),
             "avg_retained_negative_evidence_count": _average(
                 [r.retained_negative_evidence_count for r in rows if r.retained_negative_evidence_count_present]
             ),
@@ -216,6 +222,8 @@ async def _run_case(case: BenchmarkCase, workspace_id: str, repo: Repository | N
                 reflection_marker=seed.extra.get("reflection_marker"),
                 reflection_case=seed.extra.get("reflection_case", False),
                 compaction_negative_learning_case=seed.extra.get("compaction_negative_learning_case", False),
+                recall_markers=seed.extra.get("recall_markers"),
+                recall_distractor_markers=seed.extra.get("recall_distractor_markers"),
             )
         )
     return metrics
@@ -523,6 +531,20 @@ def _acceptance(summary: dict[str, dict[str, float]], results: list[CaseMetrics]
                 "variant_2",
                 "task_success",
             ) == 1
+        ),
+        "variant_2_recalls_long_horizon_fact": (
+            _case_present(results, "case_14_long_horizon_recall", "variant_2", "target_recall_present")
+            and _case_metric(results, "case_14_long_horizon_recall", "variant_2", "target_recall_hit") == 1
+            and _case_metric(results, "case_14_long_horizon_recall", "baseline_0", "target_recall_hit") == 0
+        ),
+        "variant_2_recalls_current_value_after_updates": (
+            _case_present(results, "case_15_temporal_knowledge_update", "variant_2", "target_recall_present")
+            and _case_metric(results, "case_15_temporal_knowledge_update", "variant_2", "target_recall_hit") == 1
+            and _case_metric(results, "case_15_temporal_knowledge_update", "variant_2", "recall_distractor_leakage") == 0
+        ),
+        "variant_2_recalls_multi_hop_facts": (
+            _case_present(results, "case_16_multi_hop_recall", "variant_2", "target_recall_present")
+            and _case_metric(results, "case_16_multi_hop_recall", "variant_2", "target_recall_hit") == 1
         ),
         "long_context_shows_token_bloat": (
             "long_context" in summary
