@@ -22,7 +22,7 @@ Outputs are generated under `reports/` and ignored by git:
 - `reports/observability_report.md`
 - `reports/observability_report.html`
 
-The benchmark acceptance summary should report `passed=true`. Reproducibility currently checks 13 acceptance criteria.
+The benchmark acceptance summary should report `passed=true`. Reproducibility currently checks 16 acceptance criteria.
 
 ## Strategies
 
@@ -107,3 +107,56 @@ answers `I do not have that information.` Scenarios cover project preference,
 failed-branch avoidance, stale-endpoint exclusion, and multi-fact recall.
 `app/benchmark/llm_bench.py` remains the separate opt-in real-LLM *extraction*
 bench.
+
+## Dataset-driven recall bench (LoCoMo / MemoryArena-style)
+
+The deterministic benchmark above hard-codes its cases in Python. To evaluate at
+scale on real, externally-sourced datasets — and to quantify MemTrace's edge over
+plain vector memory — `app/benchmark/dataset_bench.py` ingests a JSONL dataset and
+contrasts a plain-vector/lexical baseline (`baseline_1`, no gate) against the
+state-aware + gated path (`variant_2`) over identical seeds. Scoring is fully
+deterministic (no LLM, no network): for each probe it measures whether the gold
+fact reaches **positive** context (recall) and whether a superseded/failed-branch
+distractor leaks in.
+
+```bash
+# Built-in 3-record sample (no external data needed):
+uv run python -m app.benchmark.dataset_bench --output-dir reports
+
+# A larger converted LoCoMo / MemoryArena file:
+MEMTRACE_DATASET_PATH=/data/locomo.jsonl uv run python -m app.benchmark.dataset_bench
+# or: uv run python -m app.benchmark.dataset_bench --dataset /data/locomo.jsonl
+```
+
+On the built-in sample, plain vector leaks a failed-branch `npm test` distractor
+(`distractor_leakage=0.5`) while the gated path isolates it (`0.0`) — a
+`leakage_reduction=0.5` MemTrace edge — and a superseded endpoint is lifecycle-
+filtered for both strategies.
+
+**Record schema** (one JSON object per line):
+
+```json
+{
+  "id": "temporal_update",
+  "facts": [
+    {"key": "endpoint.users", "value": "/api/v1/users",
+     "content": "The legacy users endpoint was /api/v1/users.",
+     "memory_type": "project", "status": "superseded", "branch_status": "completed"},
+    {"key": "endpoint.users", "value": "/api/v2/users",
+     "content": "The current users endpoint is /api/v2/users.",
+     "memory_type": "project", "status": "active", "branch_status": "completed"}
+  ],
+  "probes": [
+    {"question": "What is the current users API endpoint path?",
+     "recall_markers": ["/api/v2/users"], "distractor_markers": ["/api/v1/users"]}
+  ]
+}
+```
+
+A fact's `status: "superseded"` models a temporal knowledge update; a
+`branch_status: "failed"` (or `"rolled_back"`) models a distractor from a dead
+branch. `recall_markers` are substrings that must appear in positive context;
+`distractor_markers` must not. Convert a real LoCoMo/MemoryArena split into this
+schema (one record per conversation, one probe per QA pair) to evaluate at scale.
+This bench is standalone — it does not affect the deterministic benchmark or its
+16/16 acceptance.

@@ -1,5 +1,16 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop Step 3: dataset-driven recall bench §7)
+
+- **Loop Step 3 of 5.** Extended evaluation to real external datasets while staying reproducible: new standalone `app/benchmark/dataset_bench.py` ingests LoCoMo/MemoryArena-style JSONL and contrasts plain-vector (`baseline_1`, no gate) vs MemTrace (`variant_2`, gated) over identical seeds.
+- **Schema:** one JSON record per line `{id, facts[], probes[]}`. A fact's `status="superseded"` models a temporal update; `branch_status="failed"/"rolled_back"` models a dead-branch distractor. Probes carry `recall_markers` (must reach positive context) + `distractor_markers` (must not). Pydantic-validated loader (`load_dataset`), `run_dataset_bench(...)`.
+- **Scoring:** fully deterministic (no LLM, no network) — marker presence in positive context (reuses Step 1's `context_actions.positive_blocks`). Aggregates per-strategy recall/leakage rates + `delta.recall_rate_gain` / `delta.distractor_leakage_reduction`.
+- **Sample:** committed `app/benchmark/data/sample_dataset.jsonl` (3 records: temporal_update / failed_branch_distractor / multi_hop_stack) → runnable with no external data. Larger real datasets via `--dataset` / `MEMTRACE_DATASET_PATH`. On the sample: plain-vector leaks `npm test` (leakage 0.5), MemTrace gates it (0.0) → `leakage_reduction=0.5`; superseded endpoint lifecycle-filtered for both.
+- **Standalone** — not wired into the deterministic runner, so benchmark/reproduce stay 16/16.
+- **Changed:** new `app/benchmark/dataset_bench.py`, `app/benchmark/data/sample_dataset.jsonl`, `tests/benchmark/test_dataset_bench.py` (7); docs `docs/benchmark.md` (dataset bench section + schema), `docs/design/ROADMAP.md` §7.
+- **Verification:** app+SDK pytest **842 passed, 2 skipped** (2 reproducibility tests need cwd=repo root → pass there); compileall clean; benchmark/reproduce **16/16**; release hygiene clean.
+- **Next:** loop Step 4 — README 美化更新 (high-star-project look); AI assist allowed via `ANTHROPIC_AUTH_TOKEN=sk-1234` @ `http://localhost:4141`.
+
 ## Latest Session (2026-06-30 — loop Step 2: Phase 5 §4 query-planner micro-slice)
 
 - **Loop Step 2 of 5.** Trigger assessment first: ES/Neo4j/graph-store Phase 5 items stay **deferred** (pgvector has no scale/feature pressure; standing up ES/Neo4j the runtime can't use = inventing unusable infra, against AGENTS.md). Implemented the disciplined, deterministic, no-external-dependency, **default-off** §4 advance instead — mirroring the existing RRF micro-slice.
