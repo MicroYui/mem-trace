@@ -55,6 +55,18 @@ Default test and benchmark runs do not require Redis. Real Redis smoke tests are
 MEMTRACE_TEST_REDIS_URL=redis://localhost:6379/15 uv run --extra dev pytest apps/api/tests/integration/test_async_infra.py -q
 ```
 
+## Compose layering (core / dev / full)
+
+The compose setup is layered so the development environment is not heavier than
+the task needs (ROADMAP §7):
+
+| Tier | Command | Services |
+|------|---------|----------|
+| **core** | `docker-compose up -d` | API (run locally via `uv`) + PostgreSQL/pgvector — the only tier required for the default no-network demo, tests, and benchmark. |
+| **dev** | `docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d` | core **+** Redis **+** Celery worker, for the optional async path above. |
+| **full** | _(deferred)_ | core/dev **+** Elasticsearch/OpenSearch **+** Neo4j **+** containerized frontend. Deferred to Phase 5: the runtime does not yet use ES/Neo4j (they are trigger-gated in ROADMAP §4), so a `docker-compose.full.yml` is intentionally not shipped to avoid standing up backend services the application cannot use. The `apps/web` dashboard runs as a separate Bun dev server (see `apps/web/README` / `docs/getting-started.md`), not a compose service.
+
+
 ## Auth, governance, and quotas
 
 Lightweight auth can be enabled for hosted demos:

@@ -1,5 +1,14 @@
 # Project State
 
+## Latest Session (2026-06-30 — §7 integration/regression test completion + compose layering)
+
+- **Loop slice #5 (ROADMAP §7):** closed out test-completion + Docker compose layering honestly, without inventing infra.
+- **Test completion:** existing 800+ pytest already cover unit/integration/e2e/regression across the named axes; added facade-level `apps/api/tests/runtime/test_safety_axes_e2e.py` (5) driving public `MemoryRuntime.retrieve_context` to assert failed-branch isolation / workspace isolation / stale exclusion / tool-sensitive blocking + a positive control (non-vacuous).
+- **Compose layering:** core (`docker-compose.yml`) + dev (`+docker-compose.dev.yml`) tiers exist; documented the 3-tier model in `docs/deployment.md`. `full` (ES/Neo4j/frontend container) deferred to Phase 5 — runtime doesn't use ES/Neo4j (trigger-gated §4), so no `docker-compose.full.yml` is shipped (avoids invented infra per AGENTS.md). `apps/web` runs as a separate Bun dev server.
+- **Verification:** new e2e tests green; full pytest **812 passed, 2 skipped**; `git diff --check` clean. Tests + docs only; no app code changed; benchmark unaffected.
+- **Files:** +`apps/api/tests/runtime/test_safety_axes_e2e.py`; M `docs/deployment.md`, `docs/design/ROADMAP.md`.
+- **Next:** loop task #6 — Benchmark 补全（authoritative datasets + real-LLM Q&A）. This is the largest remaining slice and the user's emphasis; deserves a fresh-context loop iteration.
+
 ## Latest Session (2026-06-30 — §1.1 protect sanitized safety negative evidence)
 
 - **Loop slice #4 (ROADMAP §1.1, previously deferred-by-decision):** default-off option to protect safety-critical `sanitized_risk_notice` negative-evidence blocks from budget drops, so "do not repeat the destructive/secret attempt" guidance is not silently discarded under tight budgets.
