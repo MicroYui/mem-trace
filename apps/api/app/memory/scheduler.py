@@ -311,6 +311,37 @@ async def reindex_memory(
     }
 
 
+async def reindex_secondary(
+    repo: Repository,
+    *,
+    workspace_id: str,
+    now: datetime | None = None,
+    scheduler_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Reconcile memories into the configured secondary stores (ES / Neo4j).
+
+    Builds the optional hybrid/graph backends from settings and reconciles
+    pending/failed/stale memories toward them, retrying failures next run. With
+    no secondary store configured (default) every memory is ``not_applicable``
+    and nothing is pushed anywhere, so this is a safe no-op by default.
+    """
+    from app.config import get_settings
+    from app.memory.secondary_index import reconcile_secondary_indexes
+    from app.retrieval.graph import build_graph_backend
+    from app.retrieval.hybrid import build_hybrid_backend
+
+    settings = get_settings()
+    result = await reconcile_secondary_indexes(
+        repo,
+        workspace_id=workspace_id,
+        hybrid_backend=build_hybrid_backend(settings),
+        graph_backend=build_graph_backend(settings),
+        now=now,
+    )
+    result["scheduler_run_id"] = scheduler_run_id
+    return result
+
+
 async def summary_refresh(
     repo: Repository,
     *,
@@ -499,6 +530,7 @@ __all__ = [
     "procedural_refresh",
     "quarantine_memory",
     "reindex_memory",
+    "reindex_secondary",
     "score_memory",
     "summary_refresh",
 ]

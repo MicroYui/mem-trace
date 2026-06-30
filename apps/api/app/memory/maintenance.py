@@ -26,6 +26,7 @@ OPERATION_HANDLERS: dict[MaintenanceOperation, OperationHandler] = {
     MaintenanceOperation.conflict_scan: scheduler.conflict_scan,
     MaintenanceOperation.dedup_memory: scheduler.dedup_memory,
     MaintenanceOperation.reindex_memory: scheduler.reindex_memory,
+    MaintenanceOperation.reindex_secondary: scheduler.reindex_secondary,
     MaintenanceOperation.summary_refresh: scheduler.summary_refresh,
     MaintenanceOperation.procedural_refresh: scheduler.procedural_refresh,
     MaintenanceOperation.profile_refresh: scheduler.profile_refresh,

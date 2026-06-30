@@ -202,6 +202,7 @@ class MaintenanceOperation(str, Enum):
     conflict_scan = "conflict_scan"
     dedup_memory = "dedup_memory"
     reindex_memory = "reindex_memory"
+    reindex_secondary = "reindex_secondary"
     summary_refresh = "summary_refresh"
     procedural_refresh = "procedural_refresh"
     profile_refresh = "profile_refresh"

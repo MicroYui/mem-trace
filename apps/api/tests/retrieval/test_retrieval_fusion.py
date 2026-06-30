@@ -130,6 +130,20 @@ def test_rrf_scores_are_exact_rank_sums_with_stable_ties():
     assert "m_zero" not in scores
 
 
+def test_rrf_scores_include_bm25_as_third_list():
+    controller = RetrievalController(InMemoryRepository())
+    controller._rrf_k = 10  # noqa: SLF001
+    raw = [
+        (_mem("ws", "m_a", "a"), 0.5, 0.0),
+        (_mem("ws", "m_b", "b"), 0.2, 0.0),
+    ]
+    # lexical ranks: m_a(0), m_b(1). vector: none. bm25 ranks: m_b(0), m_a(1).
+    bm25 = {"m_b": 0.9, "m_a": 0.1}
+    scores = controller._rrf_scores(raw, bm25)  # noqa: SLF001
+    assert scores["m_a"] == pytest.approx(1 / 11 + 1 / 12)  # lex rank0 + bm25 rank1
+    assert scores["m_b"] == pytest.approx(1 / 12 + 1 / 11)  # lex rank1 + bm25 rank0
+
+
 @pytest.mark.asyncio
 async def test_rrf_request_falls_back_to_linear_policy_when_vector_disabled(monkeypatch):
     monkeypatch.setenv("MEMTRACE_RETRIEVAL_FUSION", "rrf")

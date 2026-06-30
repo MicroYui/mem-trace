@@ -42,6 +42,7 @@ def build_policy_snapshot(
     graph_backend: str | None = None,
     graph_weight: float | None = None,
     graph_max_hops: int | None = None,
+    ranking_profile: str | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-compatible, non-secret retrieval policy snapshot."""
     vector_active = bool(vector_enabled)
@@ -78,6 +79,9 @@ def build_policy_snapshot(
         retrieval["graph_backend"] = graph_backend
         retrieval["graph_weight"] = graph_weight
         retrieval["graph_max_hops"] = graph_max_hops
+    # Same byte-stability rule for default-off task-intent ranking profiles.
+    if ranking_profile:
+        retrieval["ranking_profile"] = ranking_profile
     return {
         "policy_version": POLICY_VERSION,
         "strategy": request.strategy.value,

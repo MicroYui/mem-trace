@@ -48,12 +48,13 @@ class Settings(BaseSettings):
             "archive_memory",
             "quarantine_memory",
             "reindex_memory",
+            "reindex_secondary",
             "summary_refresh",
             "procedural_refresh",
             "profile_refresh",
         ]
     )
-    maintenance_max_operations_per_run: int = 10
+    maintenance_max_operations_per_run: int = 11
     redaction_policy_default_state: str = "redacted"
     # Optional secret used to compute non-enumerable redaction digests. When
     # unset, secret payload digests are omitted rather than storing bare SHA-256
@@ -186,6 +187,11 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
+    # Deterministic task-intent ranking profiles (ROADMAP §4, default-off). When
+    # enabled, the controller re-weights candidate relevance by per-memory-type
+    # multipliers chosen from the request's task_intent. Default-off leaves the
+    # blend unchanged.
+    retrieval_ranking_profiles_enabled: bool = False
     # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
     # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
     # hot paths use the configured embedding provider first, then degrade to the

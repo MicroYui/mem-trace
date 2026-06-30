@@ -1,5 +1,14 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 5: §4 fusion + ranking_profiles + multi-store consistency)
+
+- **Slice 5 done — completes ROADMAP §4 (all Phase-5 retrieval items now `[x]`).** Three parts, all default-off / default-safe:
+  - **5a multi-path RRF fusion:** `_rrf_scores(raw, bm25_scores=None)` now fuses BM25 as a third ranked list (lexical + vector + BM25); RRF activates on vector OR bm25 when `fusion=rrf`. Graph relatedness fuses additively via neighbor expansion. Backward-compatible (existing 2-signal RRF test unchanged).
+  - **5b task_intent ranking_profiles:** new `app/retrieval/ranking_profiles.py` (`select_profile`: debug→tool_evidence/working_state, implement→project/procedural, review→episodic/procedural). `MEMTRACE_RETRIEVAL_RANKING_PROFILES_ENABLED=true` re-weights candidate relevance by per-memory-type multipliers; policy snapshot records `ranking_profile` only when on.
+  - **5c multi-store eventual consistency (no migration):** new `app/memory/secondary_index.py` `reconcile_secondary_indexes(...)` tracks `index_status`/`graph_status`/`last_indexed_at`/`last_graph_synced_at` in JSONB `lifecycle_metadata` (pending/indexed/failed/stale/not_applicable), pushes pending/failed/stale retrievable memories to available backends, retries failures next run, no-op when no store configured. New `MaintenanceOperation.reindex_secondary` op (`scheduler.reindex_secondary` builds backends from settings) registered in `OPERATION_HANDLERS` + default op list (10→11; `maintenance_max_operations_per_run` 10→11; admin test 10→11).
+- **§4 Phase-5 retrieval is now fully implemented** (query planner full, multi-hop, ES/OpenSearch hybrid BM25, Neo4j provenance graph + neighbor expansion, multi-path fusion + ranking_profiles, multi-store consistency) — all deterministic, default-off/degrade-safe; PostgreSQL stays source of truth.
+- **Verification:** test_secondary_index.py 7/7, ranking_profiles 11/11, fusion +1; maintenance/admin/celery regression 62; full app+SDK **906 passed, 2 skipped**; benchmark **16/16**; compileall + `git diff --check` clean. Commit on `main`.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 4: §4 provenance-graph expansion)
 
 - **Slice 4 done — ROADMAP §4 Neo4j provenance graph + neighbor expansion (default-off, degrade-safe).** New `app/retrieval/graph.py`: `ProvenanceEdge` + `provenance_edges(memories, conflicts)` (SUPERSEDES from `superseded_by` lineage, CONFLICTS_WITH from open `MemoryConflictRecord.memory_ids` pairs); `GraphBackend` protocol; deterministic `InMemoryProvenanceGraph` (BFS, relatedness `1/distance`, no network); `Neo4jProvenanceGraph` (lazy-imports `neo4j`, MERGE edges + variable-length path query; degrades to `available=False`/`{}`; injectable driver for tests); `build_graph_backend(settings)`.

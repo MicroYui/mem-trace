@@ -16,6 +16,7 @@ from app.providers.base import ProviderKind
 from app.retrieval import gate as gatemod
 from app.retrieval.hybrid import HybridBackend, build_hybrid_backend
 from app.retrieval.graph import GraphBackend, build_graph_backend, provenance_edges
+from app.retrieval.ranking_profiles import select_profile
 from app.retrieval.negative_evidence import build_negative_evidence
 from app.retrieval.packer import estimate_tokens, pack_context
 from app.retrieval.policy import POLICY_VERSION, build_policy_snapshot, policy_hash
@@ -183,6 +184,8 @@ class RetrievalController:
         self._graph_weight = settings.retrieval_graph_weight
         self._graph_max_hops = max(1, settings.retrieval_graph_max_hops)
         self._graph_backend_name = (settings.retrieval_graph_backend or "off").lower()
+        # ROADMAP §4: deterministic task-intent ranking profiles (default-off).
+        self._ranking_profiles_enabled = settings.retrieval_ranking_profiles_enabled
 
     def _gate_config(self, strategy: RetrievalStrategy) -> "gatemod.GateConfig":
         config = gatemod.GateConfig.for_strategy(strategy)
@@ -315,6 +318,11 @@ class RetrievalController:
             ),
             graph_max_hops=(
                 self._graph_max_hops if self._graph_backend is not None else None
+            ),
+            ranking_profile=(
+                select_profile(request.task_intent).name
+                if self._ranking_profiles_enabled
+                else None
             ),
         )
         access.policy_version = POLICY_VERSION
@@ -871,16 +879,17 @@ class RetrievalController:
 
         # Fusion: blend the signals into a single relevance score. "linear"
         # is the default weighted blend; "rrf" uses Reciprocal Rank Fusion over
-        # each signal's ranking, which is robust when lexical/vector scores live
-        # on different scales (ROADMAP §4 multi-signal fusion).
+        # each signal's ranking, which is robust when lexical/vector/BM25 scores
+        # live on different scales (ROADMAP §4 multi-path fusion).
+        rrf_active = self._fusion == "rrf" and (w_vec > 0.0 or bool(bm25_scores))
         rrf_scores: dict[str, float] = {}
-        if self._fusion == "rrf" and w_vec > 0.0:
-            rrf_scores = self._rrf_scores(raw)
+        if rrf_active:
+            rrf_scores = self._rrf_scores(raw, bm25_scores)
 
         scored: list[RetrievalCandidateTrace] = []
         for m, lex, vec in raw:
             bm25 = bm25_scores.get(m.memory_id, 0.0)
-            if self._fusion == "rrf" and w_vec > 0.0:
+            if rrf_active:
                 rel = round(rrf_scores.get(m.memory_id, 0.0), 6)
                 positive = rel > 0.0
             else:
@@ -888,7 +897,7 @@ class RetrievalController:
                 positive = rel > 0.0
             # project constraints are always relevant to coding queries
             if m.memory_type.value == "project" and not positive:
-                rel = 0.2 if self._fusion != "rrf" else round(0.2 / (self._rrf_k + 1), 6)
+                rel = 0.2 if not rrf_active else round(0.2 / (self._rrf_k + 1), 6)
                 positive = True
             if positive or include_all:
                 scored.append(
@@ -915,6 +924,18 @@ class RetrievalController:
             scored = await self._expand_graph_neighbors(
                 scored, retrievable=retrievable, memories=memories, workspace_id=workspace_id
             )
+
+        # ROADMAP §4 task-intent ranking profiles (default-off): re-weight
+        # candidate relevance by per-memory-type multipliers derived from the
+        # task intent (e.g. debug -> boost tool_evidence). A "default" profile
+        # (no intent match) is a no-op, so the standard blend is preserved.
+        if self._ranking_profiles_enabled:
+            profile = select_profile(task_intent)
+            if profile.type_weights:
+                for cand in scored:
+                    mult = profile.weight_for(cand.memory.memory_type.value)
+                    if mult != 1.0:
+                        cand.relevance_score = round(cand.relevance_score * mult, 6)
 
         scored.sort(key=lambda c: (-c.relevance_score, c.memory.memory_id))
         if include_all:
@@ -971,24 +992,38 @@ class RetrievalController:
                 by_id[memory_id] = candidate
         return scored
 
-    def _rrf_scores(self, raw: list[tuple[MemoryItem, float, float]]) -> dict[str, float]:
-        """Reciprocal Rank Fusion of the lexical and vector signals.
+    def _rrf_scores(
+        self,
+        raw: list[tuple[MemoryItem, float, float]],
+        bm25_scores: dict[str, float] | None = None,
+    ) -> dict[str, float]:
+        """Reciprocal Rank Fusion of the lexical, vector, and (optional) BM25 signals.
 
         Each signal contributes ``1 / (k + rank)`` for memories with a positive
         score in that signal. Ranks are deterministic: sort by descending score,
-        tie-break by ``memory_id``. Memories absent from a signal (score 0)
-        contribute nothing for that signal, so a memory unseen by both stays 0.
+        tie-break by ``memory_id``. Memories absent from a signal contribute
+        nothing for it. When ``bm25_scores`` is provided (hybrid backend active),
+        BM25 joins as a third ranked list — the "vector + BM25 + lexical" multi-path
+        fusion (ROADMAP §4). Graph relatedness is fused additively after expansion.
         """
         k = self._rrf_k
+        bm25_scores = bm25_scores or {}
 
-        def ranked(score_index: int) -> list[str]:
-            present = [(m, s) for (m, lex, vec) in raw for s in (((lex, vec)[score_index]),) if s > 0.0]
-            present.sort(key=lambda pair: (-pair[1], pair[0].memory_id))
-            return [m.memory_id for m, _ in present]
+        def ranked_pairs(pairs: list[tuple[str, float]]) -> list[str]:
+            present = [(mid, s) for mid, s in pairs if s > 0.0]
+            present.sort(key=lambda pair: (-pair[1], pair[0]))
+            return [mid for mid, _ in present]
+
+        ranked_lists = [
+            ranked_pairs([(m.memory_id, lex) for (m, lex, vec) in raw]),  # lexical
+            ranked_pairs([(m.memory_id, vec) for (m, lex, vec) in raw]),  # vector
+        ]
+        if bm25_scores:
+            ranked_lists.append(ranked_pairs(list(bm25_scores.items())))  # BM25
 
         scores: dict[str, float] = {}
-        for score_index in (0, 1):  # 0 = lexical, 1 = vector
-            for rank, memory_id in enumerate(ranked(score_index)):
+        for ranked in ranked_lists:
+            for rank, memory_id in enumerate(ranked):
                 scores[memory_id] = scores.get(memory_id, 0.0) + 1.0 / (k + rank + 1)
         return scores
 

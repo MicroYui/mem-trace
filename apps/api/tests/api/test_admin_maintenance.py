@@ -148,8 +148,8 @@ async def test_owner_can_start_real_run_default_operations_and_audit(monkeypatch
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "completed"
-    # operations=None falls back to settings.maintenance_default_operations (10).
-    assert len(body["operations"]) == 10
+    # operations=None falls back to settings.maintenance_default_operations (11).
+    assert len(body["operations"]) == 11
 
     audits = await repo.list_admin_action_audits(workspace_id="ws_1")
     assert len(audits) == 1
