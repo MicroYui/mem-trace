@@ -1,5 +1,13 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 10: closeout)
+
+- **Loop COMPLETE.** All 9 implementation slices of the "implement every deferred/candidate ROADMAP item, even default-off ones" `/loop` are done and committed on `main` (`2db595a` query-planner full → `e92b2d1` multi-hop → `3e58fe3` ES hybrid → `bba5e9b` Neo4j graph → `2408907` fusion/ranking/consistency → `a205e61` node_type/subgoal → `8bb16df` MAGE → `43b523c`+`64166c6` governance → `25871c5` IDE/Go-Rust), plus this docs-sync commit.
+- **Final verification sweep (all green):** compileall (app + python-sdk) clean; full Python pytest **953 passed, 3 skipped**; deterministic benchmark + `scripts/reproduce.sh` **acceptance 16/16**; Bun typecheck clean (VS Code extension excluded by design); full Bun **62 passed, 1 skip**; `scripts/check-release-hygiene.sh` passed; `git diff --check` clean; working tree clean.
+- **Durability of the default path proven:** every new capability is gated off by default, so candidate scoring stays byte-identical, the benchmark holds at 16/16, and replay/policy snapshots only change when a feature is explicitly enabled. PostgreSQL remains the source of truth; ES/Neo4j/Redis/JWT/crypto are optional, lazy-imported, degrade-safe extras.
+- **Docs synced:** `docs/design/ROADMAP.md` §4/§5/§3.4/§6 items + recommended-order items 13/14 ticked `[x]`; `AGENTS.md` "current priority" replaced with the completion summary; `.ai/PROJECT_STATE.md` updated per slice.
+- **Intentionally still out of scope (`docs/design/ROADMAP.md` §8):** full LoCoMo/MemoryArena leaderboard, multimodal ingestion, full knowledge-graph frontend, trained MemGate model, multi-agent collaboration platform. No roadmap target remains selected.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 9: §6 IDE extension + Go/Rust scale components)
 
 - **Slice 9 done — ROADMAP §6 dedicated IDE extension + scale-only Go/Rust components (thin over `/v1`, default not in CI build).**
