@@ -1,5 +1,14 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop Step 4: README polish; loop complete)
+
+- **Loop Step 4 of 5 (final).** Rewrote `README.md` into a polished high-star-project landing page while keeping every claim accurate and all operational content intact.
+- **Added:** centered hero (title + tagline + 6 badges incl. live CI badge `actions/workflows/ci.yml`, Apache-2.0, Python 3.12+, TS/Bun, no-network demo, reproducible) + nav links; a `> [!NOTE]` 30-second pitch with the contamination markers; a "plain vector vs MemTrace" comparison table; a **mermaid** architecture diagram (trace → state tree → retrieval → gate → pack/replay); an emoji feature grid; a benchmark snapshot table (baseline_1 vs variant_2 contamination + dataset-bench leakage); a License section.
+- **Preserved:** all quickstart paths, HTTP/Docker, SDK/MCP, telemetry, web dashboard, verification, roadmap content, and — critically — the 6 reproducibility entrypoint strings that `test_reproducibility.py::test_readme_documents_existing_reproducibility_entrypoints` asserts (`./scripts/reproduce.sh`, `app.demo.run_demo`, `app.benchmark.runner`, `app.observability.reports`, `docker-compose.yml`, `/v1/replay/access/{access_id}`). Step-5 (memory + commit after each step) ran for every step.
+- **Step 5 (per-step memory + commit)** honored throughout: Step 1 `150283f`, Step 2 `581825e`, Step 3 `e763c43`, Step 4 (this commit).
+- **Verification:** README snippet check 6/6; `test_reproducibility.py` 4/4 (from repo root); whitespace + release hygiene clean. (No code changed in Step 4, so the prior 842/2 suite + 16/16 benchmark are unaffected.)
+- **Loop status:** all 5 steps of the `/loop` task complete. No roadmap target selected next; remaining items are trigger-gated (Phase 5 ES/Neo4j) or future work.
+
 ## Latest Session (2026-06-30 — loop Step 3: dataset-driven recall bench §7)
 
 - **Loop Step 3 of 5.** Extended evaluation to real external datasets while staying reproducible: new standalone `app/benchmark/dataset_bench.py` ingests LoCoMo/MemoryArena-style JSONL and contrasts plain-vector (`baseline_1`, no gate) vs MemTrace (`variant_2`, gated) over identical seeds.
