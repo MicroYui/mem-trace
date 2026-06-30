@@ -1,5 +1,13 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 4: §4 provenance-graph expansion)
+
+- **Slice 4 done — ROADMAP §4 Neo4j provenance graph + neighbor expansion (default-off, degrade-safe).** New `app/retrieval/graph.py`: `ProvenanceEdge` + `provenance_edges(memories, conflicts)` (SUPERSEDES from `superseded_by` lineage, CONFLICTS_WITH from open `MemoryConflictRecord.memory_ids` pairs); `GraphBackend` protocol; deterministic `InMemoryProvenanceGraph` (BFS, relatedness `1/distance`, no network); `Neo4jProvenanceGraph` (lazy-imports `neo4j`, MERGE edges + variable-length path query; degrades to `available=False`/`{}`; injectable driver for tests); `build_graph_backend(settings)`.
+- **Controller expansion:** `_expand_graph_neighbors(...)` seeds from first-pass candidates, finds neighbors within `retrieval_graph_max_hops` (default 2), boosts existing candidates' relevance by `graph_weight*relatedness` (default 0.15) + sets `graph_score`, and appends **retrievable** neighbors as new candidates. Retired (superseded/...) neighbors are filtered out → lifecycle filter preserved (key safety invariant). `MEMTRACE_RETRIEVAL_GRAPH_BACKEND=off|inmemory|neo4j`.
+- **Default-off byte-identical:** `off` → `_graph_backend is None`, `graph_score=0`, scoring unchanged; policy snapshot writes `graph_backend`/`graph_weight`/`graph_max_hops` only when enabled. Validators reject unknown backend and hops∉[1,3].
+- **Deferred to Slice 5:** graph signal into RRF 3-way fusion; write-path Neo4j edge maintenance (currently edges are derived from repo provenance per call).
+- **Verification:** `tests/retrieval/test_graph.py` 14/14; retrieval+observability+benchmark+conformance 328; full app+SDK **891 passed, 2 skipped**; benchmark **16/16**; compileall + `git diff --check` clean. Commit on `main`. ROADMAP §4 Neo4j + neighbor-expansion items ticked `[x]`.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 3: §4 optional hybrid BM25 backend)
 
 - **Slice 3 done — ROADMAP §4 ES/OpenSearch hybrid retrieval (default-off, degrade-safe).** New `app/retrieval/hybrid.py`: `HybridBackend` protocol; `InMemoryBM25Backend` (real deterministic Okapi BM25 over candidate content, IDF favors rare terms, no network); `ElasticsearchBM25Backend` (lazy-imports `elasticsearch`, per-workspace index upsert + filtered `match` query, degrades to `available=False`/`{}` on missing dep/endpoint or any query error — injectable client for tests); `build_hybrid_backend(settings)`.

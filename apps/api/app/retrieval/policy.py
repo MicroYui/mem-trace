@@ -39,6 +39,9 @@ def build_policy_snapshot(
     multi_hop_hops: int = 0,
     hybrid_backend: str | None = None,
     hybrid_weight: float | None = None,
+    graph_backend: str | None = None,
+    graph_weight: float | None = None,
+    graph_max_hops: int | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-compatible, non-secret retrieval policy snapshot."""
     vector_active = bool(vector_enabled)
@@ -70,6 +73,11 @@ def build_policy_snapshot(
     if hybrid_backend and hybrid_backend != "off":
         retrieval["hybrid_backend"] = hybrid_backend
         retrieval["hybrid_weight"] = hybrid_weight
+    # Same byte-stability rule for the default-off provenance-graph expansion.
+    if graph_backend and graph_backend != "off":
+        retrieval["graph_backend"] = graph_backend
+        retrieval["graph_weight"] = graph_weight
+        retrieval["graph_max_hops"] = graph_max_hops
     return {
         "policy_version": POLICY_VERSION,
         "strategy": request.strategy.value,

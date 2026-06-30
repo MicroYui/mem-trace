@@ -15,6 +15,7 @@ from typing import Any, Optional
 from app.providers.base import ProviderKind
 from app.retrieval import gate as gatemod
 from app.retrieval.hybrid import HybridBackend, build_hybrid_backend
+from app.retrieval.graph import GraphBackend, build_graph_backend, provenance_edges
 from app.retrieval.negative_evidence import build_negative_evidence
 from app.retrieval.packer import estimate_tokens, pack_context
 from app.retrieval.policy import POLICY_VERSION, build_policy_snapshot, policy_hash
@@ -92,6 +93,7 @@ class RetrievalCandidateTrace:
     lexical_score: float = 0.0
     vector_score: float = 0.0
     bm25_score: float = 0.0
+    graph_score: float = 0.0
     relevance_score: float = 0.0
     state_match_score: float = 0.0
     # 0 == retrieved directly for the query; >0 == surfaced by a multi-hop cue
@@ -176,6 +178,11 @@ class RetrievalController:
         self._hybrid_backend: HybridBackend | None = build_hybrid_backend(settings)
         self._hybrid_weight = settings.retrieval_hybrid_weight
         self._hybrid_backend_name = (settings.retrieval_hybrid_backend or "off").lower()
+        # ROADMAP §4: optional provenance-graph neighbor expansion (default-off).
+        self._graph_backend: GraphBackend | None = build_graph_backend(settings)
+        self._graph_weight = settings.retrieval_graph_weight
+        self._graph_max_hops = max(1, settings.retrieval_graph_max_hops)
+        self._graph_backend_name = (settings.retrieval_graph_backend or "off").lower()
 
     def _gate_config(self, strategy: RetrievalStrategy) -> "gatemod.GateConfig":
         config = gatemod.GateConfig.for_strategy(strategy)
@@ -299,6 +306,15 @@ class RetrievalController:
             ),
             hybrid_weight=(
                 self._hybrid_weight if self._hybrid_backend is not None else None
+            ),
+            graph_backend=(
+                self._graph_backend_name if self._graph_backend is not None else None
+            ),
+            graph_weight=(
+                self._graph_weight if self._graph_backend is not None else None
+            ),
+            graph_max_hops=(
+                self._graph_max_hops if self._graph_backend is not None else None
             ),
         )
         access.policy_version = POLICY_VERSION
@@ -884,10 +900,76 @@ class RetrievalController:
                         relevance_score=rel,
                     )
                 )
+
+        # ROADMAP §4 provenance-graph neighbor expansion (default-off): surface
+        # memories linked to the current candidates through SUPERSEDES /
+        # CONFLICTS_WITH edges, even when they don't match the query. Graph
+        # neighbors stay subject to the lifecycle filter (only `retrievable`
+        # memories can be surfaced), so retired branches never leak.
+        if (
+            self._graph_backend is not None
+            and self._graph_backend.available
+            and not include_all
+            and scored
+        ):
+            scored = await self._expand_graph_neighbors(
+                scored, retrievable=retrievable, memories=memories, workspace_id=workspace_id
+            )
+
         scored.sort(key=lambda c: (-c.relevance_score, c.memory.memory_id))
         if include_all:
             return scored
         return scored[:top_k]
+
+    async def _expand_graph_neighbors(
+        self,
+        scored: list["RetrievalCandidateTrace"],
+        *,
+        retrievable: list[MemoryItem],
+        memories: list[MemoryItem],
+        workspace_id: str,
+    ) -> list["RetrievalCandidateTrace"]:
+        """Add provenance-graph neighbors of the current candidates.
+
+        Builds SUPERSEDES/CONFLICTS_WITH edges from repository provenance (the
+        loaded memories' ``superseded_by`` lineage plus open conflict groups),
+        asks the backend for memories within ``max_hops`` of the candidate seed
+        set, then either boosts an existing candidate's relevance or appends a new
+        candidate for a retrievable neighbor. Relatedness is scaled by
+        ``graph_weight``; neighbors that are not retrievable are skipped, so the
+        lifecycle filter is preserved.
+        """
+        if self._graph_backend is None:
+            return scored
+        conflicts = await self._repo.list_memory_conflicts(
+            workspace_id=workspace_id, status="open"
+        )
+        edges = provenance_edges(memories, conflicts)
+        if not edges:
+            return scored
+        seeds = [c.memory.memory_id for c in scored]
+        related = await self._graph_backend.related(
+            seeds, edges, max_hops=self._graph_max_hops
+        )
+        if not related:
+            return scored
+        by_id = {c.memory.memory_id: c for c in scored}
+        retr_by_id = {m.memory_id: m for m in retrievable}
+        for memory_id, relatedness in related.items():
+            boost = round(self._graph_weight * relatedness, 6)
+            existing = by_id.get(memory_id)
+            if existing is not None:
+                existing.graph_score = relatedness
+                existing.relevance_score = round(existing.relevance_score + boost, 6)
+            elif memory_id in retr_by_id:
+                candidate = RetrievalCandidateTrace(
+                    memory=retr_by_id[memory_id],
+                    graph_score=relatedness,
+                    relevance_score=boost,
+                )
+                scored.append(candidate)
+                by_id[memory_id] = candidate
+        return scored
 
     def _rrf_scores(self, raw: list[tuple[MemoryItem, float, float]]) -> dict[str, float]:
         """Reciprocal Rank Fusion of the lexical and vector signals.

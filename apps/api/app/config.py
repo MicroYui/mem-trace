@@ -170,6 +170,22 @@ class Settings(BaseSettings):
     # hybrid backend is "elasticsearch"/"opensearch").
     es_url: str = ""
     es_index_prefix: str = "memtrace"
+    # Optional provenance-graph neighbor expansion (ROADMAP §4, default-off).
+    # "off" leaves candidate scoring byte-identical. "inmemory" expands via a
+    # deterministic in-process BFS over SUPERSEDES/CONFLICTS_WITH edges built from
+    # repository provenance; "neo4j" uses an external graph store via the optional
+    # 'graph' extra, degrading cleanly when absent. Graph-surfaced neighbors stay
+    # subject to the lifecycle filter, so retired memories never leak.
+    retrieval_graph_backend: str = "off"
+    # Relatedness weight contributed to a graph neighbor's relevance score.
+    retrieval_graph_weight: float = 0.15
+    # Maximum hops for graph neighbor expansion.
+    retrieval_graph_max_hops: int = 2
+    # Neo4j connection (only used when retrieval_graph_backend == "neo4j").
+    neo4j_url: str = ""
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
     # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
     # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
     # hot paths use the configured embedding provider first, then degrade to the
@@ -263,6 +279,28 @@ class Settings(BaseSettings):
     def _validate_retrieval_hybrid_weight(cls, value: float) -> float:
         if value < 0.0 or value > 1.0:
             raise ValueError("retrieval_hybrid_weight must be between 0.0 and 1.0")
+        return value
+
+    @field_validator("retrieval_graph_backend")
+    @classmethod
+    def _validate_retrieval_graph_backend(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"off", "inmemory", "neo4j"}:
+            raise ValueError("retrieval_graph_backend must be one of: off, inmemory, neo4j")
+        return normalized
+
+    @field_validator("retrieval_graph_weight")
+    @classmethod
+    def _validate_retrieval_graph_weight(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            raise ValueError("retrieval_graph_weight must be between 0.0 and 1.0")
+        return value
+
+    @field_validator("retrieval_graph_max_hops")
+    @classmethod
+    def _validate_retrieval_graph_max_hops(cls, value: int) -> int:
+        if value < 1 or value > 3:
+            raise ValueError("retrieval_graph_max_hops must be between 1 and 3")
         return value
 
 
