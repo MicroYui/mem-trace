@@ -1,0 +1,73 @@
+{
+  "name": "memtrace-vscode",
+  "displayName": "MemTrace",
+  "version": "0.1.0",
+  "description": "Inspect MemTrace agent runs, retrieve context, and replay accesses from VS Code — a thin layer over the MemTrace /v1 HTTP API via @memtrace/sdk.",
+  "private": true,
+  "publisher": "memtrace",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/extension.ts",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "agent-memory",
+    "memtrace",
+    "llm-agents",
+    "observability"
+  ],
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "memtrace.retrieveContext",
+        "title": "MemTrace: Retrieve Context"
+      },
+      {
+        "command": "memtrace.showRunTimeline",
+        "title": "MemTrace: Show Run Timeline"
+      },
+      {
+        "command": "memtrace.inspectAccess",
+        "title": "MemTrace: Inspect Access"
+      }
+    ],
+    "configuration": {
+      "title": "MemTrace",
+      "properties": {
+        "memtrace.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the MemTrace /v1 HTTP service."
+        },
+        "memtrace.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional bearer token (leave blank when auth is disabled). Prefer the MEMTRACE_API_KEY environment variable over storing secrets in settings."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MicroYui/mem-trace.git",
+    "directory": "packages/vscode-extension"
+  },
+  "homepage": "https://github.com/MicroYui/mem-trace#readme",
+  "bugs": {
+    "url": "https://github.com/MicroYui/mem-trace/issues"
+  },
+  "dependencies": {
+    "@memtrace/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0"
+  },
+  "scripts": {
+    "test": "bun test test"
+  }
+}

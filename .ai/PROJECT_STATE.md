@@ -1,5 +1,15 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 9: §6 IDE extension + Go/Rust scale components)
+
+- **Slice 9 done — ROADMAP §6 dedicated IDE extension + scale-only Go/Rust components (thin over `/v1`, default not in CI build).**
+  - **VS Code extension** `packages/vscode-extension`: manifest contributes `MemTrace: Retrieve Context / Show Run Timeline / Inspect Access` + `memtrace.baseUrl`/`memtrace.apiKey` settings; `src/extension.ts` calls `/v1` via `@memtrace/sdk`'s `MemTraceClient` (secrets prefer `MEMTRACE_API_KEY` env). Excluded from root `tsc` (needs `@types/vscode` + extension host); Bun package-shape test (4) validates manifest/thin-layer/no-secret. Added to root test script (not workspaces, to avoid `@types/vscode` network resolution).
+  - **Go trace collector** `components/go-trace-collector` (go.mod + main.go + README): HTTP gateway `POST /collect/events` → validates JSON → batches → forwards unchanged to runtime `/v1/events`; never interprets events.
+  - **Rust profile analyzer** `components/rust-profile-analyzer` (Cargo.toml + src/main.rs + README): dependency-free JSONL profiler aggregation by phase (count/total/avg), with `#[cfg(test)]` unit tests.
+- **Toolchain-free verification:** Python structural tests `apps/api/tests/integration/test_scale_components.py` (6) validate skeleton files/markers/no-secret; `go build`/`cargo test`/VS Code host are the real checks where toolchains exist (Go/cargo absent here).
+- **Verification:** scale-component structural 6/6; Bun typecheck clean (extension excluded); full Bun **62 passed, 1 skip** (incl. 4 vscode); release hygiene clean. Commit on `main`. ROADMAP §6 IDE-extension + Go/Rust items ticked `[x]`.
+- **All 9 implementation slices complete** — every deferred/candidate ROADMAP item (§4 advanced retrieval, §5 state-tree, §3.4 governance, §6 IDE/Go-Rust) is now implemented default-off/degrade-safe. §8 "明确不做" (multimodal/community-detection/MemGate-training/full-leaderboard/multi-agent-platform) intentionally remains out of scope. Next: Slice 10 closeout (full verification sweep + final docs sync).
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 8: §3.4 full multi-tenant governance)
 
 - **Slice 8 done — ROADMAP §3.4 remaining governance, all default-off.** Two commits:

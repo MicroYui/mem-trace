@@ -8,7 +8,7 @@
     "packages/mcp-server"
   ],
   "scripts": {
-    "test": "bun test packages/ts-sdk/test packages/mcp-server/test apps/web/test",
+    "test": "bun test packages/ts-sdk/test packages/mcp-server/test packages/vscode-extension/test apps/web/test",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "web:dev": "cd apps/web && bun run dev",
     "web:build": "cd apps/web && bun run build",

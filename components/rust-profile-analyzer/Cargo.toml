@@ -1,0 +1,15 @@
+[package]
+name = "rust-profile-analyzer"
+version = "0.1.0"
+edition = "2021"
+description = "Scale-only profiler aggregation for MemTrace (ROADMAP §6 / architecture §3.2)."
+license = "Apache-2.0"
+
+[[bin]]
+name = "rust-profile-analyzer"
+path = "src/main.rs"
+
+# No third-party dependencies: the analyzer parses the profiler JSON with a tiny
+# hand-rolled reader so the scale component stays dependency-light and fast to
+# build. A production version could swap in serde_json.
+[dependencies]
