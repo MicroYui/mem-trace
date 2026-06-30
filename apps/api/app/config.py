@@ -192,6 +192,11 @@ class Settings(BaseSettings):
     # multipliers chosen from the request's task_intent. Default-off leaves the
     # blend unchanged.
     retrieval_ranking_profiles_enabled: bool = False
+    # Deterministic state-tree subgoal auto-inference (ROADMAP §5, default-off).
+    # When enabled, MemoryRuntime.infer_run_subgoals groups consecutive same-goal
+    # steps into inferred subgoal nodes (read-side analysis; the stored tree is
+    # unchanged). Default-off returns no inferred subgoals.
+    state_tree_subgoal_inference_enabled: bool = False
     # Provider Registry (ROADMAP §10). Deterministic hash embedding remains the
     # default so tests, demos, and benchmarks are reproducible. Runtime/retrieval
     # hot paths use the configured embedding provider first, then degrade to the

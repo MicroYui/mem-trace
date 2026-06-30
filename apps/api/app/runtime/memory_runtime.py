@@ -1199,6 +1199,19 @@ class MemoryRuntime:
     async def get_state_tree(self, run_id: str) -> list[StateNode]:
         return await self._repo.list_state_nodes(run_id)
 
+    async def infer_run_subgoals(self, run_id: str):
+        """Deterministic subgoal auto-inference over a run's state tree (ROADMAP §5).
+
+        Read-side analysis only: the stored tree is never mutated. Returns ``[]``
+        when ``state_tree_subgoal_inference_enabled`` is off (the default), so this
+        is a safe no-op until explicitly enabled.
+        """
+        if not self._settings.state_tree_subgoal_inference_enabled:
+            return []
+        from app.runtime.subgoal_inference import infer_subgoals
+
+        return infer_subgoals(await self._repo.list_state_nodes(run_id))
+
     async def get_steps(self, run_id: str) -> list[AgentStep]:
         return await self._repo.list_steps(run_id)
 

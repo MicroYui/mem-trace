@@ -1,5 +1,11 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 6: §5 node_type + subgoal inference)
+
+- **Slice 6 done — ROADMAP §5 full node_type + subgoal auto-inference (deterministic, default-off).** Expanded `StateNodeType` to `root/step/recovery/subgoal/tool_call/summary` (`node_type` is a plain String column → no migration). New `app/runtime/subgoal_inference.py` `infer_subgoals(nodes)` groups consecutive step/recovery nodes sharing a normalized `goal` into `InferredSubgoal`s (ordered by path/created_at, case-insensitive, skips root). New read method `MemoryRuntime.infer_run_subgoals(run_id)` gated by `MEMTRACE_STATE_TREE_SUBGOAL_INFERENCE_ENABLED` (default → `[]`; the stored tree is never mutated).
+- **Default behavior unchanged:** the execution tree still emits only root/step/recovery; new node types are available for opt-in analysis/compaction (§9 summary-node compression already done, MAGE next). 
+- **Verification:** `tests/runtime/test_subgoal_inference.py` 7/7; runtime+storage+conformance+benchmark+observability 258; full app+SDK **913 passed, 2 skipped**; benchmark **16/16**; compileall + `git diff --check` clean. Commit on `main`. ROADMAP §5 subgoal-inference + node_type items ticked `[x]`.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 5: §4 fusion + ranking_profiles + multi-store consistency)
 
 - **Slice 5 done — completes ROADMAP §4 (all Phase-5 retrieval items now `[x]`).** Three parts, all default-off / default-safe:

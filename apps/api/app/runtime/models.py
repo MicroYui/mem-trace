@@ -48,6 +48,14 @@ class StateNodeType(str, Enum):
     root = "root"
     step = "step"
     recovery = "recovery"
+    # Extended node vocabulary (ROADMAP §5). `subgoal` groups consecutive steps
+    # pursuing one goal (deterministic auto-inference, default-off); `tool_call`
+    # marks a tool-invocation node; `summary` marks a compacted-history node. The
+    # default execution tree still emits only root/step/recovery, so these are
+    # available for opt-in analysis/compaction without changing default behavior.
+    subgoal = "subgoal"
+    tool_call = "tool_call"
+    summary = "summary"
 
 
 class StateNodeStatus(str, Enum):
