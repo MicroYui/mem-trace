@@ -207,6 +207,7 @@ class LLMSummarizerProvider:
         self._max_tokens = max_tokens
         self._use_json_response_format = use_json_response_format
         self._client = client
+        self._owns_client = False
         self.capabilities = ProviderCapabilities(
             provider_id="summarizer.openai_compatible.v1",
             kind=ProviderKind.summarizer,
@@ -236,14 +237,24 @@ class LLMSummarizerProvider:
         }
         url = f"{self._base_url}/chat/completions"
 
-        if self._client is not None:
-            resp = await self._client.post(url, json=payload, headers=headers)
-            result = self._parse_response(resp)
-        else:
-            async with httpx.AsyncClient(timeout=self._timeout_s) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                result = self._parse_response(resp)
+        client = self._client_for_request()
+        resp = await client.post(url, json=payload, headers=headers)
+        result = self._parse_response(resp)
         return _validate_result(request, result.model_copy(update={"provider": CompactionProvider.llm}))
+
+    def _client_for_request(self) -> httpx.AsyncClient:
+        """Return a reusable client, creating (and owning) one lazily if none was injected."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self._timeout_s)
+            self._owns_client = True
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the client only if this provider created it; never an injected one."""
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+            self._client = None
+            self._owns_client = False
 
     def _parse_response(self, resp: httpx.Response) -> SummarizeResult:
         resp.raise_for_status()

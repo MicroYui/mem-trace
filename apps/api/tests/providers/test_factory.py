@@ -116,3 +116,42 @@ def test_build_provider_registry_deterministic_fallback_uses_pgvector_dimension(
 
     snapshot = registry.snapshot()
     assert snapshot["embedding"]["metadata"]["dim"] == 256
+
+
+async def test_provider_registry_aclose_is_safe_noop_when_real_providers_unused():
+    """Real network providers are built lazily; aclose() over a registry whose
+    providers were never called must be a safe, idempotent no-op."""
+    registry = build_provider_registry(
+        Settings(
+            llm_extraction_enabled=True,
+            llm_summarizer_enabled=True,
+            llm_api_key="sk-llm-secret",
+            embedding_provider="openai",
+            embedding_api_key="sk-emb-secret",
+        )
+    )
+    extraction = registry.get(ProviderKind.extraction)
+    embedding = registry.get(ProviderKind.embedding)
+    summarizer = registry.get(ProviderKind.summarizer)
+    assert isinstance(extraction, LLMExtractionProvider)
+    assert isinstance(embedding, OpenAIEmbeddingProvider)
+    assert isinstance(summarizer, LLMSummarizerProvider)
+    assert extraction._client is None
+    assert embedding._client is None
+    assert summarizer._client is None
+
+    await registry.aclose()
+    await registry.aclose()  # idempotent
+
+    assert extraction._client is None
+    assert embedding._client is None
+    assert summarizer._client is None
+
+
+async def test_deterministic_provider_registry_holds_no_network_clients():
+    registry = deterministic_provider_registry()
+    embedding = registry.get(ProviderKind.embedding)
+
+    assert not hasattr(embedding, "_client")
+    assert not hasattr(embedding, "aclose")
+    await registry.aclose()  # no provider exposes aclose -> safe no-op

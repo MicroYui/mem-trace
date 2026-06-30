@@ -533,7 +533,10 @@ async def run_bench(output_dir: str = "reports") -> dict[str, Any]:
             max_tokens=ep.get("max_tokens", 512),
             use_json_response_format=ep.get("use_json_response_format", False),
         )
-        results = await _run_one_endpoint(provider)
+        try:
+            results = await _run_one_endpoint(provider)
+        finally:
+            await provider.aclose()
         endpoint_payloads.append({
             "name": ep.get("name") or ep.get("model"),
             "base_url": ep.get("base_url", "https://api.openai.com/v1"),

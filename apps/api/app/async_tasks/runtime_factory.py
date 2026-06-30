@@ -17,10 +17,16 @@ from app.storage.sql_repository import SqlRepository
 class WorkerRuntimeHandle:
     runtime: MemoryRuntime
     engine: object | None = None
+    provider_registry: object | None = None
 
     async def aclose(self) -> None:
-        if self.engine is not None:
-            await self.engine.dispose()
+        # engine.dispose() must always run, even if a provider aclose() raises.
+        try:
+            if self.provider_registry is not None:
+                await self.provider_registry.aclose()
+        finally:
+            if self.engine is not None:
+                await self.engine.dispose()
 
 
 def build_worker_runtime(settings: Settings) -> WorkerRuntimeHandle:
@@ -39,7 +45,7 @@ def build_worker_runtime(settings: Settings) -> WorkerRuntimeHandle:
         summarizer_provider=summarizer_provider if isinstance(summarizer_provider, SummarizerProvider) else None,
         provider_registry=registry,
     )
-    return WorkerRuntimeHandle(runtime=runtime, engine=engine)
+    return WorkerRuntimeHandle(runtime=runtime, engine=engine, provider_registry=registry)
 
 
 __all__ = ["WorkerRuntimeHandle", "build_worker_runtime"]

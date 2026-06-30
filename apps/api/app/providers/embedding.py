@@ -49,6 +49,7 @@ class OpenAIEmbeddingProvider:
         self._dimensions = dimensions
         self._timeout_s = timeout_s
         self._client = client
+        self._owns_client = False
         self.capabilities = ProviderCapabilities(
             provider_id="embedding.openai_compatible.v1",
             kind=ProviderKind.embedding,
@@ -70,11 +71,8 @@ class OpenAIEmbeddingProvider:
             "Content-Type": "application/json",
         }
         url = f"{self._base_url}/embeddings"
-        if self._client is not None:
-            resp = await self._client.post(url, json=payload, headers=headers)
-        else:
-            async with httpx.AsyncClient(timeout=self._timeout_s) as client:
-                resp = await client.post(url, json=payload, headers=headers)
+        client = self._client_for_request()
+        resp = await client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         body = resp.json()
         data = body.get("data") if isinstance(body, dict) else None
@@ -90,6 +88,20 @@ class OpenAIEmbeddingProvider:
         if len(vector) != self._dimensions:
             raise ValueError(f"embedding dimension mismatch: expected {self._dimensions}, got {len(vector)}")
         return vector
+
+    def _client_for_request(self) -> httpx.AsyncClient:
+        """Return a reusable client, creating (and owning) one lazily if none was injected."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self._timeout_s)
+            self._owns_client = True
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the client only if this provider created it; never an injected one."""
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+            self._client = None
+            self._owns_client = False
 
 
 def _host_label(base_url: str) -> str:

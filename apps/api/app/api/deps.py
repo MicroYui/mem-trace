@@ -95,8 +95,13 @@ class AppState:
         )
 
     async def shutdown(self) -> None:
-        if self.engine is not None:
-            await self.engine.dispose()
+        # engine.dispose() must always run, even if a provider aclose() raises.
+        try:
+            if self.provider_registry is not None:
+                await self.provider_registry.aclose()
+        finally:
+            if self.engine is not None:
+                await self.engine.dispose()
 
 
 app_state = AppState()

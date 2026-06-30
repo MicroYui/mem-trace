@@ -35,3 +35,23 @@ class ProviderRegistry:
             for kind, slot in sorted(self._slots.items(), key=lambda item: item[0].value)
         }
 
+    async def aclose(self) -> None:
+        """Close providers that own network resources (best-effort).
+
+        Duck-typed: deterministic providers expose no ``aclose`` and are skipped.
+        Every provider is attempted even if an earlier close fails; the first
+        error is re-raised after all providers have been closed. Idempotent and
+        a safe no-op when no provider created a client.
+        """
+        first_error: Exception | None = None
+        for slot in self._slots.values():
+            aclose = getattr(slot.provider, "aclose", None)
+            if callable(aclose):
+                try:
+                    await aclose()
+                except Exception as exc:  # noqa: BLE001 - shutdown cleanup is best-effort
+                    if first_error is None:
+                        first_error = exc
+        if first_error is not None:
+            raise first_error
+

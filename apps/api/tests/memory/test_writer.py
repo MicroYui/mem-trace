@@ -122,6 +122,37 @@ def test_risk_flags_detect_destructive_and_production():
     assert flags.tool_sensitive is True
 
 
+def test_tool_sensitive_ignores_nonproduction_word_boundary():
+    """Substring matching mis-flagged benign content; word boundaries must not
+    match `production`/`prod-` inside larger ordinary words."""
+    assert detect_risk_flags("set up a nonproduction sandbox").tool_sensitive is False
+    assert detect_risk_flags("deploy to a nonprod-cache box").tool_sensitive is False
+
+
+def test_tool_sensitive_ignores_secret_as_word_prefix():
+    """"secretary"/"secretariat" must not be flagged just because they start with
+    "secret"."""
+    assert detect_risk_flags("the secretary booked a room").tool_sensitive is False
+    assert detect_risk_flags("a secretariat memo").tool_sensitive is False
+
+
+def test_tool_sensitive_keeps_compound_secret_identifiers():
+    """Separator-compound credential identifiers must stay flagged (underscore is
+    a word char, so plain \\b would miss them)."""
+    assert detect_risk_flags("rotate the client_secret now").tool_sensitive is True
+    assert detect_risk_flags("the api_secret is exposed").tool_sensitive is True
+    assert detect_risk_flags("update secret_key in vault").tool_sensitive is True
+    assert detect_risk_flags("refresh the secret-token").tool_sensitive is True
+
+
+def test_tool_sensitive_still_flags_real_sensitive_commands():
+    assert detect_risk_flags("deploy to production").tool_sensitive is True
+    assert detect_risk_flags("deploy to prod-cache").tool_sensitive is True
+    assert detect_risk_flags("the secret is rotated").tool_sensitive is True
+    assert detect_risk_flags("run rm -rf /tmp").tool_sensitive is True
+    assert detect_risk_flags("git push --force").tool_sensitive is True
+
+
 def test_secret_detection_and_redaction():
     text = "here is the key sk-abcdefgh12345678ijklmnop and a token"
     assert secrets.contains_secret(text) is True

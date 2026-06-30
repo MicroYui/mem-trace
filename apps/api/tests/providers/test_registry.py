@@ -105,3 +105,44 @@ def test_capability_snapshot_redacts_secret_like_top_level_strings():
     assert snap["endpoint_types"] == ["openai_embeddings"]
     assert "sk-model-secret" not in str(snap)
     assert "fallback-secret-token" not in str(snap)
+
+
+class _Closable:
+    def __init__(self, *, raises: bool = False) -> None:
+        self.calls = 0
+        self._raises = raises
+
+    async def aclose(self) -> None:
+        self.calls += 1
+        if self._raises:
+            raise RuntimeError("boom")
+
+
+def _caps(kind: ProviderKind) -> ProviderCapabilities:
+    return ProviderCapabilities(
+        provider_id=f"{kind.value}.test.v1",
+        kind=kind,
+        deterministic=False,
+        requires_network=True,
+    )
+
+
+async def test_registry_aclose_skips_providers_without_aclose():
+    registry = ProviderRegistry()
+    registry.register(ProviderKind.embedding, _Provider(), _caps(ProviderKind.embedding))
+
+    await registry.aclose()  # provider has no aclose -> safe no-op
+
+
+async def test_registry_aclose_closes_all_providers_even_if_one_raises():
+    registry = ProviderRegistry()
+    bad = _Closable(raises=True)
+    good = _Closable()
+    registry.register(ProviderKind.embedding, bad, _caps(ProviderKind.embedding))
+    registry.register(ProviderKind.summarizer, good, _caps(ProviderKind.summarizer))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await registry.aclose()
+
+    assert bad.calls == 1
+    assert good.calls == 1  # later provider still closed despite earlier failure

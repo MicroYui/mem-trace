@@ -618,3 +618,49 @@ def test_dependency_wiring_uses_rule_by_default_and_llm_when_enabled_with_key():
         Settings(llm_summarizer_enabled=True, llm_api_key="sk-test", llm_base_url="https://llm.test/v1")
     )
     assert isinstance(llm_provider, LLMSummarizerProvider)
+
+
+def _valid_summary_payload() -> dict:
+    return {
+        "summary": "project.database=postgres; project.runtime=bun.",
+        "retained_facts": [
+            {"key": "project.database", "value": "postgres", "source_memory_id": "mem_1"},
+            {"key": "project.runtime", "value": "bun", "source_memory_id": "mem_1"},
+        ],
+        "omitted_count": 2,
+        "source_memory_ids": ["mem_1", "mem_2"],
+        "source_event_ids": ["evt_1"],
+        "source_state_node_ids": ["node_1"],
+        "pre_tokens": 18,
+        "post_tokens": 4,
+        "warnings": [],
+    }
+
+
+async def test_llm_summarizer_provider_reuses_and_closes_lazy_client(monkeypatch):
+    """When no client is injected, the provider must create one lazily, reuse it
+    across calls, and close it via aclose()."""
+    created: list[httpx.AsyncClient] = []
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _chat_response(_valid_summary_payload())
+
+    def fake_async_client(*args, **kwargs):
+        client = real_async_client(transport=httpx.MockTransport(handler))
+        created.append(client)
+        return client
+
+    monkeypatch.setattr("app.memory.summarizer_provider.httpx.AsyncClient", fake_async_client)
+    provider = LLMSummarizerProvider(api_key="sk-test", base_url="https://llm.test/v1")
+
+    assert provider._client is None
+    first = await provider.summarize(_request())
+    second = await provider.summarize(_request())
+    assert first.provider == CompactionProvider.llm
+    assert second.provider == CompactionProvider.llm
+    assert len(created) == 1  # client reused, not recreated per call
+    assert provider._client is created[0]
+
+    await provider.aclose()
+    assert provider._client is None

@@ -177,3 +177,30 @@ async def test_extract_raises_on_invalid_json_content():
     provider = _provider(handler)
     with pytest.raises(json.JSONDecodeError):
         await provider.extract(_user_event("anything"))
+
+
+async def test_extract_reuses_and_closes_lazy_client(monkeypatch):
+    """When no client is injected, the provider must create one lazily, reuse it
+    across calls, and close it via aclose()."""
+    created: list[httpx.AsyncClient] = []
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _chat_response([])
+
+    def fake_async_client(*args, **kwargs):
+        client = real_async_client(transport=httpx.MockTransport(handler))
+        created.append(client)
+        return client
+
+    monkeypatch.setattr("app.memory.llm_extractor.httpx.AsyncClient", fake_async_client)
+    provider = LLMExtractionProvider(api_key="sk-test", base_url="https://llm.test/v1")
+
+    assert provider._client is None
+    assert await provider.extract(_user_event("a")) == []
+    assert await provider.extract(_user_event("b")) == []
+    assert len(created) == 1  # client reused, not recreated per call
+    assert provider._client is created[0]
+
+    await provider.aclose()
+    assert provider._client is None

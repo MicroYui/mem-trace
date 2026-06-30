@@ -88,7 +88,14 @@ _PRODUCTION_PATTERNS = [
     re.compile(r"(?i)\bprod\b"),
     re.compile(r"(?i)production[_-]?key\b"),
 ]
-_TOOL_SENSITIVE_TOKENS = ("--force", "rm -rf", "drop table", "production", "prod-", "secret")
+# Match "secret" as a standalone identifier token without the substring false
+# positives of plain containment. `(?<![a-z])`/`(?![a-z])` keep whole-word
+# "secret"/"secrets" and separator-compound credential identifiers
+# ("client_secret", "api_secret", "secret_key", "secret-token") while dropping
+# letter-glued words like "secretary"/"secretariat". The destructive/production
+# tokens are already covered by _DESTRUCTIVE_PATTERNS / _PRODUCTION_PATTERNS, so
+# "secret" is the only token that needs an independent pattern here.
+_TOOL_SENSITIVE_PATTERNS = [re.compile(r"(?i)(?<![a-z])secrets?(?![a-z])")]
 
 
 def _norm_runtime(token: str) -> Optional[str]:
@@ -123,8 +130,11 @@ def detect_risk_flags(content: str | None) -> RiskFlags:
     text = content or ""
     destructive = any(p.search(text) for p in _DESTRUCTIVE_PATTERNS)
     production = any(p.search(text) for p in _PRODUCTION_PATTERNS)
-    low = text.lower()
-    tool_sensitive = destructive or production or any(t in low for t in _TOOL_SENSITIVE_TOKENS)
+    tool_sensitive = (
+        destructive
+        or production
+        or any(p.search(text) for p in _TOOL_SENSITIVE_PATTERNS)
+    )
     return RiskFlags(
         tool_sensitive=tool_sensitive,
         destructive_command=destructive,
