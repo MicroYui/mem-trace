@@ -135,6 +135,14 @@ class RetrievalController:
         self._embed_dim = EMBED_DIM
         self._timeout_ms = settings.retrieval_timeout_ms
         self._compaction_notice_reserve_tokens = settings.compaction_notice_reserve_tokens
+        # ROADMAP §5: default-off active-path summary compression. 0 == disabled,
+        # so build_active_path_block lists every completed step (unchanged).
+        if settings.summary_node_compression_enabled:
+            self._active_path_summarize_after = max(0, settings.active_path_summary_threshold)
+            self._active_path_keep_recent = max(0, settings.active_path_summary_keep_recent)
+        else:
+            self._active_path_summarize_after = 0
+            self._active_path_keep_recent = settings.active_path_summary_keep_recent
 
     async def retrieve(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
         # Hot-path timeout (architecture.md §11 / §12.3: retrieve_context should
@@ -429,6 +437,8 @@ class RetrievalController:
             prelude_blocks=prelude_blocks,
             negative_evidence=negative_evidence,
             compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
+            active_path_summarize_after=self._active_path_summarize_after,
+            active_path_keep_recent=self._active_path_keep_recent,
         )
         if long_context and pack_result.pre_compaction_tokens > budget:
             # Long-context is the intentional all-context baseline: keep the
@@ -445,6 +455,8 @@ class RetrievalController:
                 prelude_blocks=prelude_blocks,
                 negative_evidence=negative_evidence,
                 compaction_notice_reserve_tokens=self._compaction_notice_reserve_tokens,
+                active_path_summarize_after=self._active_path_summarize_after,
+                active_path_keep_recent=self._active_path_keep_recent,
             )
         blocks = pack_result.blocks
         actual_tokens = pack_result.used

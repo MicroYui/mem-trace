@@ -396,12 +396,24 @@ def build_project_constraint_block(memories: list[MemoryItem]) -> Optional[Conte
     )
 
 
-def build_active_path_block(active_path: list[StateNode]) -> Optional[ContextBlock]:
+def build_active_path_block(
+    active_path: list[StateNode],
+    *,
+    summarize_after: int = 0,
+    keep_recent: int = 3,
+) -> Optional[ContextBlock]:
     """Summarize the active path (root -> current) as a single context block.
 
     Only completed steps on the path contribute progress text; the current
     active leaf is described separately by the active_state block. Failed /
     rolled_back nodes are never on the active path by construction.
+
+    ROADMAP §5 (default-off): when ``summarize_after > 0`` and the number of
+    completed steps exceeds it, the oldest completed subgoals are folded into a
+    single deterministic summary segment (``[N earlier completed steps
+    summarized]``) and only the most recent ``keep_recent`` are shown verbatim,
+    keeping this protected block bounded on long-horizon runs. With the default
+    ``summarize_after == 0`` every completed step is listed (unchanged behavior).
     """
     if not active_path:
         return None
@@ -411,10 +423,13 @@ def build_active_path_block(active_path: list[StateNode]) -> Optional[ContextBlo
     ]
     if not steps:
         return None
-    parts = []
-    for n in steps:
-        label = n.summary or n.goal or (n.step_id or n.node_id)
-        parts.append(_safe_content(label))
+    labels = [_safe_content(n.summary or n.goal or (n.step_id or n.node_id)) for n in steps]
+    keep = max(0, keep_recent)
+    if summarize_after > 0 and len(steps) > summarize_after and len(steps) - keep > 0:
+        folded = len(steps) - keep
+        parts = [f"[{folded} earlier completed steps summarized]", *labels[folded:]]
+    else:
+        parts = labels
     content = _safe_content("Progress so far: " + " -> ".join(parts) + ".")
     leaf = active_path[-1]
     return ContextBlock(
@@ -435,6 +450,8 @@ def pack_context(
     prelude_blocks: Optional[list[ContextBlock]] = None,
     negative_evidence: Optional[list[NegativeEvidence]] = None,
     compaction_notice_reserve_tokens: int = 64,
+    active_path_summarize_after: int = 0,
+    active_path_keep_recent: int = 3,
 ) -> PackResult:
     """Build ordered, budget-bounded context blocks.
 
@@ -463,7 +480,11 @@ def pack_context(
 
     # Active path progress block (P1 active-path context builder).
     if active_path:
-        path_block = build_active_path_block(active_path)
+        path_block = build_active_path_block(
+            active_path,
+            summarize_after=active_path_summarize_after,
+            keep_recent=active_path_keep_recent,
+        )
         if path_block is not None:
             blocks.append(path_block)
 

@@ -1,5 +1,13 @@
 # Project State
 
+## Latest Session (2026-06-30 — §5 completed-subgoal → bounded active-path summary)
+
+- **Loop slice #2 (ROADMAP §5):** default-off compression of completed subgoals on the active path so the *protected* `active_path` block stays bounded on long-horizon runs (coordinates with §9). No state-tree enum/schema/migration change — `StateNode.summary` already existed and `build_active_path_block` already rendered `summary or goal`.
+- **Implemented:** settings `summary_node_compression_enabled` (default `False`) + `active_path_summary_threshold` (8) + `active_path_summary_keep_recent` (3) in `config.py`; `packer.build_active_path_block(..., summarize_after, keep_recent)` folds oldest completed steps into `[N earlier completed steps summarized]` and keeps recent verbatim (`summarize_after=0` = unchanged listing); `pack_context` threads `active_path_summarize_after`/`active_path_keep_recent`; `RetrievalController.__init__` reads settings (non-zero only when enabled); `observability/replay` reuses the same controller params to avoid false drift.
+- **Verification:** new `tests/retrieval/test_active_path_summary.py` (6) green; full pytest **797 passed, 2 skipped**; observability 64; compileall clean; benchmark + reproduce **13/13** unchanged (default-off); `git diff --check` clean.
+- **Files:** +`apps/api/tests/retrieval/test_active_path_summary.py`; M `app/config.py`, `app/retrieval/packer.py`, `app/retrieval/controller.py`, `app/observability/replay.py`.
+- **Next:** ROADMAP §9.1 stale → outdated-warning downgrade (loop task #3).
+
 ## Latest Session (2026-06-30 — §3.3 7-rule conflict policy + provenance 解释链)
 
 - **User request (loop):** complete the recommended remaining-candidate slices in order, each as verify → update memory → commit; benchmark must be expanded with authoritative datasets and more real-LLM Q&A; IDE plugin and Go/Rust skipped. First slice: ROADMAP §3.3 完整 7 条冲突规则 + owner-gated 人工冲突审核 workflow.

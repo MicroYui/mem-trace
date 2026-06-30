@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     compaction_history_token_threshold: int = 2048
     compaction_summary_budget_tokens: int = 192
     compaction_timeout_ms: int = 1500
+    # ROADMAP §5: completed-subgoal compression into a bounded active-path summary.
+    # Default-off so the protected active_path block keeps its current behavior
+    # (every completed step listed). When enabled, once the number of completed
+    # steps on the active path exceeds ``active_path_summary_threshold`` the oldest
+    # are folded into a single deterministic summary segment and only the most
+    # recent ``active_path_summary_keep_recent`` are shown verbatim. Deterministic,
+    # no LLM/schema/migration; coordinates with §9 Context Compaction.
+    summary_node_compression_enabled: bool = False
+    active_path_summary_threshold: int = 8
+    active_path_summary_keep_recent: int = 3
     # Extraction freshness/latency policy (architecture.md §12.1): "sync" extracts
     # inline on write_event (default; keeps demo/benchmark deterministic), while
     # "buffered" defers extraction to an explicit or lazy flush.
