@@ -15,7 +15,12 @@ from app.config import get_settings
 from app.retrieval.controller import RetrievalController
 from app.retrieval.gate import GateConfig
 from app.retrieval.policy import build_policy_snapshot
-from app.retrieval.query_planner import hint_boost, plan_query
+from app.retrieval.query_planner import (
+    decide_need_retrieval,
+    hint_boost,
+    plan_query,
+    rewrite_query,
+)
 from app.runtime.models import MemoryItem, MemoryType, RetrievalRequest, RetrievalStrategy
 from app.runtime.repository import InMemoryRepository
 
@@ -80,6 +85,61 @@ def test_hint_boost_is_bounded_and_proportional():
     assert hint_boost("a.b", hints, weight=0.0) == 0.0
 
 
+# --------------------- need-retrieval decision ----------------------- #
+
+
+def test_decide_need_retrieval_skips_trivial_filler_query():
+    decision = decide_need_retrieval("ok thanks, continue")
+    assert decision.should_retrieve is False
+    assert decision.reason == "no_retrieval_signal"
+
+
+def test_decide_need_retrieval_keeps_query_with_entity():
+    decision = decide_need_retrieval("set project.runtime")
+    assert decision.should_retrieve is True
+    assert decision.reason == "has_retrieval_signal"
+
+
+def test_decide_need_retrieval_keeps_query_with_content_word():
+    decision = decide_need_retrieval("how do i run the tests")
+    assert decision.should_retrieve is True  # "tests" is a content signal token
+
+
+def test_decide_need_retrieval_empty_query_skips():
+    assert decide_need_retrieval("").should_retrieve is False
+    assert decide_need_retrieval(None).should_retrieve is False
+
+
+def test_decide_need_retrieval_uses_task_intent():
+    decision = decide_need_retrieval("go", task_intent="debug the migration")
+    assert decision.should_retrieve is True
+
+
+# --------------------------- query rewrite --------------------------- #
+
+
+def test_rewrite_query_expands_structural_entity_into_components():
+    rewrite = rewrite_query("set project.runtime please")
+    assert "project" in rewrite.added_terms
+    assert "runtime" in rewrite.added_terms
+    assert rewrite.text.startswith("set project.runtime please")
+    assert rewrite.reason == "expanded"
+
+
+def test_rewrite_query_without_entities_is_unchanged():
+    rewrite = rewrite_query("how do i run the tests")
+    assert rewrite.added_terms == ()
+    assert rewrite.text == "how do i run the tests"
+    assert rewrite.reason == "no_rewrite"
+
+
+def test_rewrite_query_does_not_duplicate_existing_tokens():
+    # "runtime" already appears verbatim, so it must not be re-appended.
+    rewrite = rewrite_query("runtime project.runtime")
+    assert rewrite.added_terms.count("runtime") == 0
+    assert "project" in rewrite.added_terms
+
+
 # ----------------------- controller integration ---------------------- #
 
 
@@ -138,6 +198,56 @@ async def test_query_planner_off_keeps_equal_scores_and_tie_break(monkeypatch):
     assert cands[0].memory.memory_id == "m_aaa_other"
 
 
+@pytest.mark.asyncio
+async def test_query_planner_full_skips_retrieval_for_trivial_query(monkeypatch):
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_QUERY_PLANNER", "full")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_full_skip"
+    await repo.add_memory(_mem(ws, "m1", "runtime.flag here"))
+    controller = RetrievalController(repo)
+    assert controller._query_planner == "full"  # noqa: SLF001
+    cands = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="ok thanks continue", top_k=10
+    )
+    assert cands == []  # need-retrieval decision skips the whole pass
+
+
+@pytest.mark.asyncio
+async def test_query_planner_full_rewrite_surfaces_prose_memory(monkeypatch):
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_QUERY_PLANNER", "full")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_full_rewrite"
+    # Prose spells "runtime" but never the dotted key; the tokenizer keeps
+    # "project.runtime" whole, so only query rewrite (component expansion) makes
+    # this candidate match.
+    await repo.add_memory(_mem(ws, "m_prose", "the runtime is bun"))
+    controller = RetrievalController(repo)
+    cands = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="project.runtime", top_k=10
+    )
+    assert "m_prose" in {c.memory.memory_id for c in cands}
+
+
+@pytest.mark.asyncio
+async def test_query_planner_hints_does_not_rewrite_prose_memory(monkeypatch):
+    # Contrast: under hints (no rewrite) the dotted query misses the prose memory.
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_QUERY_PLANNER", "hints")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_hints_prose"
+    await repo.add_memory(_mem(ws, "m_prose", "the runtime is bun"))
+    controller = RetrievalController(repo)
+    cands = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="project.runtime", top_k=10
+    )
+    assert all(c.memory.memory_id != "m_prose" for c in cands)
+
+
 # --------------------------- policy snapshot -------------------------- #
 
 
@@ -163,6 +273,14 @@ def test_policy_snapshot_records_query_planner_when_enabled():
     snap = _snap(query_planner="hints", query_planner_weight=0.1)
     assert snap["retrieval"]["query_planner"] == "hints"
     assert snap["retrieval"]["query_planner_weight"] == 0.1
+
+
+def test_query_planner_full_setting_is_accepted_and_snapshotted(monkeypatch):
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_QUERY_PLANNER", "full")
+    get_settings.cache_clear()
+    assert get_settings().retrieval_query_planner == "full"
+    snap = _snap(query_planner="full", query_planner_weight=0.1)
+    assert snap["retrieval"]["query_planner"] == "full"
 
 
 def test_invalid_query_planner_setting_is_rejected(monkeypatch):

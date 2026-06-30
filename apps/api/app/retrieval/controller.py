@@ -17,7 +17,12 @@ from app.retrieval import gate as gatemod
 from app.retrieval.negative_evidence import build_negative_evidence
 from app.retrieval.packer import pack_context
 from app.retrieval.policy import POLICY_VERSION, build_policy_snapshot, policy_hash
-from app.retrieval.query_planner import hint_boost, plan_query
+from app.retrieval.query_planner import (
+    decide_need_retrieval,
+    hint_boost,
+    plan_query,
+    rewrite_query,
+)
 from app.retrieval.similarity import lexical_similarity, stable_embedding
 from app.config import get_settings
 from app.providers.registry import ProviderRegistry
@@ -669,7 +674,27 @@ class RetrievalController:
         # Workspace-scoped retrieval is the permission filter: cross-workspace
         # memories never become candidates, so leakage is impossible by
         # construction. The gate's workspace_mismatch rule is defense-in-depth.
+
+        # ROADMAP §4 need-retrieval decision (only under the "full" planner): a
+        # trivial query with no entity/content signal skips retrieval entirely.
+        # Never applied to long_context (the deliberate dump-everything baseline).
+        if (
+            self._query_planner == "full"
+            and not include_all
+            and not decide_need_retrieval(query, task_intent).should_retrieve
+        ):
+            return []
+
         memories = await self._repo.list_memories(workspace_id=workspace_id)
+
+        # ROADMAP §4 query rewrite (only under "full"): expand structural entity
+        # terms (dotted keys, paths) into their component words so prose memories
+        # that spell the words out still match. The original query is preserved;
+        # the rewritten text is only the lexical/vector scoring input. Off/hints
+        # leave `lexical_query == query`, so the default path is unchanged.
+        lexical_query = query
+        if self._query_planner == "full":
+            lexical_query = rewrite_query(query, task_intent).text
 
         # Vector signal: deterministic embedding cosine via pgvector KNN (SQL)
         # or in-memory cosine. Map memory_id -> cosine so we can blend it with
@@ -677,7 +702,7 @@ class RetrievalController:
         # retrieval is disabled or yields nothing (e.g. no embeddings stored).
         vector_scores: dict[str, float] = {}
         if self._use_vector:
-            q_vec = await self._embed_query(query)
+            q_vec = await self._embed_query(lexical_query)
             knn = await self._repo.search_memories_by_vector(
                 embedding=q_vec, workspace_id=workspace_id, top_k=max(top_k * 2, top_k)
             )
@@ -691,7 +716,7 @@ class RetrievalController:
         # identifiers) outrank generic token overlap. `hints` is empty unless the
         # planner is enabled, so the boost is a no-op on the default path.
         hints: tuple[str, ...] = ()
-        if self._query_planner == "hints":
+        if self._query_planner in ("hints", "full"):
             hints = plan_query(query, task_intent).hints
 
         # First pass: compute raw lexical/vector signals for retrievable memories.
@@ -699,7 +724,7 @@ class RetrievalController:
         for m in memories:
             if m.status not in _RETRIEVABLE_STATUSES:
                 continue  # skip superseded/archived/dormant/deleted lifecycle states
-            lex = lexical_similarity(query, m.content)
+            lex = lexical_similarity(lexical_query, m.content)
             if hints:
                 lex = min(
                     1.0,

@@ -141,8 +141,11 @@ class Settings(BaseSettings):
     # Deterministic query planner (ROADMAP §4). "off" (default) leaves retrieval
     # byte-identical. "hints" extracts entity-like query terms (dotted keys,
     # paths, identifiers) and gives candidates that mention them a small bounded
-    # lexical boost, so structural names outrank generic token overlap. No model
-    # or network; default-off keeps benchmark/replay reproducible.
+    # lexical boost, so structural names outrank generic token overlap. "full"
+    # additionally rewrites the query (expands structural terms into component
+    # words so prose memories still match) and applies a need-retrieval decision
+    # (trivial/no-signal queries skip retrieval). No model or network; default-off
+    # keeps benchmark/replay reproducible.
     retrieval_query_planner: str = "off"
     # Maximum lexical boost a fully-matching candidate earns under "hints" mode.
     retrieval_query_planner_weight: float = 0.1
@@ -199,8 +202,8 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_retrieval_query_planner(cls, value: str) -> str:
         normalized = value.lower()
-        if normalized not in {"off", "hints"}:
-            raise ValueError("retrieval_query_planner must be one of: off, hints")
+        if normalized not in {"off", "hints", "full"}:
+            raise ValueError("retrieval_query_planner must be one of: off, hints, full")
         return normalized
 
     @field_validator("retrieval_query_planner_weight")

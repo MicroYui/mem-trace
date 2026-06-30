@@ -1,5 +1,15 @@
 # Project State
 
+## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 1: §4 query planner `full` mode)
+
+- **New `/loop` (dynamic, self-paced):** user asked to implement *all remaining ROADMAP capabilities* — every deferred/candidate item, even default-off ones — verifying and committing each slice. Task list tracks 9 implementation slices + closeout (#1 query-planner remainder → #2 multi-hop retrieval → #3 ES/OpenSearch → #4 Neo4j graph → #5 multi-store consistency/fusion → #6 state-tree node_type/subgoal → #7 MAGE ops → #8 full governance → #9 IDE/Go-Rust → #10 closeout). §8 explicit out-of-scope (multimodal/community-detection/MemGate-training/full-leaderboard/multi-agent-platform) stays intentionally not done.
+- **Slice 1 done — ROADMAP §4 Query Planner remainder.** Extended `app/retrieval/query_planner.py` with two deterministic, no-network capabilities and a new `full` planner mode:
+  - `decide_need_retrieval(query, task_intent)` — skips retrieval for trivial/no-signal queries (only filler/greetings/pronouns or empty). Conservative: intent-bearing verbs (fix/debug/install/build/test) are NOT stopwords; 1–2 char tokens already excluded by `_MIN_LEN`.
+  - `rewrite_query(query, task_intent)` — expands structural entity terms (`project.runtime`) into their component words (`project runtime`) and appends them, so prose memories that spell the words out still match (the lexical tokenizer keeps dotted keys as ONE token). Original query preserved; rewritten text is only the lexical/vector scoring input; bounded, no-op without structural terms.
+  - `MEMTRACE_RETRIEVAL_QUERY_PLANNER` now `off`(default)/`hints`/`full`. `full` = hints + rewrite + need-retrieval. need-retrieval never fires for `long_context`. Config validator accepts `full`; `"rewrite"` remains an invalid value.
+- **Default-off preserved byte-for-byte:** off/hints leave `lexical_query == query` and `_embed_query(query)`, so default candidate scoring is unchanged. Verification: `tests/retrieval/test_query_planner.py` 24/24 (12 new); retrieval+observability+benchmark+conformance 291; full app+SDK **854 passed, 2 skipped**; deterministic benchmark + `scripts/reproduce.sh` **16/16**; `git diff --check` clean.
+- **Commit:** this slice on `main` (see git log). ROADMAP §4 Query Planner item ticked `[x]`.
+
 ## Latest Session (2026-06-30 — loop Step 4: README polish; loop complete)
 
 - **Loop Step 4 of 5 (final).** Rewrote `README.md` into a polished high-star-project landing page while keeping every claim accurate and all operational content intact.

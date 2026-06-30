@@ -12,7 +12,10 @@ This is deterministic and side-effect free; it never calls a model or the
 network. It is wired into the controller behind a default-off setting
 (``MEMTRACE_RETRIEVAL_QUERY_PLANNER=off``), so default retrieval, benchmark
 reproducibility, and replay snapshots stay byte-identical until explicitly
-enabled. The richer "Need-Retrieval Decision" / query rewrite remain deferred.
+enabled. Two further deterministic capabilities — ``decide_need_retrieval``
+(skip retrieval for trivial/no-signal tasks) and ``rewrite_query`` (expand
+structural entity terms into their component words so prose memories still
+match) — are exposed here and activated together under the ``full`` mode.
 """
 from __future__ import annotations
 
@@ -22,9 +25,25 @@ from dataclasses import dataclass
 # A run of alphanumerics plus structural separators, anchored on alphanumerics
 # at both ends so trailing punctuation (e.g. "project.runtime=bun") is dropped.
 _ENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:-]*[A-Za-z0-9]")
+_SPLIT_RE = re.compile(r"[._/:-]+")
 _STRUCTURAL_CHARS = "._/:-"
 _MIN_LEN = 3
 _MAX_HINTS = 8
+
+# Trivial filler / greeting / pronoun words that carry no retrieval target.
+# 1-2 char tokens are already excluded by ``_MIN_LEN``; this set covers the
+# longer filler that would otherwise read as a content signal. Intentionally
+# conservative — intent-bearing verbs (fix, debug, install, build, test) are
+# NOT stopwords, so only genuinely contentless queries skip retrieval.
+_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "with", "are", "this", "that", "you", "your", "our",
+        "ok", "okay", "yes", "yep", "nope", "sure", "thanks", "thank", "please",
+        "hey", "hello", "now", "then", "next", "continue", "done", "lets", "let",
+        "can", "could", "would", "should", "will", "what", "how", "does", "did",
+        "just", "again", "here", "there", "them", "they", "was", "were",
+    }
+)
 
 
 def _is_entity_like(token: str) -> bool:
@@ -84,4 +103,88 @@ def hint_boost(content: str | None, hints: tuple[str, ...], *, weight: float) ->
     return round(weight * (matched / len(hints)), 6)
 
 
-__all__ = ["QueryPlan", "plan_query", "hint_boost"]
+def _signal_tokens(query: str | None, task_intent: str | None) -> list[str]:
+    """Tokens that carry a real retrieval target (entity-like or content word)."""
+    text = " ".join(part for part in (query, task_intent) if part)
+    out: list[str] = []
+    for match in _ENTITY_RE.findall(text):
+        token = match.lower()
+        if len(token) < _MIN_LEN:
+            continue
+        if _is_entity_like(token) or token not in _STOPWORDS:
+            out.append(token)
+    return out
+
+
+@dataclass(frozen=True)
+class NeedRetrievalDecision:
+    """Whether a query is worth retrieving for, plus a deterministic reason."""
+
+    should_retrieve: bool
+    reason: str
+
+
+def decide_need_retrieval(
+    query: str | None, task_intent: str | None = None
+) -> NeedRetrievalDecision:
+    """Skip retrieval for trivial tasks with no retrieval signal.
+
+    A query made only of filler / greetings / pronouns (or empty) has no
+    concrete target, so retrieving (and force-including project constraints)
+    only adds noise. Any entity-like token or content word keeps retrieval on.
+    Conservative by design: this is only consulted under the ``full`` planner
+    mode, never on the default path.
+    """
+    if _signal_tokens(query, task_intent):
+        return NeedRetrievalDecision(True, "has_retrieval_signal")
+    return NeedRetrievalDecision(False, "no_retrieval_signal")
+
+
+@dataclass(frozen=True)
+class QueryRewrite:
+    """A query expanded with the component words of its structural entities."""
+
+    text: str
+    added_terms: tuple[str, ...]
+    reason: str
+
+
+def rewrite_query(query: str | None, task_intent: str | None = None) -> QueryRewrite:
+    """Append component words of structural entity hints to the query.
+
+    The lexical tokenizer keeps ``project.runtime`` as a single token, so a
+    dotted-key query never matches prose that spells the words out. Expanding
+    the query with the split components (``project``, ``runtime``) lets such
+    memories match without changing the original tokens. Deterministic, bounded
+    by ``_MAX_HINTS`` hints, and a no-op when the query has no structural terms.
+    """
+    base = (query or "").strip()
+    plan = plan_query(query, task_intent)
+    have = {tok for tok in re.split(r"\s+", base.lower()) if tok}
+    added: list[str] = []
+    seen: set[str] = set()
+    for hint in plan.hints:
+        for part in _SPLIT_RE.split(hint):
+            part = part.strip().lower()
+            if len(part) < _MIN_LEN or part in have or part in seen:
+                continue
+            seen.add(part)
+            added.append(part)
+    if not added:
+        return QueryRewrite(text=base, added_terms=(), reason="no_rewrite")
+    return QueryRewrite(
+        text=(base + " " + " ".join(added)).strip(),
+        added_terms=tuple(added),
+        reason="expanded",
+    )
+
+
+__all__ = [
+    "QueryPlan",
+    "plan_query",
+    "hint_boost",
+    "NeedRetrievalDecision",
+    "decide_need_retrieval",
+    "QueryRewrite",
+    "rewrite_query",
+]
