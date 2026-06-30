@@ -80,3 +80,30 @@ Generated reports are not source of truth. If results look stale, rerun the benc
 - Redis/Celery, live PostgreSQL integration tests, and real LLM providers are not required.
 - Strategy comparisons use isolated seeded workspaces so one strategy's side effects do not pollute another.
 - Wall-clock latency values are observational; acceptance checks focus on semantic metrics.
+
+## Real-LLM Q&A bench (opt-in)
+
+The deterministic benchmark above is reproducible and runs without a network. To
+validate real-world effectiveness — does MemTrace-managed context produce better
+*real LLM answers*? — there is an opt-in question-answering bench. For each
+scenario it seeds memory through the real `MemoryRuntime`, retrieves context twice
+(no-memory `baseline_0` vs state-aware + gated `variant_2`), and asks a real LLM
+the same question with each context, then checks whether the gated-memory answer
+is correct and whether it improves on the no-memory answer.
+
+It is env-gated and skips cleanly with no endpoint configured (no default-CI /
+benchmark / reproducibility impact). Against a local OpenAI-compatible proxy:
+
+```bash
+MEMTRACE_LLM_API_KEY=sk-local \
+MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 \
+MEMTRACE_LLM_MODEL=gpt-5-mini \
+uv run python -m app.benchmark.qa_bench --output-dir reports
+```
+
+Example contrast (project-preference scenario): with the gated context
+`"This project uses Bun."` the model answers `bun test`; with no memory it
+answers `I do not have that information.` Scenarios cover project preference,
+failed-branch avoidance, stale-endpoint exclusion, and multi-fact recall.
+`app/benchmark/llm_bench.py` remains the separate opt-in real-LLM *extraction*
+bench.

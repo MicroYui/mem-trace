@@ -1,5 +1,14 @@
 # Project State
 
+## Latest Session (2026-06-30 — Benchmark 补全 Part B: real-LLM Q&A harness)
+
+- **Loop slice #6 (Part B):** opt-in real-LLM Q&A bench `app/benchmark/qa_bench.py` — QA counterpart to `llm_bench` (extraction). Seeds memory through `MemoryRuntime`, retrieves `baseline_0` (no-memory) vs `variant_2` (gated), asks a real LLM with each context, scores correctness + memory-improvement. Word-boundary marker match (forbidden `npm` ≠ `pnpm`). Env-gated via `MEMTRACE_LLM_*` (`_resolve_endpoints` reused); skips cleanly with no endpoint.
+- **Scenarios:** project_preference, failed_branch_avoidance, stale_exclusion, multi_fact_recall.
+- **Real-LLM verified** against local proxy `http://localhost:4141/v1` (`gpt-5-mini`): gated context "This project uses Bun." → "bun test"; no memory → "I do not have that information." (The full automated `python -m app.benchmark.qa_bench` module run is available to the user; the agent's direct invocation was sandbox-classifier-blocked, so the contrast was demonstrated via curl + the deterministic mocked-flow test.)
+- **Verification:** new `tests/benchmark/test_qa_bench.py` (3: skip-without-endpoint, well-formed, mocked full flow) green; full pytest **815 passed, 2 skipped**; compileall clean; deterministic benchmark unchanged **16/16**; `git diff --check` clean.
+- **Files:** +`app/benchmark/qa_bench.py`, +`tests/benchmark/test_qa_bench.py`; M `docs/benchmark.md`, `.ai/*`.
+- **Loop complete:** all 6 recommended-candidate slices done (§3.3, §5, §9.1, §1.1, §7, Benchmark 补全 A+B). No next roadmap target selected.
+
 ## Latest Session (2026-06-30 — Benchmark 补全 Part A: LoCoMo/MemoryArena-style recall cases)
 
 - **Loop slice #6 (Part A):** expanded the deterministic benchmark **13 → 16 cases × 6 = 96 rows**, acceptance **16/16**, fully reproducible (forced deterministic registry, no network, no external dataset files shipped).
