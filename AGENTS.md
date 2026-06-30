@@ -18,4 +18,6 @@ Before coding, also read `.ai/REQUIREMENTS.md` and confirm the current task is c
 
 After meaningful work, update `.ai/PROJECT_STATE.md` with current state, changed files, and next recommended action. When you complete a `docs/design/ROADMAP.md` item or discover new future work, update `docs/design/ROADMAP.md` too.
 
+Git workflow: commits should land on `main`. If you commit on a side branch (e.g. after branching off `main` to do the work), then once the commit is made, integrate it back onto `main` (fast-forward / rebase) and delete the side branch, so no stray branches remain. Do not push unless the user asks.
+
 Keep AGENTS.md concise and stable. Do not put transient task state, task checklists, or session notes here; use `.ai/PROJECT_STATE.md`, `.ai/OPEN_QUESTIONS.md`, or task-specific notes instead.
