@@ -44,10 +44,12 @@ telemetry = [
     "opentelemetry-exporter-otlp>=1.25",
 ]
 search = [
-    "elasticsearch>=8.0",
+    # Cap below 9: the elasticsearch 9.x client refuses an 8.x server (product/
+    # version check), and docker-compose.full.yml ships Elasticsearch 8.x.
+    "elasticsearch>=8.0,<9",
 ]
 graph = [
-    "neo4j>=5.0",
+    "neo4j>=5.0,<7",
 ]
 jwt = [
     "PyJWT>=2.8",
