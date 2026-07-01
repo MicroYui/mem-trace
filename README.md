@@ -73,6 +73,8 @@ flowchart LR
 5. **Pack & compact.** The packer assembles bounded context, retaining protected constraints under budget pressure.
 6. **Replay everything.** Every retrieval is reconstructable from access/gate logs and a policy snapshot that distinguishes data drift from policy drift.
 
+> 📐 The diagram above is the hot path. For the **complete system architecture** — every component across all planes (runtime, providers, governance, async, observability/telemetry, storage, benchmark, integrations), including the default-off ones and the flag that enables each — see [docs/architecture-diagram.md](docs/architecture-diagram.md).
+
 ## ✨ What's implemented today
 
 - 🧱 **Core runtime** — `MemoryRuntime` with runs, steps, events, state tree, memory writer/resolver, retrieval controller, admission gate, context packer, profiler, and a full `/v1` FastAPI surface.
