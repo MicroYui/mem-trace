@@ -86,8 +86,51 @@ async def check_neo4j():
     return "pass", f"Neo4j returned distance-weighted neighbors ({related})"
 
 
+async def check_pipeline_through_controller():
+    """Prove the FULL retrieval pipeline routes through Elasticsearch when the flag
+    is set — not just the isolated backend class. Seeds memories in-process, builds
+    the real RetrievalController with the backend enabled, and confirms a BM25 score
+    reaches the candidates."""
+    try:
+        from elasticsearch import Elasticsearch  # type: ignore
+    except ModuleNotFoundError:
+        return "skip", "elasticsearch package not installed"
+    try:
+        if not Elasticsearch(ES_URL, request_timeout=5).ping():
+            return "skip", f"Elasticsearch not reachable at {ES_URL}"
+    except Exception as exc:  # noqa: BLE001
+        return "skip", f"Elasticsearch not reachable ({type(exc).__name__})"
+    os.environ["MEMTRACE_RETRIEVAL_HYBRID_BACKEND"] = "elasticsearch"
+    os.environ["MEMTRACE_ES_URL"] = ES_URL
+    os.environ["MEMTRACE_RETRIEVAL_USE_VECTOR"] = "false"
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.retrieval.controller import RetrievalController
+    from app.runtime.repository import InMemoryRepository
+    repo = InMemoryRepository()
+    for mem in (_mem("m_region", "the deploy region is us-west"),
+                _mem("m_cache", "the cache layer is redis"),
+                _mem("m_db", "the primary database is postgres")):
+        await repo.add_memory(mem)
+    controller = RetrievalController(repo)
+    backend = getattr(controller, "_hybrid_backend", None)
+    if backend is None or not backend.available:
+        return "fail", "controller did not construct an available ES hybrid backend from the flag"
+    cands = await controller._select_candidates(  # noqa: SLF001
+        workspace_id="smoke_ws", run_id="r", query="which cache layer do we use", top_k=5)
+    max_bm25 = max((c.bm25_score for c in cands), default=0.0)
+    name = getattr(controller, "_hybrid_backend_name", None)
+    if max_bm25 <= 0.0:
+        return "fail", f"controller retrieval produced no BM25 score (backend={name})"
+    return "pass", f"controller routed retrieval through ES (backend={name}, max bm25={max_bm25:.4f})"
+
+
 async def main() -> int:
-    results = {"elasticsearch": await check_elasticsearch(), "neo4j": await check_neo4j()}
+    results = {
+        "elasticsearch": await check_elasticsearch(),
+        "neo4j": await check_neo4j(),
+        "pipeline(controller->ES)": await check_pipeline_through_controller(),
+    }
     icon = {"pass": "✅", "skip": "⏭️ ", "warn": "⚠️ ", "fail": "❌"}
     for name, (status, detail) in results.items():
         print(f"  {icon[status]} {name}: {detail}")
