@@ -1,0 +1,81 @@
+{
+  "scale": {
+    "records": 3000,
+    "probes": 3000,
+    "by_strategy": {
+      "baseline_0": {
+        "recall_rate": 0.0,
+        "recall_hits": 0,
+        "recall_total": 3000,
+        "distractor_leakage_rate": 0.0,
+        "distractor_leaks": 0,
+        "distractor_total": 2550
+      },
+      "long_context": {
+        "recall_rate": 1.0,
+        "recall_hits": 3000,
+        "recall_total": 3000,
+        "distractor_leakage_rate": 0.823529,
+        "distractor_leaks": 2100,
+        "distractor_total": 2550
+      },
+      "baseline_1": {
+        "recall_rate": 1.0,
+        "recall_hits": 3000,
+        "recall_total": 3000,
+        "distractor_leakage_rate": 0.823529,
+        "distractor_leaks": 2100,
+        "distractor_total": 2550
+      },
+      "variant_1": {
+        "recall_rate": 1.0,
+        "recall_hits": 3000,
+        "recall_total": 3000,
+        "distractor_leakage_rate": 0.823529,
+        "distractor_leaks": 2100,
+        "distractor_total": 2550
+      },
+      "variant_2": {
+        "recall_rate": 1.0,
+        "recall_hits": 3000,
+        "recall_total": 3000,
+        "distractor_leakage_rate": 0.0,
+        "distractor_leaks": 0,
+        "distractor_total": 2550
+      },
+      "variant_3": {
+        "recall_rate": 1.0,
+        "recall_hits": 3000,
+        "recall_total": 3000,
+        "distractor_leakage_rate": 0.0,
+        "distractor_leaks": 0,
+        "distractor_total": 2550
+      }
+    },
+    "delta": {
+      "recall_rate_gain": 0.0,
+      "distractor_leakage_reduction": 0.823529
+    },
+    "leakage_by_category": {
+      "dead_branch": {
+        "baseline_1": 1.0,
+        "variant_2": 0.0
+      },
+      "superseded": {
+        "baseline_1": 0.0,
+        "variant_2": 0.0
+      }
+    }
+  },
+  "correctness_16_case": {
+    "acceptance_passed": true,
+    "checks_passed": 16,
+    "checks_total": 16
+  },
+  "real_llm_qa": {
+    "model": "gpt-5.4",
+    "passed": true,
+    "memory_improvement_count": 4,
+    "scenario_count": 4
+  }
+}

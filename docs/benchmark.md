@@ -160,3 +160,31 @@ branch. `recall_markers` are substrings that must appear in positive context;
 schema (one record per conversation, one probe per QA pair) to evaluate at scale.
 This bench is standalone — it does not affect the deterministic benchmark or its
 16/16 acceptance.
+
+### Scale run (thousands of records) + charts
+
+`app/benchmark/generate_dataset.py` deterministically synthesizes thousands of
+records in this schema — built around the real `baseline_1`-vs-`variant_2`
+differentiator (dead-branch distractors that plain vector admits and the gate
+rejects), plus superseded distractors (both lifecycle-filter → honesty control)
+and clean recall controls. The record `id` encodes its category (`failed_00012`)
+so leakage can be broken down by distractor type. `dataset_bench` accepts
+`--strategies all` to run the full 6-strategy ablation ladder, and
+`app/benchmark/plot_benchmarks.py` renders committed PNG charts under
+`docs/assets/` (matplotlib is a chart-only dependency, run with an ephemeral
+`uv run --with matplotlib`, not added to the project):
+
+```bash
+uv run python -m app.benchmark.generate_dataset --count 3000 --out /tmp/scale.jsonl
+uv run python -m app.benchmark.dataset_bench --dataset /tmp/scale.jsonl --strategies all --output-dir reports
+uv run --with matplotlib python -m app.benchmark.plot_benchmarks   # writes docs/assets/*.png + benchmark_summary.json
+```
+
+On the committed 3,000-record run (see the README benchmark snapshot): recall is
+**100%** for every memory-bearing strategy, while distractor leakage is **82.4%**
+for plain vector / long-context / branch-gate-ablated `variant_1` and **0%** for
+the state-aware gate (`variant_2` / `variant_3`). Broken down by category: plain
+vector leaks **100%** of dead-branch distractors and **0%** of superseded ones
+(the lifecycle filter drops outdated facts under both strategies). The run is
+deterministic synthetic data — it stresses the isolation *mechanism* at scale;
+the real-LLM Q&A bench above validates the end effect on an actual model.

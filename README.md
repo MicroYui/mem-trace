@@ -111,23 +111,62 @@ uv run --package memtrace-sdk python examples/simple_agent/main.py  # Python SDK
 
 ## 📊 Benchmark snapshot
 
-MemTrace ships a **deterministic, no-network benchmark** (16 cases × 6 strategies) plus an opt-in real-LLM Q&A bench and a dataset-driven recall bench — all reproducible.
+MemTrace is evaluated in three complementary layers — a **scale run over thousands of records**, a **deterministic correctness suite**, and a **real-LLM Q&A** check — all reproducible.
+
+### 1. Scale run — 3,000 records × 6 strategies
+
+A deterministic, no-network run over **3,000** synthetic LoCoMo/MemoryArena-style records (one probe each). Each record seeds a correct fact plus a plausible *distractor* — a wrong answer left behind by a **dead execution branch** (failed / rolled-back) or an **outdated** (superseded) value — and we measure, per strategy, how often the gold fact is recalled and how often a distractor leaks into context.
+
+<p align="center">
+  <img src="docs/assets/benchmark_contamination_by_strategy.png" width="640" alt="Contamination by retrieval strategy over 3,000 records">
+</p>
+
+Only the **state-aware gate** (`variant_2` / `variant_3`) eliminates dead-branch contamination. Plain vector (`baseline_1`), long-context dump, and the branch-gate-ablated `variant_1` all leak the same **82%** — and crucially, gating costs **nothing** in recall:
+
+<p align="center">
+  <img src="docs/assets/benchmark_recall_vs_contamination.png" width="460" alt="Same recall, contamination eliminated">
+  <img src="docs/assets/benchmark_leakage_by_category.png" width="460" alt="Leakage by distractor category">
+</p>
+
+| Strategy | Recall of correct fact | Distractor leakage |
+| --- | --- | --- |
+| `baseline_1` — plain vector / lexical | **100%** | **82.4%** |
+| `variant_1` — state-aware, branch gate off (ablation) | 100% | 82.4% |
+| `variant_2` — **MemTrace** (state-aware + gate) | **100%** | **0%** |
+
+<sub>The 82.4% (not 100%) is the honest breakdown on the right: plain vector leaks **100%** of *dead-branch* distractors but **0%** of *superseded* ones — outdated facts are dropped by the lifecycle filter under **both** strategies. Recall is high for both by construction (the correct fact is always relevant and fits budget); the axis this run isolates is **contamination**. Data is synthetic-but-deterministic — it stress-tests the isolation *mechanism* at scale, not a model's answer quality (that's layer 3). Reproduce:</sub>
+
+```bash
+uv run python -m app.benchmark.generate_dataset --count 3000 --out /tmp/scale.jsonl
+uv run python -m app.benchmark.dataset_bench --dataset /tmp/scale.jsonl --strategies all --output-dir reports
+uv run --with matplotlib python -m app.benchmark.plot_benchmarks   # regenerates docs/assets/*.png
+```
+
+### 2. Deterministic correctness — 16 cases × 6 strategies
 
 ```bash
 uv run python -m app.benchmark.runner --output-dir reports   # acceptance: passed=true (16/16)
 ./scripts/reproduce.sh                                        # full reproduce bundle
 ```
 
-The headline contrast, on identical seeded memory:
+The six strategies (`baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`) quantify each mechanism's contribution across failed-branch isolation, tool safety, compaction, safe negative evidence, sanitized destructive failures, reflection-lite retention, retained-negative metadata, and LoCoMo/MemoryArena-style long-horizon / temporal-update / multi-hop recall. Current acceptance: **16/16**.
 
-| Strategy | Failed-branch contamination | Distractor leakage* | Result |
-| --- | --- | --- | --- |
-| `baseline_1` — plain vector / lexical | ❌ contaminated | `0.5` | reuses failed `npm test` |
-| `variant_2` — **MemTrace** (state-aware + gate) | ✅ clean | `0.0` | chooses `bun test` |
+### 3. Real-LLM Q&A validation
 
-<sub>*Distractor-leakage rate from the dataset-driven bench (`app/benchmark/dataset_bench.py`) on the built-in sample — MemTrace gates a failed-branch distractor that plain vector leaks. See the [benchmark guide](docs/benchmark.md).</sub>
+Layers 1–2 are deterministic and marker-scored. The opt-in `app/benchmark/qa_bench.py` closes the loop against an **actual model** — it asks the same question with *no memory* vs *gated MemTrace context* and checks the answer. Verified on a local OpenAI-compatible proxy (`gpt-5.4`), **4/4** scenarios were answered correctly only with memory:
 
-The six strategies (`baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`) quantify each mechanism's contribution across failed-branch isolation, tool safety, compaction, safe negative evidence, sanitized destructive failures, reflection-lite retention, retained-negative metadata, and LoCoMo/MemoryArena-style long-horizon / temporal-update / multi-hop recall.
+| Scenario | With MemTrace context | Without memory |
+| --- | --- | --- |
+| project preference | `bun test` | *"I do not have that information."* |
+| failed-branch avoidance | `bun test` (not `npm`) | *"I do not have that information."* |
+| stale exclusion | `/api/v2/users` (not `v1`) | *"I do not have that information."* |
+| multi-fact recall | `Bun` · `pnpm` · `Postgres` | *"I do not have that information."* |
+
+```bash
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE_LLM_MODEL=gpt-5.4 \
+  uv run python -m app.benchmark.qa_bench --output-dir reports
+```
+
 
 ## 🧭 Quickstart paths
 

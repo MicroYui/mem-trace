@@ -50,6 +50,16 @@ from app.runtime.repository import InMemoryRepository
 PLAIN_VECTOR = RetrievalStrategy.baseline_1
 MEMTRACE = RetrievalStrategy.variant_2
 
+# Full ablation ladder for the scale report (opt-in via strategies=ALL_STRATEGIES).
+ALL_STRATEGIES = [
+    RetrievalStrategy.baseline_0,
+    RetrievalStrategy.long_context,
+    RetrievalStrategy.baseline_1,
+    RetrievalStrategy.variant_1,
+    RetrievalStrategy.variant_2,
+    RetrievalStrategy.variant_3,
+]
+
 _SAMPLE_PATH = Path(__file__).parent / "data" / "sample_dataset.jsonl"
 
 
@@ -149,12 +159,17 @@ async def run_dataset_bench(
     dataset_path: str | os.PathLike[str] | None = None,
     *,
     output_dir: str | None = "reports",
+    strategies: list[RetrievalStrategy] | None = None,
 ) -> dict[str, Any]:
-    """Run every probe under both strategies and aggregate recall / leakage."""
+    """Run every probe under each strategy and aggregate recall / leakage.
+
+    Defaults to the plain-vector vs MemTrace contrast; pass ``strategies`` (e.g.
+    ``ALL_STRATEGIES``) to evaluate the full ablation ladder over the same seeds.
+    """
     resolved = dataset_path or os.environ.get("MEMTRACE_DATASET_PATH") or None
     records = load_dataset(resolved)
 
-    strategies = [PLAIN_VECTOR, MEMTRACE]
+    strategies = list(strategies) if strategies else [PLAIN_VECTOR, MEMTRACE]
     agg: dict[str, dict[str, int]] = {
         s.value: {"recall_total": 0, "recall_hits": 0, "distractor_total": 0, "distractor_leaks": 0}
         for s in strategies
@@ -192,18 +207,22 @@ async def run_dataset_bench(
         }
         for name, b in agg.items()
     }
-    plain = by_strategy[PLAIN_VECTOR.value]
-    memtrace = by_strategy[MEMTRACE.value]
+    plain = by_strategy.get(PLAIN_VECTOR.value)
+    memtrace = by_strategy.get(MEMTRACE.value)
+    delta: dict[str, Any] = {}
+    if plain is not None and memtrace is not None:
+        # Positive recall_rate_gain / leakage_reduction => MemTrace beats plain vector.
+        delta = {
+            "recall_rate_gain": round(memtrace["recall_rate"] - plain["recall_rate"], 6),
+            "distractor_leakage_reduction": round(plain["distractor_leakage_rate"] - memtrace["distractor_leakage_rate"], 6),
+        }
     payload: dict[str, Any] = {
         "dataset": str(resolved) if resolved else "builtin_sample",
         "record_count": len(records),
         "probe_count": len(probe_results),
+        "strategies": [s.value for s in strategies],
         "by_strategy": by_strategy,
-        "delta": {
-            # Positive recall_rate_gain / leakage_reduction => MemTrace beats plain vector.
-            "recall_rate_gain": round(memtrace["recall_rate"] - plain["recall_rate"], 6),
-            "distractor_leakage_reduction": round(plain["distractor_leakage_rate"] - memtrace["distractor_leakage_rate"], 6),
-        },
+        "delta": delta,
         "probes": probe_results,
     }
     if output_dir:
@@ -217,14 +236,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Dataset-driven MemTrace vs plain-vector recall bench")
     parser.add_argument("--dataset", help="Path to a LoCoMo/MemoryArena-style JSONL file (default: built-in sample)")
     parser.add_argument("--output-dir", default="reports")
+    parser.add_argument(
+        "--strategies",
+        choices=["default", "all"],
+        default="default",
+        help="'default' = plain-vector vs MemTrace; 'all' = full 6-strategy ablation ladder",
+    )
     args = parser.parse_args()
-    payload = asyncio.run(run_dataset_bench(args.dataset, output_dir=args.output_dir))
-    plain = payload["by_strategy"][PLAIN_VECTOR.value]
-    memtrace = payload["by_strategy"][MEMTRACE.value]
+    strategies = ALL_STRATEGIES if args.strategies == "all" else None
+    payload = asyncio.run(run_dataset_bench(args.dataset, output_dir=args.output_dir, strategies=strategies))
     print(f"dataset: {payload['dataset']}  records={payload['record_count']}  probes={payload['probe_count']}")
-    print(f"  plain-vector (baseline_1): recall={plain['recall_rate']}  distractor_leakage={plain['distractor_leakage_rate']}")
-    print(f"  MemTrace     (variant_2) : recall={memtrace['recall_rate']}  distractor_leakage={memtrace['distractor_leakage_rate']}")
-    print(f"  delta: recall_gain={payload['delta']['recall_rate_gain']}  leakage_reduction={payload['delta']['distractor_leakage_reduction']}")
+    for name, b in payload["by_strategy"].items():
+        print(f"  {name:>12}: recall={b['recall_rate']}  distractor_leakage={b['distractor_leakage_rate']}")
+    if payload["delta"]:
+        print(f"  delta (MemTrace vs plain): recall_gain={payload['delta']['recall_rate_gain']}  leakage_reduction={payload['delta']['distractor_leakage_reduction']}")
     return 0
 
 

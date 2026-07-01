@@ -1,5 +1,21 @@
 # Project State
 
+## Latest Session (2026-07-01 — scale benchmark over 3,000 records + committed chart visuals)
+
+Follow-up to the multi-hop/hardening session: the user asked for (a) intuitive **charts** in the README and (b) an actual **scale benchmark** ("几千条数据"), correctly noting the prior run was only the 16-case suite + demos, not thousands of records. Chosen approach: **deterministic synthetic 3–5k records + a real-LLM small sample**, charts as **committed PNGs**.
+
+- **New `apps/api/app/benchmark/generate_dataset.py`** — deterministic (index-driven, no RNG) generator of LoCoMo/MemoryArena-schema records built around the REAL `baseline_1`-vs-`variant_2` differentiator: dead-branch distractors (failed/rolled_back/multi — plain vector admits, the gate rejects), superseded distractors (both lifecycle-filter → honesty control), and clean recall controls. Substring-safe markers (dataset_bench scores by substring), category encoded in record id. Test `tests/benchmark/test_generate_dataset.py` (6) locks determinism/schema/substring-safety/proportions.
+- **Extended `dataset_bench.py`** with `strategies=` / `--strategies all` (backward-compatible; default stays the 2-strategy contrast so existing tests pass) to run the full 6-strategy ablation ladder; payload gained `strategies` + guarded `delta`.
+- **New `apps/api/app/benchmark/plot_benchmarks.py`** — renders 3 committed PNG charts + `benchmark_summary.json` under `docs/assets/` from the report JSONs. matplotlib is a **chart-only** dependency run ephemerally via `uv run --with matplotlib` (NOT added to the project deps); `benchmark/__init__.py` stays inert so collection never imports it.
+- **Ran the real scale benchmark — 3,000 records × 6 strategies (~19s, 18k retrievals, deterministic):** recall **100%** for every memory-bearing strategy; distractor leakage **82.4%** for `long_context`/`baseline_1`/`variant_1` and **0%** for `variant_2`/`variant_3`. Category breakdown: dead-branch distractors **100%→0%** (plain→MemTrace), superseded **0%→0%** (both drop outdated). Recall is high for both by construction; the axis isolated is contamination.
+- **Real-LLM sample:** `qa_bench` against the local proxy (`gpt-5.4`) → **4/4** scenarios answered correctly only with gated memory ("bun test", "/api/v2/users", "Bun·pnpm·Postgres"), "I do not have that information." without. (Proxy model routing note below.)
+- **16-case correctness:** unchanged at **16/16**.
+- **README:** rewrote `## 📊 Benchmark snapshot` into three honest layers (scale run + 3 embedded charts, 16-case correctness, real-LLM Q&A table) with explicit methodology (deterministic synthetic stresses the *mechanism* at scale; qa_bench validates a real model). `docs/benchmark.md` gained a "Scale run + charts" subsection.
+- **Committed artifacts:** `docs/assets/{benchmark_contamination_by_strategy,benchmark_recall_vs_contamination,benchmark_leakage_by_category}.png` + `benchmark_summary.json` (hygiene allows PNGs outside `reports/`).
+- **Verification (all green):** compileall clean; full app+SDK pytest **986 passed, 3 skipped**; `scripts/reproduce.sh` acceptance **16/16**; release hygiene passed (committed PNGs OK); `git diff --check` clean.
+- **Proxy model routing (env note):** local proxy `:4141` `/chat/completions` accepts `gpt-5.4` (and gemini-* return 200 but empty); it **rejects** `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.3-codex` ("not accessible via /chat/completions") and `claude-*` ("model not supported"). Use `gpt-5.4` for qa_bench here. Sandbox blocks raw `curl` POSTs to the proxy; probe via `uv run python` (the app's httpx path) instead.
+- **Next recommended action:** none selected. Possible follow-ups: point `dataset_bench` at a real converted LoCoMo/MemoryArena split via `--dataset`; add charts for the other default-off knobs; or a larger real-LLM sweep (non-reproducible, opt-in).
+
 ## Latest Session (2026-07-01 — harden default-off features + multi-hop retrieval demo)
 
 Two-part request ("完整实现1和2"): (1) harden the landed default-off §4/§5/§3.4 features with deeper **enabled-state** tests; (2) polish one default-off capability into an end-to-end deterministic demo + docs. Both delivered; everything stays default-off and deterministic, benchmark **16/16** unchanged.
