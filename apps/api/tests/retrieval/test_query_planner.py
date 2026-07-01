@@ -288,3 +288,81 @@ def test_invalid_query_planner_setting_is_rejected(monkeypatch):
     get_settings.cache_clear()
     with pytest.raises(ValidationError, match="retrieval_query_planner must be one of"):
         get_settings()
+
+
+# ------------------- full mode: enabled-state regressions ------------------- #
+
+
+def _project_mem(ws: str, memory_id: str, content: str) -> MemoryItem:
+    return MemoryItem(
+        memory_id=memory_id,
+        workspace_id=ws,
+        memory_type=MemoryType.project,
+        content=content,
+        summary=content[:60],
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_mode_trivial_query_skips_even_project_constraint(monkeypatch):
+    # A no-signal greeting query short-circuits at the need-retrieval decision
+    # (controller ~808) and returns BEFORE memories are loaded, so the
+    # project-constraint force-include (~899) is never reached. Even a project
+    # memory — which the force-include would otherwise always surface — stays
+    # out, proving the skip precedes memory loading rather than filtering after.
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_QUERY_PLANNER", "full")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_full_project_skip"
+    await repo.add_memory(_project_mem(ws, "m_proj", "always use runtime.flag = bun"))
+    controller = RetrievalController(repo)
+    assert controller._query_planner == "full"  # noqa: SLF001
+    cands = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="ok thanks continue", top_k=10
+    )
+    assert cands == []
+
+
+@pytest.mark.asyncio
+async def test_full_mode_task_intent_keeps_and_rewrites(monkeypatch):
+    # A trivial surface query ("go") still retrieves when the task_intent carries
+    # a dotted entity: decide_need_retrieval keeps the pass on via the intent
+    # signal, and rewrite_query expands "service.gateway" into its component
+    # words so a prose memory spelling them out is surfaced. Without the rewrite
+    # the plain query "go" shares no token with the prose, so a non-empty result
+    # containing m_prose proves both the need decision and the rewrite fired.
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_QUERY_PLANNER", "full")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_full_intent"
+    await repo.add_memory(_mem(ws, "m_prose", "the service gateway is down"))
+    controller = RetrievalController(repo)
+    cands = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws,
+        run_id="r",
+        query="go",
+        top_k=10,
+        task_intent="debug service.gateway",
+    )
+    assert cands  # retrieval RAN — the intent signal kept need-retrieval on
+    assert "m_prose" in {c.memory.memory_id for c in cands}
+
+
+@pytest.mark.asyncio
+async def test_full_mode_rewrite_splits_path(monkeypatch):
+    # A path-bearing query is rewritten into its component words. The tokenizer
+    # keeps "app.py" whole and splits on "/", so the rewrite must contribute the
+    # bare "app" component for the prose memory (which only says "app") to match.
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_QUERY_PLANNER", "full")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_full_path"
+    await repo.add_memory(_mem(ws, "m_prose", "edit the app module"))
+    controller = RetrievalController(repo)
+    cands = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="open src/app.py", top_k=10
+    )
+    assert "m_prose" in {c.memory.memory_id for c in cands}

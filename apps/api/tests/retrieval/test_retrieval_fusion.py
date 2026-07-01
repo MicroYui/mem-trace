@@ -163,3 +163,111 @@ async def test_rrf_request_falls_back_to_linear_policy_when_vector_disabled(monk
     assert all(candidate.vector_score == 0.0 for candidate in trace.candidates)
     assert trace.candidates[0].relevance_score == trace.candidates[0].lexical_score
     assert "fusion" not in trace.access_record.policy_snapshot["retrieval"]
+
+
+@pytest.mark.asyncio
+async def test_rrf_three_signal_end_to_end(monkeypatch):
+    """All three live retrieval signals fuse through the real controller path.
+
+    Enables RRF fusion with the in-memory BM25 hybrid backend and the
+    deterministic ``stable_embedding`` vector signal, then seeds a corpus crafted
+    so lexical overlap, vector cosine, and Okapi BM25 each rank a *different*
+    memory first:
+
+    - ``m_lex`` covers all three query tokens (best lexical coverage) but is
+      padded with six unique tokens that dilute its vector cosine.
+    - ``m_vec`` is just the two common tokens, so its concentrated vector wins.
+    - ``m_bm`` repeats the rare ``gamma`` token; ``gamma`` is infrequent across
+      the corpus, so its IDF makes ``m_bm`` win BM25 while it stays low on
+      lexical coverage and only mid on vector.
+
+    Asserts (1) the BM25-only winner still places among the candidates, (2) the
+    final fused ordering equals an independent RRF sum over the three ranked
+    lists, and (3) dropping the BM25 list changes that ordering — proving the
+    third list genuinely contributes to the fused order rather than riding along.
+    """
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_FUSION", "rrf")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_HYBRID_BACKEND", "inmemory")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "true")
+    get_settings.cache_clear()
+
+    repo = InMemoryRepository()
+    ws = "ws_rrf_three_signal"
+    contents = {
+        "m_lex": "alpha beta gamma e1 e2 e3 e4 e5 e6",
+        "m_vec": "alpha beta",
+        "m_bm": "gamma gamma",
+        # Fillers keep the common tokens frequent (low IDF) so gamma stays rare.
+        "m_f1": "alpha p1 p2 p3 p4 p5 p6 p7 p8 p9",
+        "m_f2": "beta q1 q2 q3 q4 q5 q6 q7 q8 q9",
+        "m_f3": "alpha beta r1 r2 r3 r4 r5 r6 r7",
+    }
+    for memory_id, content in contents.items():
+        await repo.add_memory(_mem(ws, memory_id, content))
+
+    controller = RetrievalController(repo)
+    # All three signals must actually be live for this to exercise multi-path RRF.
+    assert controller._fusion == "rrf"  # noqa: SLF001
+    assert controller._use_vector is True  # noqa: SLF001
+    assert controller._hybrid_backend is not None  # noqa: SLF001
+    assert controller._hybrid_backend.available  # noqa: SLF001
+
+    candidates = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="alpha beta gamma", top_k=10
+    )
+    by_id = {c.memory.memory_id: c for c in candidates}
+    # Every seeded memory shares a query token, so all are positive candidates;
+    # the fused ranked lists therefore cover exactly the seeded corpus.
+    assert set(by_id) == set(contents)
+
+    def _ranked(attr: str) -> list[str]:
+        present = [
+            (c.memory.memory_id, getattr(c, attr)) for c in candidates if getattr(c, attr) > 0.0
+        ]
+        present.sort(key=lambda pair: (-pair[1], pair[0]))
+        return [memory_id for memory_id, _ in present]
+
+    lexical_ranked = _ranked("lexical_score")
+    vector_ranked = _ranked("vector_score")
+    bm25_ranked = _ranked("bm25_score")
+
+    # Each signal ranks a *different* memory first (three distinct winners).
+    assert lexical_ranked[0] == "m_lex"
+    assert vector_ranked[0] == "m_vec"
+    assert bm25_ranked[0] == "m_bm"
+    assert len({lexical_ranked[0], vector_ranked[0], bm25_ranked[0]}) == 3
+
+    # The BM25-only winner is low on lexical and only mid on vector, yet it still
+    # places among the candidates because the third (BM25) list feeds the fusion.
+    assert "m_bm" in by_id
+    assert lexical_ranked[0] != "m_bm"
+    assert vector_ranked[0] != "m_bm"
+
+    k = controller._rrf_k  # noqa: SLF001
+
+    def _rrf(ranked_lists: list[list[str]]) -> dict[str, float]:
+        scores: dict[str, float] = {}
+        for ranked in ranked_lists:
+            for rank, memory_id in enumerate(ranked):
+                scores[memory_id] = scores.get(memory_id, 0.0) + 1.0 / (k + rank + 1)
+        return scores
+
+    # Final ordering is consistent with an RRF sum over the three ranked lists,
+    # and each fused relevance score equals that reciprocal-rank sum.
+    fused = _rrf([lexical_ranked, vector_ranked, bm25_ranked])
+    expected_order = sorted(fused, key=lambda memory_id: (-fused[memory_id], memory_id))
+    actual_order = [c.memory.memory_id for c in candidates]
+    assert actual_order == expected_order
+    for candidate in candidates:
+        assert candidate.relevance_score == pytest.approx(
+            round(fused[candidate.memory.memory_id], 6)
+        )
+
+    # Removing the BM25 list changes the fused order: with all three signals
+    # m_lex leads, but on lexical+vector alone m_vec leads. This swap proves the
+    # BM25 ranked list actually shapes the fused order.
+    two_signal = _rrf([lexical_ranked, vector_ranked])
+    two_signal_order = sorted(two_signal, key=lambda memory_id: (-two_signal[memory_id], memory_id))
+    assert two_signal_order != expected_order
+    assert expected_order[0] == "m_lex"
+    assert two_signal_order[0] == "m_vec"

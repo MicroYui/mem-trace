@@ -122,3 +122,51 @@ async def test_plan_run_mage_enabled_marks_active_frontier(monkeypatch):
     # The active step is the work frontier; grow should mark it.
     assert not plan.is_empty()
     assert plan.grow
+
+
+# ------------------------- appended regressions -------------------------- #
+
+
+def test_compress_boundary_at_threshold():
+    # Read the ACTUAL default threshold from plan_mage's signature so the
+    # boundary is tested against the real contract, not a hardcoded copy.
+    import inspect
+
+    threshold = inspect.signature(plan_mage).parameters["compress_min_steps"].default
+    assert isinstance(threshold, int) and threshold >= 2
+
+    # EXACTLY `threshold` completed same-goal steps -> compress fires once.
+    at_threshold = [
+        _node(f"n{i}", goal="big task", path=f"{i:04d}", status=StateNodeStatus.completed)
+        for i in range(1, threshold + 1)
+    ]
+    plan = plan_mage(at_threshold, [])  # uses the actual default compress_min_steps
+    assert len(plan.compress) == 1
+    op = plan.compress[0]
+    assert op.op == "compress"
+    assert op.target_ids == tuple(f"n{i}" for i in range(1, threshold + 1))
+
+    # One below threshold (threshold - 1 nodes) -> Compress must NOT fire.
+    below = [
+        _node(f"b{i}", goal="big task", path=f"{i:04d}", status=StateNodeStatus.completed)
+        for i in range(1, threshold)
+    ]
+    plan_below = plan_mage(below, [])
+    assert plan_below.compress == ()
+
+
+def test_maintain_flags_dormant_memory_with_high_freshness():
+    # A completed-node memory that is decayed-by-status (dormant/archived) must
+    # be flagged for Maintain even when its freshness is maximal — the status
+    # branch of the stale predicate is independent of freshness.
+    node = _node("done", status=StateNodeStatus.completed)
+    dormant = _mem("m_dormant", node_id="done", freshness=1.0, status=MemoryStatus.dormant)
+    archived = _mem("m_archived", node_id="done", freshness=1.0, status=MemoryStatus.archived)
+    fresh_active = _mem("m_active", node_id="done", freshness=1.0, status=MemoryStatus.active)
+    plan = plan_mage([node], [dormant, archived, fresh_active])
+    assert len(plan.maintain) == 1
+    op = plan.maintain[0]
+    assert op.op == "maintain"
+    # Both decayed-status memories are flagged despite freshness 1.0; the fresh
+    # active memory is not. target_ids is sorted memory_id order.
+    assert op.target_ids == ("m_archived", "m_dormant")

@@ -1,5 +1,28 @@
 # Project State
 
+## Latest Session (2026-07-01 — harden default-off features + multi-hop retrieval demo)
+
+Two-part request ("完整实现1和2"): (1) harden the landed default-off §4/§5/§3.4 features with deeper **enabled-state** tests; (2) polish one default-off capability into an end-to-end deterministic demo + docs. Both delivered; everything stays default-off and deterministic, benchmark **16/16** unchanged.
+
+- **Item 1 — 20 enabled-state regression tests across 9 files** (all deterministic, no network/DB/LLM; each asserts the intended contract, not just current behavior):
+  - `test_multi_hop.py` (+2): `include_all`/long_context skips hops; multi-hop × inmemory-graph dedupe (m_b surfaces exactly once).
+  - `test_retrieval_fusion.py` (+1): three-signal (lexical+vector+BM25) RRF end-to-end through `_select_candidates`, with an independent RRF oracle and a BM25-drop check proving the third list contributes.
+  - `test_query_planner.py` (+3): `full`-mode trivial-query skip does NOT force-inject project constraints; task_intent-driven need/rewrite; path-split rewrite.
+  - `test_stale_warning.py` (+3): stale→outdated degrade stays off for baseline_1/variant_1; secret/destructive hard-reject precede the stale branch even with the flag on.
+  - `test_ranking_profiles.py` (+2): overlapping-keyword precedence by `_KEYWORDS` order; profile multiplier applies AFTER hybrid fusion (flips a tie deterministically).
+  - `test_graph.py` (+2): inmemory graph self-loop skip; graph expansion excludes non-retrievable (archived/superseded) neighbors (lifecycle-filter leak guard).
+  - `test_mage.py` (+2): Compress fires at exactly `compress_min_steps` (and not one below); Maintain flags dormant/archived memories independent of freshness.
+  - `test_active_path_summary.py` (+2): `keep_recent=0` folds all completed steps; the summarized progress block survives a tight budget that drops the full listing.
+  - `test_jwt_auth.py` (+3): enabled-state HS256 through `require_api_key` resolves the workspace claim; tampered-signature and expired tokens → **403**; missing credential → **401**.
+- **One flagged "product bug" adjudicated as NOT a bug:** a subagent proposed JWT invalid-token should be 401 (RFC 7235) and xfail'd two tests. But MemTrace's deliberate, **test-locked** contract is `missing→401 / supplied-but-invalid→403` (ADR-016/H3; `tests/api/test_auth.py:72-73`; static wrong-key path `deps.py:178` also 403; pre-existing `test_require_api_key_rejects_bad_jwt` already asserts 403). Rewrote the two tests to assert **403** (consistent) and removed the xfails — no product code changed.
+- **Item 2 — multi-hop iterative retrieval demo** (the most legible before/after; deterministic, no external service):
+  - `apps/api/app/demo/run_multi_hop_demo.py` seeds 3 episodic memories in one workspace and retrieves the same query (`Where is request routing configured?`) twice via the real controller `trace()` pipeline. hops=0 finds only the direct match → action `route without x-tenant header`; hops=1 follows the `service.gateway` cue to recover the linked `x-tenant` fact (hop=1 provenance) → action `route with x-tenant header`. Distractor never surfaces; hop is budget-bounded; `policy_snapshot.retrieval.multi_hop_hops` absent OFF / `1` ON.
+  - `apps/api/tests/demo/test_multi_hop_demo.py` (6) locks all markers. New `apps/api/tests/demo/__init__.py`.
+  - `docs/advanced-retrieval-multi-hop.md` (guide + demo); linked from README multi-hop row and `docs/concepts.md`. `scripts/reproduce.sh` emits `reports/multi_hop_demo_report.{md,json}` (additive, own process → acceptance untouched).
+- **Verification (all green):** `compileall` (app + python-sdk + examples) clean; full app+SDK `uv run --extra dev pytest -q` → **980 passed, 3 skipped**; `scripts/reproduce.sh` → **acceptance 16/16**; `scripts/check-release-hygiene.sh` passed; `git diff --check` clean. No default runtime/gate/retrieval/compaction/governance/benchmark semantics changed.
+- **Approach:** scoped via two background Workflows (a read-only subsystem map + demo-target pick, then 9 parallel test-authoring agents each writing/running one file and reporting any real bug without editing product code). The demo was authored + empirically iterated by hand.
+- **Next recommended action:** none selected — clean stopping point. Remaining ROADMAP unchecked items are documented risks/ops notes, not tasks; §8 stays out of scope. Candidate follow-ups: end-to-end demos/docs for the other deterministic default-off knobs (query-planner `full`, inmemory graph/BM25, MAGE), or enabled-state hardening for governance paths beyond JWT.
+
 ## Latest Session (2026-06-30 — loop "finish-all-deferred" Slice 10: closeout)
 
 - **Loop COMPLETE.** All 9 implementation slices of the "implement every deferred/candidate ROADMAP item, even default-off ones" `/loop` are done and committed on `main` (`2db595a` query-planner full → `e92b2d1` multi-hop → `3e58fe3` ES hybrid → `bba5e9b` Neo4j graph → `2408907` fusion/ranking/consistency → `a205e61` node_type/subgoal → `8bb16df` MAGE → `43b523c`+`64166c6` governance → `25871c5` IDE/Go-Rust), plus this docs-sync commit.

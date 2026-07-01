@@ -126,3 +126,63 @@ def test_policy_snapshot_omits_ranking_profile_when_off():
 
 def test_policy_snapshot_records_ranking_profile_when_enabled():
     assert _snap(ranking_profile="debug")["retrieval"]["ranking_profile"] == "debug"
+
+
+# ------------------- overlapping-keyword determinism ----------------- #
+
+
+def test_overlapping_keywords_pick_first_in_order():
+    # The tie-breaker when an intent matches several keyword sets is _KEYWORDS
+    # *insertion order*, not where the words sit in the string. Read the live
+    # order so the test tracks the module rather than a hard-coded assumption.
+    from app.retrieval.ranking_profiles import _KEYWORDS
+
+    order = list(_KEYWORDS)
+    assert order.index("debug") < order.index("implement")
+    # "implement a fix" carries an implement keyword ("implement") *and* a debug
+    # keyword ("fix"). Even though "implement" appears earlier in the string, the
+    # debug set is scanned first (insertion order), so debug wins.
+    assert select_profile("implement a fix").name == "debug"
+    # Symmetric proof it is insertion order, not string position: swapping the
+    # word order still resolves to debug.
+    assert select_profile("fix by implementing").name == "debug"
+    # No intent -> the shared DEFAULT profile, which is an identity (no weights).
+    assert select_profile(None) is DEFAULT_PROFILE
+    assert DEFAULT_PROFILE.type_weights == {}
+
+
+# ------------------ profile re-weight after hybrid blend ------------- #
+
+
+@pytest.mark.asyncio
+async def test_profile_reweights_after_hybrid_blend(monkeypatch):
+    # Contract: ranking profiles re-weight the *fused* relevance, i.e. the score
+    # produced after the hybrid BM25 signal is blended in. Equal content ties the
+    # fused score, so the debug profile's 1.3x tool_evidence multiplier alone must
+    # deterministically flip the ordering.
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_RANKING_PROFILES_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_HYBRID_BACKEND", "inmemory")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_rp_hybrid"
+    await _seed_equal(repo, ws)
+    controller = RetrievalController(repo)
+    assert controller._hybrid_backend is not None  # noqa: SLF001
+    cands = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="gateway service", top_k=10, task_intent="fix the bug"
+    )
+    by_id = {c.memory.memory_id: c for c in cands}
+    tool = by_id["m_z_tool"]
+    epi = by_id["m_a_epi"]
+    # The hybrid backend really contributed a BM25 signal to both candidates, so
+    # the fused base score is what the profile multiplier acts on.
+    assert tool.bm25_score > 0.0
+    assert epi.bm25_score > 0.0
+    # Boosted tool_evidence ranks first, ahead of the id-earlier episodic tie.
+    assert cands[0].memory.memory_id == "m_z_tool"
+    assert tool.relevance_score > epi.relevance_score
+    # episodic keeps its fused base (debug profile leaves episodic at weight 1.0),
+    # so the boosted score is exactly the fused base times the 1.3 multiplier —
+    # proving the re-weight ran after fusion, not on a pre-blend lexical score.
+    assert tool.relevance_score == round(epi.relevance_score * 1.3, 6)

@@ -14,6 +14,9 @@ fi
 echo "==> Generating MemTrace demo report"
 uv run python -m app.demo.run_demo --out "$OUT_DIR"
 
+echo "==> Generating multi-hop retrieval demo report"
+uv run python -m app.demo.run_multi_hop_demo --out "$OUT_DIR"
+
 echo "==> Running deterministic benchmark"
 uv run python -m app.benchmark.runner --output-dir "$OUT_DIR"
 
@@ -41,6 +44,7 @@ MemTrace reproducibility baseline generated under: $OUT_DIR
 
 Read these files next:
   - $OUT_DIR/demo_report.md
+  - $OUT_DIR/multi_hop_demo_report.md
   - $OUT_DIR/benchmark_report.md
   - $OUT_DIR/benchmark_results.json
   - $OUT_DIR/observability_report.md

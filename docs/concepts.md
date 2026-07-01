@@ -36,6 +36,12 @@ The deterministic benchmark compares six strategies:
 - `variant_2`: state-aware retrieval plus the admission gate.
 - `variant_3`: `variant_2` plus deterministic reflection-lite retention reranking, a placeholder for a fuller scheduler-backed reflection flow.
 
+Beyond the default lexical + vector path, retrieval has several **default-off,
+deterministic** enhancements (query planner, hybrid BM25, provenance-graph
+expansion, RRF fusion, ranking profiles, and multi-hop). [Multi-hop iterative
+retrieval](advanced-retrieval-multi-hop.md) is the most legible: it reconstructs
+a fact linked to the query only through a shared entity the query never names.
+
 ## Admission gate
 
 The gate decides whether each candidate memory can be used:

@@ -117,3 +117,75 @@ async def test_jwt_off_by_default_ignores_jwt_shape(monkeypatch):
     monkeypatch.setattr(deps.app_state, "repository", None, raising=False)
     principal = await deps.require_api_key(authorization="Bearer legacy-key", x_api_key=None)
     assert principal.kind == "legacy_api_key"
+
+
+# ------------- enabled-state HS256 E2E through the dependency ---------- #
+
+_SHARED_SECRET = "e2e-shared-secret"
+
+
+def _enable_jwt(monkeypatch) -> None:
+    """Turn on auth + HS256 JWT with a known shared secret via env."""
+    monkeypatch.setenv("MEMTRACE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_JWT_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MEMTRACE_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("MEMTRACE_JWT_SECRET", _SHARED_SECRET)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_require_api_key_hs256_resolves_workspace_claim(monkeypatch):
+    # Enabled-state HS256 minted in-test with the shared secret, driven through
+    # the real request dependency via an Authorization: Bearer header. The
+    # resolved principal must carry the sub/roles/workspace claims verbatim.
+    _enable_jwt(monkeypatch)
+    token = encode_hs256(
+        {"sub": "user-42", "roles": ["reader", "writer"], "workspace_ids": ["ws_a", "ws_b"]},
+        _SHARED_SECRET,
+    )
+    principal = await deps.require_api_key(authorization=f"Bearer {token}", x_api_key=None)
+    assert principal.kind == "jwt"
+    assert principal.principal_id == "user-42"
+    assert principal.roles == ["reader", "writer"]
+    assert principal.workspace_ids == ["ws_a", "ws_b"]
+
+
+@pytest.mark.asyncio
+async def test_require_api_key_tampered_signature_returns_403(monkeypatch):
+    # A token whose signature segment has been mutated is an invalid credential.
+    # MemTrace's established auth contract (ADR-016/H3, locked by
+    # tests/api/test_auth.py: missing->401, wrong->403) returns 403 for a
+    # *supplied but invalid* credential — the same status the static API-key
+    # path uses for a wrong key (deps.py). Only a *missing* credential is 401.
+    _enable_jwt(monkeypatch)
+    token = encode_hs256({"sub": "user-42"}, _SHARED_SECRET)
+    head, payload, sig = token.split(".")
+    mangled_sig = ("Z" if not sig.startswith("Z") else "Y") + sig[1:]
+    tampered = f"{head}.{payload}.{mangled_sig}"
+    with pytest.raises(HTTPException) as exc:
+        await deps.require_api_key(authorization=f"Bearer {tampered}", x_api_key=None)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_api_key_expired_jwt_returns_403(monkeypatch):
+    # An expired but well-signed token is a supplied-but-invalid credential, so
+    # it maps to 403 consistently with the tampered-signature and wrong-API-key
+    # cases (missing credential would be 401).
+    _enable_jwt(monkeypatch)
+    token = encode_hs256(
+        {"sub": "user-42", "exp": int(time.time()) - 30}, _SHARED_SECRET
+    )
+    with pytest.raises(HTTPException) as exc:
+        await deps.require_api_key(authorization=f"Bearer {token}", x_api_key=None)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_api_key_missing_credential_returns_401(monkeypatch):
+    # The one 401 case: no credential supplied at all (the other half of the
+    # missing->401 / invalid->403 contract), asserted under the JWT-enabled path.
+    _enable_jwt(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        await deps.require_api_key(authorization=None, x_api_key=None)
+    assert exc.value.status_code == 401

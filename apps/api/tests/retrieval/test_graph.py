@@ -234,3 +234,61 @@ def test_policy_snapshot_records_graph_when_enabled():
     assert snap["graph_backend"] == "inmemory"
     assert snap["graph_weight"] == 0.15
     assert snap["graph_max_hops"] == 2
+
+
+# ---------------------- enabled-state regressions -------------------- #
+
+
+@pytest.mark.asyncio
+async def test_inmemory_graph_skips_self_loop():
+    # A provenance edge whose src == dst is a self-loop: it must never make a
+    # node related to itself, and it contributes no relatedness at all.
+    backend = InMemoryProvenanceGraph()
+    related = await backend.related(
+        ["a"], [ProvenanceEdge("a", "a", CONFLICTS_WITH)], max_hops=2
+    )
+    assert "a" not in related  # no self-relatedness for the self-looped node
+    assert related == {}  # a lone self-loop yields no neighbors
+
+
+@pytest.mark.asyncio
+async def test_graph_expansion_excludes_non_retrievable_neighbor(monkeypatch):
+    # An active hit m_a is conflict-linked to a NON-retrievable m_b (archived) and
+    # an active m_c. Graph expansion must surface m_c but keep the lifecycle filter:
+    # the retired m_b is never added, even though it is a 1-hop graph neighbor.
+    from app.retrieval.controller import (  # noqa: PLC0415
+        _RETRIEVABLE_STATUSES,
+        RetrievalCandidateTrace,
+    )
+
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_GRAPH_BACKEND", "inmemory")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_graph_excl"
+    m_a = _mem(ws, "m_a", "gateway routing config")  # active query hit / seed
+    m_b = _mem(ws, "m_b", "billing ledger", status=MemoryStatus.archived)  # non-retrievable
+    m_c = _mem(ws, "m_c", "invoice pipeline")  # active linked neighbor
+    for m in (m_a, m_b, m_c):
+        await repo.add_memory(m)
+    # One open conflict group links m_a to both m_b and m_c (CONFLICTS_WITH edges).
+    await repo.upsert_memory_conflict(
+        MemoryConflictRecord(
+            workspace_id=ws, subject_key="endpoint", memory_ids=["m_a", "m_b", "m_c"]
+        )
+    )
+    controller = RetrievalController(repo)
+    assert controller._graph_backend is not None  # noqa: SLF001
+
+    memories = [m_a, m_b, m_c]
+    retrievable = [m for m in memories if m.status in _RETRIEVABLE_STATUSES]
+    seed = RetrievalCandidateTrace(memory=m_a, relevance_score=1.0)
+    result = await controller._expand_graph_neighbors(  # noqa: SLF001
+        [seed], retrievable=retrievable, memories=memories, workspace_id=ws
+    )
+
+    ids = {c.memory.memory_id for c in result}
+    assert "m_b" not in ids  # lifecycle filter holds: retired neighbor excluded
+    assert "m_c" in ids  # active linked neighbor surfaced purely via the graph edge
+    m_c_cand = next(c for c in result if c.memory.memory_id == "m_c")
+    assert m_c_cand.graph_score == 1.0  # 1-hop relatedness

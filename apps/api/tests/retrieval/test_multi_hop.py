@@ -165,3 +165,83 @@ def test_policy_snapshot_omits_multi_hop_when_off():
 
 def test_policy_snapshot_records_multi_hop_when_enabled():
     assert _snap(multi_hop_hops=2)["retrieval"]["multi_hop_hops"] == 2
+
+
+# ---------------- include_all short-circuit + graph dedupe ----------- #
+
+
+@pytest.mark.asyncio
+async def test_multi_hop_skipped_under_include_all(monkeypatch):
+    # include_all (the long-context dump-everything baseline) must short-circuit
+    # the cue-driven hops (controller.py ~line 748): even with HOPS enabled the
+    # multi-hop pass returns exactly the single dump-everything pass, and no
+    # candidate carries hop provenance because no cue expansion ran.
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_MULTI_HOP_HOPS", "1")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_include_all"
+    await _seed_linked(repo, ws)
+    controller = RetrievalController(repo)
+    assert controller._multi_hop_hops == 1  # noqa: SLF001
+    hopped = await controller._select_candidates_multi_hop(  # noqa: SLF001
+        workspace_id=ws,
+        run_id="r",
+        query="auth flow",
+        top_k=10,
+        token_budget=512,
+        include_all=True,
+    )
+    base = await controller._select_candidates(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="auth flow", top_k=10, include_all=True
+    )
+    # Byte-identical to the single dump-everything pass: hops were short-circuited.
+    assert [(c.memory.memory_id, c.hop) for c in hopped] == [
+        (c.memory.memory_id, c.hop) for c in base
+    ]
+    # No cue-driven hop ran, so nothing is marked as a hop expansion. m_b may be
+    # present only because include_all dumps everything, and then only at hop 0.
+    assert all(c.hop == 0 for c in hopped)
+
+
+@pytest.mark.asyncio
+async def test_multi_hop_and_graph_expansion_dedupe(monkeypatch):
+    # m_b is reachable via BOTH the shared service.gateway cue (a hop-1 expansion)
+    # and the provenance graph (an open conflict edge m_a<->m_b surfaces it at
+    # hop 0 inside the base pass). The two paths must not double-count: m_b appears
+    # exactly once with a single, internally-consistent hop provenance.
+    from app.runtime.models import MemoryConflictRecord
+
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_MULTI_HOP_HOPS", "1")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_GRAPH_BACKEND", "inmemory")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_hop_graph"
+    await _seed_linked(repo, ws)
+    # Open conflict pair => a CONFLICTS_WITH provenance edge between m_a and m_b.
+    await repo.upsert_memory_conflict(
+        MemoryConflictRecord(
+            workspace_id=ws,
+            subject_key="service.gateway.routing",
+            memory_ids=["m_a", "m_b"],
+            status="open",
+        )
+    )
+    controller = RetrievalController(repo)
+    assert controller._multi_hop_hops == 1  # noqa: SLF001
+    assert controller._graph_backend is not None  # noqa: SLF001
+    cands = await controller._select_candidates_multi_hop(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512
+    )
+    ids = [c.memory.memory_id for c in cands]
+    # No duplicates anywhere, and m_b surfaced exactly once despite two paths.
+    assert len(ids) == len(set(ids))
+    assert ids.count("m_b") == 1
+    by_id = {c.memory.memory_id: c for c in cands}
+    assert "m_a" in by_id and "m_b" in by_id
+    assert by_id["m_a"].hop == 0
+    # m_b entered via the graph inside the base pass (hop 0, graph_score set); the
+    # cue hop then found it again but deduped it rather than re-appending.
+    assert by_id["m_b"].hop == 0
+    assert by_id["m_b"].graph_score > 0.0
