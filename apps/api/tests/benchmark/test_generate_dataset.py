@@ -19,8 +19,26 @@ def test_category_mix_matches_fixed_proportions():
     for record in generate(200):
         cat = record["id"].rsplit("_", 1)[0]
         counts[cat] = counts.get(cat, 0) + 1
-    # 20-slot cycle: 8 failed / 3 rolled_back / 3 multi / 3 superseded / 3 clean.
-    assert counts == {"failed": 80, "rolled_back": 30, "multi": 30, "superseded": 30, "clean": 30}
+    # 20-slot cycle: 6 failed / 3 rolled_back / 2 multi / 3 superseded / 3 clean /
+    # 3 valid_on_failed, ×10 for 200 records.
+    assert counts == {
+        "failed": 60, "rolled_back": 30, "multi": 20,
+        "superseded": 30, "clean": 30, "valid_on_failed": 30,
+    }
+
+
+def test_valid_on_failed_puts_correct_fact_on_a_failed_branch():
+    seen = False
+    for record in generate(200):
+        if not record["id"].startswith("valid_on_failed_"):
+            continue
+        seen = True
+        correct_fact = record["facts"][0]
+        # correct fact itself is on a failed branch, and there is no distractor
+        assert correct_fact["branch_status"] == "failed"
+        assert record["probes"][0]["distractor_markers"] == []
+        assert correct_fact["value"] in correct_fact["content"]
+    assert seen
 
 
 def test_markers_are_substring_safe_and_well_placed():

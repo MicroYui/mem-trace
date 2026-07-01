@@ -82,10 +82,14 @@ _SUPERSEDED_TEMPLATES = [
 ]
 
 # 20-slot category cycle => fixed proportions independent of --count.
-# 40% failed, 15% rolled_back, 15% multi (two dead distractors), 15% superseded,
-# 15% clean. 70% of records carry a dead-branch distractor (the differentiator).
+# dead-branch distractors (the differentiator): failed 6 + rolled_back 3 + multi 2
+# = 11 (55%). superseded 3 (15%, both lifecycle-filter). clean 3 (15%, no distractor).
+# valid_on_failed 3 (15%): the CORRECT fact itself sits on a failed branch, so
+# MemTrace's gate over-rejects it (its recall/precision COST) while plain vector
+# recalls it — this is what makes the comparison a real tradeoff, not 0-vs-82.
 _CATEGORY_CYCLE = (
-    ["failed"] * 8 + ["rolled_back"] * 3 + ["multi"] * 3 + ["superseded"] * 3 + ["clean"] * 3
+    ["failed"] * 6 + ["rolled_back"] * 3 + ["multi"] * 2
+    + ["superseded"] * 3 + ["clean"] * 3 + ["valid_on_failed"] * 3
 )
 
 
@@ -121,6 +125,12 @@ def _record(index: int) -> dict[str, Any]:
         "status": "active",
         "branch_status": "completed",
     }
+    # valid_on_failed: the correct fact is only recorded on a branch that later
+    # failed. Plain vector still recalls it; MemTrace's blanket failed-branch
+    # isolation drops it too — a genuine recall cost of the safety mechanism.
+    if category == "valid_on_failed":
+        correct_fact["branch_status"] = "failed"
+        correct_fact["memory_type"] = "tool_evidence"
     facts: list[dict[str, Any]] = [correct_fact]
     distractor_markers: list[str] = []
 

@@ -171,7 +171,11 @@ async def run_dataset_bench(
 
     strategies = list(strategies) if strategies else [PLAIN_VECTOR, MEMTRACE]
     agg: dict[str, dict[str, int]] = {
-        s.value: {"recall_total": 0, "recall_hits": 0, "distractor_total": 0, "distractor_leaks": 0}
+        s.value: {
+            "recall_total": 0, "recall_hits": 0,
+            "distractor_total": 0, "distractor_leaks": 0,
+            "clean_total": 0, "clean_hits": 0,
+        }
         for s in strategies
     }
     probe_results: list[dict[str, Any]] = []
@@ -191,6 +195,10 @@ async def run_dataset_bench(
                 if scored["recall_scored"]:
                     bucket["recall_total"] += 1
                     bucket["recall_hits"] += int(scored["recall_hit"])
+                    # "clean" = the correct fact reached context AND no distractor
+                    # leaked with it — the composite that trades recall vs safety.
+                    bucket["clean_total"] += 1
+                    bucket["clean_hits"] += int(scored["recall_hit"] and not scored["distractor_leak"])
                 if scored["distractor_scored"]:
                     bucket["distractor_total"] += 1
                     bucket["distractor_leaks"] += int(scored["distractor_leak"])
@@ -204,6 +212,9 @@ async def run_dataset_bench(
             "distractor_leakage_rate": _rate(b["distractor_leaks"], b["distractor_total"]),
             "distractor_leaks": b["distractor_leaks"],
             "distractor_total": b["distractor_total"],
+            "clean_context_rate": _rate(b["clean_hits"], b["clean_total"]),
+            "clean_hits": b["clean_hits"],
+            "clean_total": b["clean_total"],
         }
         for name, b in agg.items()
     }
@@ -212,9 +223,13 @@ async def run_dataset_bench(
     delta: dict[str, Any] = {}
     if plain is not None and memtrace is not None:
         # Positive recall_rate_gain / leakage_reduction => MemTrace beats plain vector.
+        # recall_cost is the honest downside: MemTrace over-gates valid facts that
+        # sit on a failed branch, so its recall is *lower* than plain vector.
         delta = {
             "recall_rate_gain": round(memtrace["recall_rate"] - plain["recall_rate"], 6),
+            "recall_cost": round(plain["recall_rate"] - memtrace["recall_rate"], 6),
             "distractor_leakage_reduction": round(plain["distractor_leakage_rate"] - memtrace["distractor_leakage_rate"], 6),
+            "clean_context_gain": round(memtrace["clean_context_rate"] - plain["clean_context_rate"], 6),
         }
     payload: dict[str, Any] = {
         "dataset": str(resolved) if resolved else "builtin_sample",
@@ -247,9 +262,10 @@ def main() -> int:
     payload = asyncio.run(run_dataset_bench(args.dataset, output_dir=args.output_dir, strategies=strategies))
     print(f"dataset: {payload['dataset']}  records={payload['record_count']}  probes={payload['probe_count']}")
     for name, b in payload["by_strategy"].items():
-        print(f"  {name:>12}: recall={b['recall_rate']}  distractor_leakage={b['distractor_leakage_rate']}")
+        print(f"  {name:>12}: recall={b['recall_rate']}  leakage={b['distractor_leakage_rate']}  clean_context={b['clean_context_rate']}")
     if payload["delta"]:
-        print(f"  delta (MemTrace vs plain): recall_gain={payload['delta']['recall_rate_gain']}  leakage_reduction={payload['delta']['distractor_leakage_reduction']}")
+        d = payload["delta"]
+        print(f"  MemTrace vs plain: leakage_reduction={d['distractor_leakage_reduction']}  recall_cost={d['recall_cost']}  clean_context_gain={d['clean_context_gain']}")
     return 0
 
 

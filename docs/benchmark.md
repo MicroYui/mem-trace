@@ -164,15 +164,16 @@ This bench is standalone — it does not affect the deterministic benchmark or i
 ### Scale run (thousands of records) + charts
 
 `app/benchmark/generate_dataset.py` deterministically synthesizes thousands of
-records in this schema — built around the real `baseline_1`-vs-`variant_2`
-differentiator (dead-branch distractors that plain vector admits and the gate
-rejects), plus superseded distractors (both lifecycle-filter → honesty control)
-and clean recall controls. The record `id` encodes its category (`failed_00012`)
-so leakage can be broken down by distractor type. `dataset_bench` accepts
-`--strategies all` to run the full 6-strategy ablation ladder, and
-`app/benchmark/plot_benchmarks.py` renders committed PNG charts under
-`docs/assets/` (matplotlib is a chart-only dependency, run with an ephemeral
-`uv run --with matplotlib`, not added to the project):
+records in this schema, across categories: **dead-branch** distractors (failed /
+rolled-back / multi — a wrong value plain vector admits and the gate rejects),
+**superseded** distractors (both lifecycle-filter → honesty control), **clean**
+recall controls, and **valid_on_failed** (the *correct* fact itself sits on a
+failed branch, so MemTrace's gate over-drops it — the mechanism's recall cost).
+The record `id` encodes its category so results break down by type. `dataset_bench`
+adds `clean_context_rate` (correct fact present **and** no distractor) and accepts
+`--strategies all` for the 6-strategy ablation ladder; `app/benchmark/plot_benchmarks.py`
+renders committed PNG charts under `docs/assets/` (matplotlib is a chart-only
+dependency, run with an ephemeral `uv run --with matplotlib`, not added to the project):
 
 ```bash
 uv run python -m app.benchmark.generate_dataset --count 3000 --out /tmp/scale.jsonl
@@ -180,11 +181,32 @@ uv run python -m app.benchmark.dataset_bench --dataset /tmp/scale.jsonl --strate
 uv run --with matplotlib python -m app.benchmark.plot_benchmarks   # writes docs/assets/*.png + benchmark_summary.json
 ```
 
-On the committed 3,000-record run (see the README benchmark snapshot): recall is
-**100%** for every memory-bearing strategy, while distractor leakage is **82.4%**
-for plain vector / long-context / branch-gate-ablated `variant_1` and **0%** for
-the state-aware gate (`variant_2` / `variant_3`). Broken down by category: plain
-vector leaks **100%** of dead-branch distractors and **0%** of superseded ones
-(the lifecycle filter drops outdated facts under both strategies). The run is
-deterministic synthetic data — it stresses the isolation *mechanism* at scale;
-the real-LLM Q&A bench above validates the end effect on an actual model.
+On the committed 3,000-record run this is a **tradeoff**, not a one-sided win:
+plain vector has recall **100%** but contamination **78.6%** (clean context 45%);
+MemTrace gives up **15%** recall (over-gating valid facts on failed branches) to
+drop contamination to **0%**, nearly doubling clean usable context to **85%**.
+Only `variant_2`/`variant_3` (the state-aware gate) remove contamination; the
+recall cost is isolated entirely to the `valid_on_failed` category. The run is
+deterministic synthetic data — it stresses the isolation *mechanism* and its cost
+at scale.
+
+### Real dataset (LoCoMo) + real-LLM judge (opt-in)
+
+`app/benchmark/locomo_bench.py` runs the real LoCoMo long-conversation QA dataset
+with a real LLM answering + a real LLM judge, under three conditions (no-memory /
+plain-vector / MemTrace). It is env-gated (needs `MEMTRACE_LLM_*` and a downloaded
+`locomo10.json` at `MEMTRACE_LOCOMO_PATH`) and skips cleanly otherwise.
+
+```bash
+# download locomo10.json from the snap-research/locomo repo first, then:
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_MODEL=gpt-5.4 MEMTRACE_LOCOMO_PATH=locomo10.json \
+  uv run python -m app.benchmark.locomo_bench --limit 30 --output-dir reports
+```
+
+On a 30-question sample (`gpt-5.4`): no-memory **0%**, plain vector **30%**,
+MemTrace **30%**. Honest read: memory clearly helps, and MemTrace *ties* plain
+vector because LoCoMo is **conversational** — it has no failed execution branches
+for the gate to isolate (MemTrace's edge is agentic, shown in the synthetic scale
+run). Retrieval also uses lexical/deterministic vectors here (no real embedding
+endpoint), so absolute accuracy is modest. This proves the pipeline on real data
++ a real model; it is not a leaderboard submission.

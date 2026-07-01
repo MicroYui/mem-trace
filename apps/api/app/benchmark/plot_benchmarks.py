@@ -49,23 +49,37 @@ def _annotate(ax, bars, values, fmt="{:.0%}"):
                 fmt.format(val), ha="center", va="bottom", fontsize=9, fontweight="bold")
 
 
-def _category_leakage(scale: dict) -> dict[str, dict[str, float]]:
-    """Per distractor-category leakage rate for plain-vector vs MemTrace."""
-    groups = {"dead_branch": {"failed", "rolled_back", "multi"}, "superseded": {"superseded"}}
-    out: dict[str, dict[str, float]] = {}
+def _category_stats(scale: dict) -> dict[str, dict[str, dict[str, float]]]:
+    """Per-category recall + leakage for plain-vector vs MemTrace."""
+    groups = {
+        "dead_branch": {"failed", "rolled_back", "multi"},
+        "superseded": {"superseded"},
+        "valid_on_failed": {"valid_on_failed"},
+        "clean": {"clean"},
+    }
+    out: dict[str, dict[str, dict[str, float]]] = {}
     for gname, prefixes in groups.items():
-        tallies = {"baseline_1": [0, 0], "variant_2": [0, 0]}
+        tally = {s: {"recall": [0, 0], "leak": [0, 0]} for s in ("baseline_1", "variant_2")}
         for probe in scale["probes"]:
             cat = probe["record_id"].rsplit("_", 1)[0]
             if cat not in prefixes:
                 continue
             for strat in ("baseline_1", "variant_2"):
                 cell = probe["by_strategy"].get(strat)
-                if cell and cell.get("distractor_scored"):
-                    tallies[strat][1] += 1
-                    tallies[strat][0] += int(cell.get("distractor_leak", False))
+                if not cell:
+                    continue
+                if cell.get("recall_scored"):
+                    tally[strat]["recall"][1] += 1
+                    tally[strat]["recall"][0] += int(cell.get("recall_hit", False))
+                if cell.get("distractor_scored"):
+                    tally[strat]["leak"][1] += 1
+                    tally[strat]["leak"][0] += int(cell.get("distractor_leak", False))
         out[gname] = {
-            s: (t[0] / t[1] if t[1] else 0.0) for s, t in tallies.items()
+            s: {
+                "recall": (t["recall"][0] / t["recall"][1] if t["recall"][1] else None),
+                "leak": (t["leak"][0] / t["leak"][1] if t["leak"][1] else None),
+            }
+            for s, t in tally.items()
         }
     return out
 
@@ -90,25 +104,33 @@ def chart_contamination_by_strategy(scale: dict, out: Path) -> None:
     plt.close(fig)
 
 
-def chart_recall_vs_contamination(scale: dict, out: Path) -> None:
+def chart_tradeoff(scale: dict, out: Path) -> None:
+    """The headline: MemTrace trades some recall for zero contamination -> cleaner context."""
     by = scale["by_strategy"]
     groups = [("Plain vector\n(baseline_1)", "baseline_1"), ("MemTrace\n(variant_2)", "variant_2")]
-    recall = [by[g[1]]["recall_rate"] for g in groups]
-    leak = [by[g[1]]["distractor_leakage_rate"] for g in groups]
+    metrics = [
+        ("Recall of\ncorrect fact", "recall_rate", _BLUE),
+        ("Contamination\n(distractor leak)", "distractor_leakage_rate", _RED),
+        ("Clean context\n(correct, no leak)", "clean_context_rate", _GREEN),
+    ]
     x = range(len(groups))
-    w = 0.36
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
-    b1 = ax.bar([i - w / 2 for i in x], recall, w, label="Recall of correct fact", color=_BLUE)
-    b2 = ax.bar([i + w / 2 for i in x], leak, w, label="Contamination (distractor leak)", color=_RED)
-    _annotate(ax, b1, recall)
-    _annotate(ax, b2, leak)
+    w = 0.26
+    fig, ax = plt.subplots(figsize=(8.4, 4.8))
+    for i, (label, key, color) in enumerate(metrics):
+        vals = [by[g[1]][key] for g in groups]
+        bars = ax.bar([j + (i - 1) * w for j in x], vals, w, label=label, color=color)
+        _annotate(ax, bars, vals)
     ax.set_xticks(list(x))
     ax.set_xticklabels([g[0] for g in groups])
-    ax.set_ylim(0, 1.15)
+    ax.set_ylim(0, 1.18)
     ax.set_ylabel("rate")
-    ax.set_title(f"Same recall, contamination eliminated — {scale['record_count']:,} records",
-                 fontsize=11)
-    ax.legend(frameon=False, fontsize=9)
+    d = scale["delta"]
+    ax.set_title(
+        f"The tradeoff — {scale['record_count']:,} records\n"
+        f"MemTrace gives up {d['recall_cost']:.0%} recall to remove "
+        f"{d['distractor_leakage_reduction']:.0%} contamination → +{d['clean_context_gain']:.0%} clean context",
+        fontsize=11)
+    ax.legend(frameon=False, fontsize=8.5, ncol=3, loc="upper center")
     ax.spines[["top", "right"]].set_visible(False)
     ax.yaxis.set_major_formatter(lambda x, _: f"{x:.0%}")
     fig.tight_layout()
@@ -116,26 +138,32 @@ def chart_recall_vs_contamination(scale: dict, out: Path) -> None:
     plt.close(fig)
 
 
-def chart_leakage_by_category(cats: dict, out: Path) -> None:
-    labels = {"dead_branch": "Dead-branch\ndistractors", "superseded": "Superseded\n(outdated) facts"}
-    order = ["dead_branch", "superseded"]
-    plain = [cats[c]["baseline_1"] for c in order]
-    memtrace = [cats[c]["variant_2"] for c in order]
+def chart_recall_cost_by_category(cats: dict, out: Path) -> None:
+    """Where MemTrace's recall cost comes from: only 'valid fact on a failed branch'."""
+    labels = {
+        "dead_branch": "Dead-branch\ndistractor",
+        "superseded": "Superseded\n(outdated)",
+        "valid_on_failed": "Valid fact on\nfailed branch",
+        "clean": "Clean\nrecall",
+    }
+    order = [c for c in ["dead_branch", "superseded", "valid_on_failed", "clean"] if c in cats]
+    plain = [cats[c]["baseline_1"]["recall"] or 0.0 for c in order]
+    memtrace = [cats[c]["variant_2"]["recall"] or 0.0 for c in order]
     x = range(len(order))
     w = 0.36
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    fig, ax = plt.subplots(figsize=(8.4, 4.8))
     b1 = ax.bar([i - w / 2 for i in x], plain, w, label="Plain vector (baseline_1)", color=_RED)
     b2 = ax.bar([i + w / 2 for i in x], memtrace, w, label="MemTrace (variant_2)", color=_GREEN)
     _annotate(ax, b1, plain)
     _annotate(ax, b2, memtrace)
     ax.set_xticks(list(x))
     ax.set_xticklabels([labels[c] for c in order])
-    ax.set_ylim(0, 1.15)
-    ax.set_ylabel("distractor leakage")
-    ax.set_title("Where the difference comes from\n"
-                 "plain vector admits dead-branch facts; both drop outdated ones",
+    ax.set_ylim(0, 1.18)
+    ax.set_ylabel("recall of the correct fact")
+    ax.set_title("Where the recall cost comes from\n"
+                 "MemTrace loses recall ONLY when a valid fact sits on a failed branch",
                  fontsize=11)
-    ax.legend(frameon=False, fontsize=9)
+    ax.legend(frameon=False, fontsize=9, loc="center", bbox_to_anchor=(0.62, 0.42))
     ax.spines[["top", "right"]].set_visible(False)
     ax.yaxis.set_major_formatter(lambda x, _: f"{x:.0%}")
     fig.tight_layout()
@@ -154,13 +182,14 @@ def main() -> int:
     scale = _load(reports / "dataset_bench_results.json")
     if scale is None:
         raise SystemExit("missing dataset_bench_results.json; run app.benchmark.dataset_bench first")
-    cats = _category_leakage(scale)
+    cats = _category_stats(scale)
     chart_contamination_by_strategy(scale, assets / "benchmark_contamination_by_strategy.png")
-    chart_recall_vs_contamination(scale, assets / "benchmark_recall_vs_contamination.png")
-    chart_leakage_by_category(cats, assets / "benchmark_leakage_by_category.png")
+    chart_tradeoff(scale, assets / "benchmark_tradeoff.png")
+    chart_recall_cost_by_category(cats, assets / "benchmark_recall_cost_by_category.png")
 
     bench16 = _load(reports / "benchmark_results.json")
     qa = _load(reports / "qa_bench_results.json")
+    locomo = _load(reports / "locomo_bench_results.json")
     checks = (bench16 or {}).get("acceptance", {}).get("checks", {})
     summary = {
         "scale": {
@@ -168,7 +197,7 @@ def main() -> int:
             "probes": scale["probe_count"],
             "by_strategy": scale["by_strategy"],
             "delta": scale["delta"],
-            "leakage_by_category": cats,
+            "category_stats": cats,
         },
         "correctness_16_case": {
             "acceptance_passed": (bench16 or {}).get("acceptance", {}).get("passed"),
@@ -181,10 +210,16 @@ def main() -> int:
             "memory_improvement_count": qa.get("memory_improvement_count"),
             "scenario_count": len(qa.get("scenarios", [])),
         },
+        "real_llm_locomo": None if (locomo is None or locomo.get("skipped")) else {
+            "model": locomo.get("endpoint", {}).get("model"),
+            "sample_size": locomo.get("sample_size"),
+            "accuracy": locomo.get("accuracy"),
+            "accuracy_by_category": locomo.get("accuracy_by_category"),
+        },
     }
     (assets / "benchmark_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
     print("wrote charts + benchmark_summary.json to", assets)
-    print("leakage_by_category:", json.dumps(cats))
+    print("delta:", json.dumps(scale["delta"]))
     return 0
 
 
