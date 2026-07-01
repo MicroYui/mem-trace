@@ -171,6 +171,64 @@ def chart_recall_cost_by_category(cats: dict, out: Path) -> None:
     plt.close(fig)
 
 
+def chart_trace_isolation(trace: dict, out: Path) -> None:
+    """Tree-trace headline: full recall, contamination eliminated, ~3x clean context."""
+    by = trace["by_strategy"]
+    groups = [("Plain vector\n(baseline_1)", "baseline_1"), ("MemTrace\n(variant_2)", "variant_2")]
+    metrics = [
+        ("Recall of\ncorrect fact", "recall_rate", _BLUE),
+        ("Contamination\n(dead-branch leak)", "contamination_rate", _RED),
+        ("Clean context\n(correct, no leak)", "clean_context_rate", _GREEN),
+    ]
+    x = range(len(groups))
+    w = 0.26
+    fig, ax = plt.subplots(figsize=(8.4, 4.8))
+    for i, (label, key, color) in enumerate(metrics):
+        vals = [by[g[1]][key] for g in groups]
+        bars = ax.bar([j + (i - 1) * w for j in x], vals, w, label=label, color=color)
+        _annotate(ax, bars, vals)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([g[0] for g in groups])
+    ax.set_ylim(0, 1.18)
+    ax.set_ylabel("rate")
+    d = trace["delta"]
+    ax.set_title(
+        f"Real execution trees — {trace['scenarios']} runs × {trace['subgoals_per_scenario']} subgoals "
+        f"({trace['probe_count']:,} probes)\n"
+        f"MemTrace keeps full recall and removes {d['contamination_reduction']:.0%} contamination "
+        f"→ +{d['clean_context_gain']:.0%} clean context",
+        fontsize=10.5)
+    ax.legend(frameon=False, fontsize=8.5, ncol=3, loc="upper center")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.yaxis.set_major_formatter(lambda x, _: f"{x:.0%}")
+    fig.tight_layout()
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+
+
+def chart_trace_tokens(trace: dict, out: Path) -> None:
+    """Long-horizon context cost: long_context bloats; MemTrace stays compact."""
+    by = trace["by_strategy"]
+    order = [s for s in ["long_context", "baseline_1", "variant_2"] if s in by]
+    label = {"long_context": "long_context\n(dump all)", "baseline_1": "plain vector\n(baseline_1)",
+             "variant_2": "MemTrace\n(variant_2)"}
+    vals = [by[s]["avg_context_tokens"] for s in order]
+    colors = [_RED if s == "long_context" else _AMBER if s == "baseline_1" else _GREEN for s in order]
+    fig, ax = plt.subplots(figsize=(6.6, 4.6))
+    bars = ax.bar([label[s] for s in order], vals, color=colors)
+    for bar, v in zip(bars, vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(vals) * 0.01,
+                f"{v:.0f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    ax.set_ylabel("avg context tokens per retrieval")
+    ratio = trace["delta"].get("context_token_ratio_vs_long_context")
+    sub = f" — MemTrace is {ratio:.0%} of dump-all" if ratio else ""
+    ax.set_title(f"Long-horizon context cost{sub}", fontsize=11)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render committed benchmark charts from report JSONs")
     parser.add_argument("--reports-dir", default="reports")
@@ -187,6 +245,11 @@ def main() -> int:
     chart_tradeoff(scale, assets / "benchmark_tradeoff.png")
     chart_recall_cost_by_category(cats, assets / "benchmark_recall_cost_by_category.png")
 
+    trace = _load(reports / "trace_bench_results.json")
+    if trace is not None:
+        chart_trace_isolation(trace, assets / "benchmark_trace_isolation.png")
+        chart_trace_tokens(trace, assets / "benchmark_trace_tokens.png")
+
     bench16 = _load(reports / "benchmark_results.json")
     qa = _load(reports / "qa_bench_results.json")
     locomo = _load(reports / "locomo_bench_results.json")
@@ -198,6 +261,13 @@ def main() -> int:
             "by_strategy": scale["by_strategy"],
             "delta": scale["delta"],
             "category_stats": cats,
+        },
+        "tree_trace": None if trace is None else {
+            "scenarios": trace["scenarios"],
+            "subgoals_per_scenario": trace["subgoals_per_scenario"],
+            "probes": trace["probe_count"],
+            "by_strategy": trace["by_strategy"],
+            "delta": trace["delta"],
         },
         "correctness_16_case": {
             "acceptance_passed": (bench16 or {}).get("acceptance", {}).get("passed"),

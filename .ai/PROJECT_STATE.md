@@ -1,5 +1,20 @@
 # Project State
 
+# Project State
+
+## Latest Session (2026-07-01 — tree-shaped long-horizon execution-tree benchmark)
+
+User asked for a "树状长程完整流程" dataset — complex enough that MemTrace's advantage shows properly. Built a real-runtime execution-tree benchmark (the honest place MemTrace wins). Benchmark stays **16/16**.
+
+- **Mechanism verified** (memory_runtime.py): `rollback_branch` flips rolled-back subtree memories to `branch_status=rolled_back` (L533); `write_from_tool_result` carries **free-form** content into `tool_evidence` memories with real state-node provenance; retrieval isolates via `branch_status ∈ {failed,rolled_back}` (L958) + active-path membership (L966). So driving real traces produces correct provenance and the full pipeline isolates dead branches. `cases.py` is the template (builds runs via the runtime).
+- **New `apps/api/app/benchmark/trace_bench.py`:** deterministically generates scenarios (each = one long run of N subgoals; each subgoal makes 0/1/2 attempts that FAIL + roll back before a recovery success — a real tree with dead branches), drives them through `MemoryRuntime` (start_run/start_step/write_event tool_result/finish_step/rollback_branch/recovery), then probes per subgoal under each strategy. Facts are free-form `tool_result` content (arbitrary vocabulary), scored by substring markers on positive context. Measures recall / contamination / clean_context / avg_context_tokens. Test `tests/benchmark/test_trace_bench.py` (3) locks determinism + the isolation contract.
+- **Result (120 runs × 10 subgoals = 1,200 probes, deterministic):** plain vector recall 100% / contamination **100%** / clean 33% / ctx 212 tok; MemTrace recall **100%** / contamination **0%** / clean **100%** / ctx 200 tok; `long_context` ctx **345** tok. MemTrace removes 100% dead-branch contamination, triples clean context (33→100%), keeps full recall, uses ~58% of dump-all tokens. **No recall cost here** (correct facts always on the recovered/active path — the `valid_on_failed` cost only shows in the flat scale run).
+- **Charts:** added `benchmark_trace_isolation.png` (recall/contamination/clean, plain vs MemTrace) + `benchmark_trace_tokens.png` (context tokens: long_context 345 / plain 212 / MemTrace 200). `plot_benchmarks.py` reads `trace_bench_results.json`; `benchmark_summary.json` gained a `tree_trace` block.
+- **README restructured** to 4 layers, leading with the **real execution-tree benchmark** (headline), then the flat scale run + honest cost, then 16-case, then real-LLM (LoCoMo + qa). `docs/benchmark.md` gained a "Real execution-tree benchmark" subsection.
+- **Verification:** compileall clean; full pytest **990 passed, 3 skipped**; reproduce **16/16**; hygiene passed; `git diff --check` clean.
+- **Honest framing:** this is deterministic synthetic (real tree structure, marker-scored), so it stresses the mechanism end-to-end; it's where MemTrace's agentic edge legitimately shows (unlike conversational LoCoMo where it ties plain vector). Superseding of arbitrary free-form facts is NOT modeled (resolver only supersedes keyed project memories) — trace_bench relies on failed/rolled-back isolation, which is MemTrace's headline mechanism.
+- **Next recommended action:** none selected. Possible: real-LLM variant of trace_bench (answer/judge over the tree context); model superseding of arbitrary facts if the writer/ontology gains free-form keys; find a real agentic-trace public dataset.
+
 ## Latest Session (2026-07-01 — benchmark credibility: real LoCoMo + honest tradeoff, not "0 vs 82")
 
 User pushback on the prior scale run: numbers looked "fake" (binary 0/82, recall all 100%), and it wasn't a real dataset. Chose "both" — a reproducible harder-synthetic layer showing the **tradeoff**, plus a **real-dataset real-LLM** sample. Both delivered; benchmark stays **16/16**.

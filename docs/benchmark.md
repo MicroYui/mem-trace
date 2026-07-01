@@ -190,6 +190,29 @@ recall cost is isolated entirely to the `valid_on_failed` category. The run is
 deterministic synthetic data — it stresses the isolation *mechanism* and its cost
 at scale.
 
+### Real execution-tree benchmark (deterministic)
+
+`app/benchmark/trace_bench.py` goes a step further than the flat scale run: it
+drives the **real `MemoryRuntime`** to build a long-horizon *execution tree* per
+scenario — a run of many subgoals where each subgoal may make attempts that
+**fail and get rolled back** (dead branches) before a **recovery** attempt
+succeeds. Memories are created by the real write path (free-form `tool_result`
+content), so they carry genuine `branch_status` / state-node provenance, and
+retrieval runs the full pipeline (state tree → active-path filtering → gate →
+compaction) — the structure a plain vector store cannot represent.
+
+```bash
+uv run python -m app.benchmark.trace_bench --scenarios 120 --subgoals 10 --output-dir reports
+```
+
+On the 120 runs × 10 subgoals (1,200 probes) run: MemTrace keeps recall at
+**100%**, removes **100%** of dead-branch contamination (plain vector leaks it
+all → clean context **33% → 100%**), and uses **~58%** of the `long_context`
+dump-all token count. Here there is **no** recall cost, because correct facts are
+always established on the recovered/active path (the `valid_on_failed` cost case
+only appears in the flat scale run above). This exercises MemTrace's agentic edge
+end-to-end, deterministically.
+
 ### Real dataset (LoCoMo) + real-LLM judge (opt-in)
 
 `app/benchmark/locomo_bench.py` runs the real LoCoMo long-conversation QA dataset

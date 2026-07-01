@@ -119,6 +119,55 @@
       }
     }
   },
+  "tree_trace": {
+    "scenarios": 120,
+    "subgoals_per_scenario": 10,
+    "probes": 1200,
+    "by_strategy": {
+      "baseline_0": {
+        "recall_rate": 0.0,
+        "contamination_rate": 0.0,
+        "clean_context_rate": 0.0,
+        "avg_context_tokens": 0.0
+      },
+      "long_context": {
+        "recall_rate": 1.0,
+        "contamination_rate": 1.0,
+        "clean_context_rate": 0.333333,
+        "avg_context_tokens": 345.0
+      },
+      "baseline_1": {
+        "recall_rate": 1.0,
+        "contamination_rate": 1.0,
+        "clean_context_rate": 0.333333,
+        "avg_context_tokens": 212.3
+      },
+      "variant_1": {
+        "recall_rate": 1.0,
+        "contamination_rate": 1.0,
+        "clean_context_rate": 0.333333,
+        "avg_context_tokens": 212.34
+      },
+      "variant_2": {
+        "recall_rate": 1.0,
+        "contamination_rate": 0.0,
+        "clean_context_rate": 1.0,
+        "avg_context_tokens": 199.58
+      },
+      "variant_3": {
+        "recall_rate": 1.0,
+        "contamination_rate": 0.0,
+        "clean_context_rate": 1.0,
+        "avg_context_tokens": 199.59
+      }
+    },
+    "delta": {
+      "contamination_reduction": 1.0,
+      "recall_cost": 0.0,
+      "clean_context_gain": 0.666667,
+      "context_token_ratio_vs_long_context": 0.5785
+    }
+  },
   "correctness_16_case": {
     "acceptance_passed": true,
     "checks_passed": 16,

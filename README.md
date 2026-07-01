@@ -111,32 +111,41 @@ uv run --package memtrace-sdk python examples/simple_agent/main.py  # Python SDK
 
 ## 📊 Benchmark snapshot
 
-MemTrace is evaluated in three complementary layers — a **scale run over thousands of records**, a **deterministic correctness suite**, and **real-LLM checks on real + synthetic data** — all reproducible.
+MemTrace is evaluated in four complementary layers — a **real execution-tree benchmark**, a **flat scale run** that surfaces the honest cost, a **deterministic correctness suite**, and **real-LLM checks on real + synthetic data** — all reproducible.
 
-### 1. Scale run — 3,000 records × 6 strategies
+### 1. Real execution-tree benchmark — where MemTrace is built to win
 
-A deterministic, no-network run over **3,000** synthetic agentic-memory records (one probe each). Each record seeds a correct fact plus, by category, a distractor a plain-vector store can't tell apart: a wrong value left by a **dead execution branch** (failed / rolled-back), an **outdated** (superseded) value, or a record where the **correct fact itself sits on a failed branch**. We measure recall, contamination (distractor leak), and *clean context* (correct fact present **and** no distractor).
-
-This is not a one-sided win — it's a **tradeoff**. MemTrace's admission gate isolates dead branches, so it removes ~79% contamination that plain vector admits; but the *same* isolation also over-drops the ~15% of correct facts that happen to live on a failed branch. Net, it nearly **doubles the rate of clean, usable context**:
+This is the setting a plain vector store structurally cannot represent. `app/benchmark/trace_bench.py` drives the **real `MemoryRuntime`** to build a long-horizon *execution tree* per scenario: a run of many subgoals, where each subgoal may make one or more attempts that **fail and get rolled back** (dead branches) before a **recovery** attempt succeeds. Memories are created by the real write path, so they carry genuine `branch_status` / state-node provenance, and retrieval runs the full pipeline (state tree → active-path filtering → admission gate → compaction). Deterministic, no LLM. Latest run: **120 runs × 10 subgoals = 1,200 probes**.
 
 <p align="center">
-  <img src="docs/assets/benchmark_tradeoff.png" width="620" alt="The tradeoff: MemTrace trades 15% recall for 0% contamination and +40% clean context">
+  <img src="docs/assets/benchmark_trace_isolation.png" width="600" alt="Real execution trees: MemTrace keeps full recall, removes 100% contamination, triples clean context">
 </p>
 
 | Strategy | Recall | Contamination | Clean context |
 | --- | --- | --- | --- |
-| `baseline_1` — plain vector / lexical | **100%** | **78.6%** | 45% |
-| `variant_1` — state-aware, branch gate off (ablation) | 100% | 78.6% | 45% |
-| `variant_2` — **MemTrace** (state-aware + gate) | **85%** | **0%** | **85%** |
+| `baseline_1` — plain vector | 100% | **100%** | 33% |
+| `variant_2` — **MemTrace** | 100% | **0%** | **100%** |
 
-Two supporting views — only the state-aware gate removes contamination (the ablation ladder), and MemTrace's recall cost comes from *exactly one* honest case (a valid fact stuck on a failed branch), nowhere else:
+Every dead-branch fact the run abandoned leaks into a plain-vector store; MemTrace isolates **all** of them while keeping full recall of the current, active-path answer — so clean context goes **33% → 100%**. And over a long horizon, dumping everything (`long_context`) bloats the prompt while MemTrace stays compact:
 
 <p align="center">
-  <img src="docs/assets/benchmark_contamination_by_strategy.png" width="440" alt="Contamination by strategy — only variant_2/3 eliminate it">
+  <img src="docs/assets/benchmark_trace_tokens.png" width="480" alt="Long-horizon context cost: MemTrace uses 58% of the dump-all token count">
+</p>
+
+```bash
+uv run python -m app.benchmark.trace_bench --scenarios 120 --subgoals 10 --output-dir reports
+```
+
+### 2. Flat scale run — and the honest cost
+
+A deterministic **3,000-record** run (`app/benchmark/dataset_bench.py`) isolates the mechanism *and its cost*. It's not a one-sided win: MemTrace's gate removes ~79% contamination plain vector admits, but the *same* isolation over-drops the ~15% of correct facts that happen to sit on a failed branch. Net, it nearly doubles clean context (45% → 85%):
+
+<p align="center">
+  <img src="docs/assets/benchmark_tradeoff.png" width="440" alt="The tradeoff: MemTrace trades 15% recall for 0% contamination, +40% clean context">
   <img src="docs/assets/benchmark_recall_cost_by_category.png" width="440" alt="Recall cost isolated to valid-fact-on-failed-branch">
 </p>
 
-<sub>The data is **synthetic but deterministic** — it stress-tests the isolation *mechanism* at scale and its cost, not a model's answer quality (that's layer 3). Retrieval here uses the deterministic/lexical vector. Reproduce:</sub>
+<sub>The recall cost comes from *exactly one* honest category (a valid fact stuck on a failed branch), nowhere else — in the tree benchmark above, correct facts are always on the recovered/active path, so there's no cost. Synthetic but deterministic; retrieval uses the lexical/deterministic vector. Reproduce:</sub>
 
 ```bash
 uv run python -m app.benchmark.generate_dataset --count 3000 --out /tmp/scale.jsonl
@@ -144,7 +153,7 @@ uv run python -m app.benchmark.dataset_bench --dataset /tmp/scale.jsonl --strate
 uv run --with matplotlib python -m app.benchmark.plot_benchmarks   # regenerates docs/assets/*.png
 ```
 
-### 2. Deterministic correctness — 16 cases × 6 strategies
+### 3. Deterministic correctness — 16 cases × 6 strategies
 
 ```bash
 uv run python -m app.benchmark.runner --output-dir reports   # acceptance: passed=true (16/16)
@@ -153,9 +162,31 @@ uv run python -m app.benchmark.runner --output-dir reports   # acceptance: passe
 
 The six strategies (`baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`) quantify each mechanism's contribution across failed-branch isolation, tool safety, compaction, safe negative evidence, sanitized destructive failures, reflection-lite retention, retained-negative metadata, and LoCoMo/MemoryArena-style long-horizon / temporal-update / multi-hop recall. Current acceptance: **16/16**.
 
-### 3. Real-LLM checks (real + synthetic data)
+### 4. Real-LLM checks (real + synthetic data)
 
-Layers 1–2 are deterministic and marker-scored. These close the loop against an **actual model** (`gpt-5.4` via a local OpenAI-compatible proxy).
+Layers 1–3 are deterministic and marker-scored. These close the loop against an **actual model** (`gpt-5.4` via a local OpenAI-compatible proxy).
+
+**Real public dataset — LoCoMo** (`app/benchmark/locomo_bench.py`): seeds real long-conversation turns as memory, answers a 30-question sample under three conditions with a real LLM answering + a real LLM judge grading against gold answers.
+
+| Condition | Accuracy |
+| --- | --- |
+| no memory (`baseline_0`) | **0%** |
+| plain vector (`baseline_1`) | **30%** |
+| MemTrace (`variant_2`) | **30%** |
+
+<sub>Honest read: memory clearly helps (0% → 30%), and **MemTrace ties plain vector here** — LoCoMo is *conversational* (long-horizon recall / temporal reasoning), so it doesn't contain the **dead execution branches** that MemTrace's gate is built to isolate; that agentic edge is what layer 1 measures. Absolute accuracy is modest because retrieval uses lexical/deterministic vectors (this environment has no real embedding endpoint). Not a leaderboard submission. Requires a downloaded `locomo10.json` + an LLM endpoint.</sub>
+
+**Synthetic Q&A** (`app/benchmark/qa_bench.py`): on 4 agentic scenarios the gated-memory answer is correct only *with* MemTrace context — **4/4** (`bun test` not `npm`; `/api/v2/users` not `v1`; `Bun·pnpm·Postgres`), vs *"I do not have that information."* with no memory.
+
+```bash
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE_LLM_MODEL=gpt-5.4 \
+  uv run python -m app.benchmark.qa_bench --output-dir reports
+# real dataset (download locomo10.json first):
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_MODEL=gpt-5.4 MEMTRACE_LOCOMO_PATH=locomo10.json \
+  uv run python -m app.benchmark.locomo_bench --limit 30 --output-dir reports
+```
+
+
 
 **Real public dataset — LoCoMo** (`app/benchmark/locomo_bench.py`): seeds real long-conversation turns as memory, answers a 30-question sample under three conditions with a real LLM answering + a real LLM judge grading against gold answers.
 
