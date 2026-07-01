@@ -56,7 +56,7 @@ Plain vector recall retrieves text that is *semantically* similar but often *ope
 flowchart LR
     A["Agent<br/>runs · steps · events"] -->|persist raw trace first| B[("PostgreSQL<br/>+ pgvector")]
     B --> C["Execution state tree<br/>root → step → recovery"]
-    C --> D["State-aware retrieval<br/>lexical + vector + active-path"]
+    C --> D["State-aware retrieval<br/>lexical + vector + active-path<br/><i>(opt: BM25 · graph · multi-hop)</i>"]
     D --> E{"Admission gate<br/>hard · risk · soft"}
     E -->|accept| F["Context packer<br/>+ compaction"]
     E -->|degrade| G["avoided_attempts<br/>negative evidence"]
@@ -68,7 +68,7 @@ flowchart LR
 
 1. **Trace first.** Raw events are persisted before any derived memory extraction — the trace is the source of truth.
 2. **State tree.** Runs become a `root → step → recovery` tree, so failed and rolled-back branches are first-class, not lost.
-3. **State-aware retrieval.** Candidate scoring blends lexical + deterministic-vector similarity with the live active path.
+3. **State-aware retrieval.** Candidate scoring blends lexical + deterministic-vector similarity with the live active path — with optional BM25/graph fusion, task-intent ranking profiles, and multi-hop expansion when enabled.
 4. **Admission gate.** A three-layer `hard / risk / soft` gate accepts, degrades, or rejects each candidate before prompt use.
 5. **Pack & compact.** The packer assembles bounded context, retaining protected constraints under budget pressure.
 6. **Replay everything.** Every retrieval is reconstructable from access/gate logs and a policy snapshot that distinguishes data drift from policy drift.
@@ -78,9 +78,11 @@ flowchart LR
 - 🧱 **Core runtime** — `MemoryRuntime` with runs, steps, events, state tree, memory writer/resolver, retrieval controller, admission gate, context packer, profiler, and a full `/v1` FastAPI surface.
 - 🗄️ **Storage** — PostgreSQL + pgvector source of truth, plus a deterministic in-memory runtime for tests and no-network demos.
 - 🛡️ **Safety & quality** — context compaction, failure-aware negative evidence, retained-negative compaction metadata, replay, JSON/Markdown/HTML reports, and deterministic benchmark acceptance.
-- 🔌 **Pluggable providers** — provider registry + controlled memory-key ontology with deterministic defaults and config-gated real providers; optional default-off query planner (entity/keyword hints).
-- ⚙️ **Platform foundations** — optional async Redis/Celery, lifecycle/reflection signals, memory versions/conflicts, default-off governance/auth/quota, and redaction-state protections.
-- 🧰 **Integrations** — Python SDK, CLI, LangGraph adapter, TypeScript SDK (`@memtrace/sdk`), MCP server (`@memtrace/mcp-server`), and Claude Code / Cursor MCP config templates.
+- 🔎 **Advanced retrieval** *(optional & default-off — the deterministic lexical+vector path stays the default)* — query planner (entity/keyword hints, need-retrieval skip, query rewrite), multi-hop iterative retrieval, optional Elasticsearch/OpenSearch hybrid BM25, optional Neo4j provenance graph + neighbor expansion, multi-path RRF fusion (lexical + vector + BM25), task-intent ranking profiles, and a multi-store consistency reconciler — each behind a flag, so candidate scoring stays byte-identical (and benchmark/replay unchanged) when off.
+- 🌳 **State-tree depth** — full `node_type` vocabulary (`root/subgoal/step/tool_call/recovery/summary`), deterministic subgoal auto-inference, and a MAGE Grow/Compress/Maintain/Revise planner (default-off, read-only analysis; the coordination point for summary-node × lifecycle-decay compression).
+- 🔌 **Pluggable providers** — provider registry + controlled memory-key ontology with deterministic defaults and config-gated real providers.
+- ⚙️ **Platform & governance** — optional async Redis/Celery, lifecycle/reflection signals, memory versions/conflicts, and default-off multi-tenant governance: API-key **and JWT/OIDC** auth, workspace membership, quota, redaction-state protections, an optional encrypted raw-payload store, a distributed scheduler lease, and Celery beat.
+- 🧰 **Integrations** — Python SDK, CLI, LangGraph adapter, TypeScript SDK (`@memtrace/sdk`), MCP server (`@memtrace/mcp-server`), Claude Code / Cursor MCP config templates, a **VS Code extension** (`packages/vscode-extension`), and scale-only **Go trace-collector / Rust profile-analyzer** components.
 - 📊 **Observability** — default-off OpenTelemetry/OpenInference-compatible export (noop/JSONL/optional OTLP) and a React/TypeScript dashboard in `apps/web` (Overview, Run Explorer, Access Replay, Benchmark Lab, Memory Atlas, read-only Ops, fixture Showcase).
 
 ## 🚀 Quickstart: 5-minute no-network demo
@@ -189,6 +191,24 @@ Checked-in local-development templates:
 Both templates launch `bun packages/mcp-server/src/server.ts` relative to the repository root and therefore require `bun` to be available on the MCP client's `PATH`. If your MCP client launches from another directory, replace that path with an absolute path or an installed package command. If Bun is not globally available to the client, configure an absolute Bun executable path or wait for the future installed `memtrace-mcp-server` command after package publishing is explicitly approved. If your client does not expand `${MEMTRACE_BASE_URL}` / `${MEMTRACE_API_KEY}`, render or replace those values outside version control.
 
 Available MCP tools: `memtrace_start_run`, `memtrace_start_step`, `memtrace_write_event`, `memtrace_retrieve_context`, `memtrace_inspect_access`, `memtrace_finish_step`, `memtrace_replay_access`, and `memtrace_report`.
+
+A thin **VS Code extension** lives in [`packages/vscode-extension`](packages/vscode-extension). It calls `/v1` through `@memtrace/sdk` and contributes the `MemTrace: Retrieve Context`, `Show Run Timeline`, and `Inspect Access` commands, reading `memtrace.baseUrl` / `memtrace.apiKey` (secrets prefer the `MEMTRACE_API_KEY` environment variable). Like the MCP server, it never reimplements runtime semantics — it is excluded from the default build and requires `@types/vscode` + a VS Code extension host to develop.
+
+## 🧪 Optional advanced retrieval (default-off)
+
+The default retrieval path is deterministic lexical + vector scoring. Every advanced retrieval mechanism is gated behind an environment flag and leaves candidate scoring byte-identical (and benchmark/replay unchanged) when off:
+
+| Capability | Flag | Notes |
+| --- | --- | --- |
+| Query planner (hints / rewrite / need-retrieval) | `MEMTRACE_RETRIEVAL_QUERY_PLANNER=off\|hints\|full` | No model / network; deterministic |
+| Multi-hop iterative retrieval | `MEMTRACE_RETRIEVAL_MULTI_HOP_HOPS=0..4` | Budget-bounded entity-cue expansion |
+| Hybrid BM25 backend | `MEMTRACE_RETRIEVAL_HYBRID_BACKEND=off\|inmemory\|elasticsearch\|opensearch` | ES/OpenSearch via the optional `search` extra; degrades cleanly |
+| Provenance-graph neighbor expansion | `MEMTRACE_RETRIEVAL_GRAPH_BACKEND=off\|inmemory\|neo4j` | Neo4j via the optional `graph` extra; lifecycle filter preserved |
+| Multi-path fusion | `MEMTRACE_RETRIEVAL_FUSION=linear\|rrf` | RRF fuses lexical + vector + BM25 |
+| Task-intent ranking profiles | `MEMTRACE_RETRIEVAL_RANKING_PROFILES_ENABLED=true` | Deterministic per-memory-type re-weighting |
+| Secondary-index consistency | `reindex_secondary` maintenance op | Reconciles ES/Neo4j toward PostgreSQL |
+
+Governance is likewise default-off: JWT/OIDC auth (`MEMTRACE_JWT_AUTH_ENABLED`, HS256 native, RS256/ES256 via the optional `jwt` extra), a workspace membership table, a distributed scheduler lease (`MEMTRACE_SCHEDULER_LEASE_BACKEND`), Celery beat (`MEMTRACE_CELERY_BEAT_ENABLED`), and an encrypted raw-payload store (optional `crypto` extra). See [deployment notes](docs/deployment.md).
 
 ## 📡 Telemetry export
 
@@ -314,9 +334,11 @@ Default local/dev/benchmark behavior keeps auth, quotas, Redis/Celery, live Post
 
 ## 🗺️ Roadmap
 
-The completed MVP, observability, compaction, failure-aware negative evidence, SDK/CLI/LangGraph, six-strategy benchmark, security/consistency hardening, provider registry/key ontology, Phase 4 platform foundations, TypeScript SDK, MCP server, release-readiness work, and the core OpenTelemetry/OpenInference exporter are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md).
+The completed MVP, observability, compaction, failure-aware negative evidence, SDK/CLI/LangGraph, six-strategy benchmark, security/consistency hardening, provider registry/key ontology, Phase 4 platform foundations, TypeScript SDK, MCP server, release-readiness work, the OpenTelemetry/OpenInference exporter, and the React/TypeScript dashboard are tracked in [`docs/design/ROADMAP.md`](docs/design/ROADMAP.md).
 
-Advanced retrieval/storage (Elasticsearch/Neo4j hybrid retrieval, full query planner, multi-hop), admin workflow depth, richer telemetry backfill/CLI surfaces, and a dedicated IDE extension remain future work, gated on trigger conditions (e.g., the IDE package waits for MCP adoption feedback). A built-in read-only static Dashboard UI is available at `/v1/dashboard/ui`; the richer interactive React/TypeScript dashboard already lives in `apps/web`.
+The previously-deferred advanced backlog is now **implemented as default-off, degrade-safe capabilities**: Elasticsearch/OpenSearch hybrid retrieval, Neo4j provenance graph + neighbor expansion, multi-path RRF fusion, the full query planner, multi-hop retrieval, task-intent ranking profiles, multi-store consistency, the extended state-tree node types + subgoal inference + MAGE operations, full multi-tenant governance (JWT/OIDC, workspace membership, distributed scheduler lease, Celery beat, encrypted payload store), a VS Code extension, and scale-only Go/Rust components. The deterministic default path is unchanged (benchmark/reproduce stay 16/16) and PostgreSQL remains the source of truth. A built-in read-only static Dashboard UI is available at `/v1/dashboard/ui`; the richer interactive React/TypeScript dashboard lives in `apps/web`.
+
+Explicitly **out of scope** (see the roadmap's §8): a full LoCoMo/MemoryArena leaderboard, multimodal ingestion, a full knowledge-graph frontend, a trained MemGate model, and a multi-agent platform.
 
 ## 📄 License
 
