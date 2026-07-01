@@ -1,0 +1,54 @@
+# Optional "full" tier — ROADMAP §4 external advanced-retrieval backends.
+#
+# Elasticsearch (hybrid BM25) + Neo4j (provenance graph). These are NOT used by
+# default demos, tests, or the benchmark — pgvector remains the source of truth,
+# and both retrieval backends degrade cleanly to lexical/vector when absent. They
+# are only exercised when you ALSO:
+#   1) install the optional Python extras:   uv sync --extra search --extra graph
+#   2) enable the backends:  MEMTRACE_RETRIEVAL_HYBRID_BACKEND=elasticsearch
+#                            MEMTRACE_RETRIEVAL_GRAPH_BACKEND=neo4j
+#
+# Start (layered on the core postgres compose):
+#   docker compose -f docker-compose.yml -f docker-compose.full.yml up -d
+#
+# Verify end-to-end (skips cleanly if a backend is down or an extra is missing):
+#   MEMTRACE_ES_URL=http://localhost:9200 \
+#   MEMTRACE_NEO4J_URL=bolt://localhost:7687 MEMTRACE_NEO4J_PASSWORD=memtrace-neo4j \
+#   ./scripts/smoke-advanced-backends.sh
+#
+# Security note: single-node ES with security disabled and a fixed Neo4j password
+# are for LOCAL DEVELOPMENT ONLY. Do not expose these ports publicly.
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    container_name: memtrace-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - memtrace_esdata:/usr/share/elasticsearch/data
+
+  neo4j:
+    image: neo4j:5.22
+    container_name: memtrace-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/memtrace-neo4j
+      NEO4J_server_memory_heap_max__size: "512M"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - memtrace_neo4jdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p memtrace-neo4j 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  memtrace_esdata:
+  memtrace_neo4jdata:

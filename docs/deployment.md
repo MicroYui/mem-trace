@@ -64,7 +64,41 @@ the task needs (ROADMAP §7):
 |------|---------|----------|
 | **core** | `docker-compose up -d` | API (run locally via `uv`) + PostgreSQL/pgvector — the only tier required for the default no-network demo, tests, and benchmark. |
 | **dev** | `docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d` | core **+** Redis **+** Celery worker, for the optional async path above. |
-| **full** | _(deferred)_ | core/dev **+** Elasticsearch/OpenSearch **+** Neo4j **+** containerized frontend. Deferred to Phase 5: the runtime does not yet use ES/Neo4j (they are trigger-gated in ROADMAP §4), so a `docker-compose.full.yml` is intentionally not shipped to avoid standing up backend services the application cannot use. The `apps/web` dashboard runs as a separate Bun dev server (see `apps/web/README` / `docs/getting-started.md`), not a compose service.
+| **full** | `docker-compose -f docker-compose.yml -f docker-compose.full.yml up -d` | core **+** Elasticsearch (hybrid BM25) **+** Neo4j (provenance graph), for the ROADMAP §4 external advanced-retrieval backends. Opt-in only. The `apps/web` dashboard runs as a separate Bun dev server (see `apps/web/README` / `docs/getting-started.md`), not a compose service. |
+
+### Full tier — external advanced-retrieval backends
+
+pgvector remains the source of truth. The Elasticsearch and Neo4j retrieval
+backends are **default-off and degrade-safe**: with the backend flag unset (or the
+service/extra absent) retrieval uses the deterministic lexical/vector path and the
+benchmark stays 16/16. To actually exercise them end-to-end:
+
+```bash
+# 1. install the optional Python extras (elasticsearch / neo4j clients)
+uv sync --extra search --extra graph
+
+# 2. start the external backends (layered on core postgres)
+docker-compose -f docker-compose.yml -f docker-compose.full.yml up -d elasticsearch neo4j
+
+# 3. verify they work end-to-end (skips cleanly if a backend is down / extra missing)
+#    (the smoke defaults the Neo4j password to the docker-compose.full.yml value)
+MEMTRACE_ES_URL=http://localhost:9200 MEMTRACE_NEO4J_URL=bolt://localhost:7687 \
+  ./scripts/smoke-advanced-backends.sh
+
+# 4. enable them for the running API / retrieval
+export MEMTRACE_RETRIEVAL_HYBRID_BACKEND=elasticsearch  # BM25 fusion
+export MEMTRACE_ES_URL=http://localhost:9200
+export MEMTRACE_RETRIEVAL_GRAPH_BACKEND=neo4j           # provenance neighbor expansion
+export MEMTRACE_NEO4J_URL=bolt://localhost:7687
+export MEMTRACE_NEO4J_PASSWORD=your-neo4j-password      # docker-compose.full.yml default: memtrace-neo4j
+```
+
+If you want the advantages of these backends without any external service, the
+`inmemory` modes (`MEMTRACE_RETRIEVAL_HYBRID_BACKEND=inmemory`,
+`MEMTRACE_RETRIEVAL_GRAPH_BACKEND=inmemory`) run deterministic in-process BM25 /
+provenance-graph BFS with zero dependencies. The single-node ES (security
+disabled) and fixed Neo4j password in `docker-compose.full.yml` are for **local
+development only**; do not expose those ports publicly.
 
 
 ## Auth, governance, and quotas

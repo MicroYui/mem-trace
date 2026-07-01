@@ -289,6 +289,8 @@ The default retrieval path is deterministic lexical + vector scoring. Every adva
 | Task-intent ranking profiles | `MEMTRACE_RETRIEVAL_RANKING_PROFILES_ENABLED=true` | Deterministic per-memory-type re-weighting |
 | Secondary-index consistency | `reindex_secondary` maintenance op | Reconciles ES/Neo4j toward PostgreSQL |
 
+The `inmemory` hybrid/graph modes run deterministic in-process BM25 / provenance-graph BFS with **zero external services**. For the real Elasticsearch / Neo4j backends, `docker-compose.full.yml` ships the services: `uv sync --extra search --extra graph`, `docker-compose -f docker-compose.yml -f docker-compose.full.yml up -d`, then `./scripts/smoke-advanced-backends.sh` to verify end-to-end. See [deployment notes](docs/deployment.md#full-tier--external-advanced-retrieval-backends).
+
 Governance is likewise default-off: JWT/OIDC auth (`MEMTRACE_JWT_AUTH_ENABLED`, HS256 native, RS256/ES256 via the optional `jwt` extra), a workspace membership table, a distributed scheduler lease (`MEMTRACE_SCHEDULER_LEASE_BACKEND`), Celery beat (`MEMTRACE_CELERY_BEAT_ENABLED`), and an encrypted raw-payload store (optional `crypto` extra). See [deployment notes](docs/deployment.md).
 
 ## 📡 Telemetry export

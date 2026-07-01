@@ -2,6 +2,19 @@
 
 # Project State
 
+## Latest Session (2026-07-01 — ship docker-compose.full.yml: ES + Neo4j external retrieval backends)
+
+User pointed out the real gap: `MEMTRACE_RETRIEVAL_HYBRID_BACKEND=elasticsearch` / `_GRAPH_BACKEND=neo4j` had switches but **no compose deployment**, so selecting them just degraded to lexical/vector (no error, no ES/Neo4j). This reverses the earlier "full tier deferred" decision (that was deliberate anti-invented-infra, but the user wants the option). Closed the gap; default path unchanged, benchmark still **16/16**.
+
+- **Verified the backends are self-contained** (`retrieval/hybrid.py` / `graph.py`): `ElasticsearchBM25Backend.bm25_scores` indexes candidate memories on the fly (idempotent upsert by memory_id) then runs a filtered match; `Neo4jProvenanceGraph.related` MERGEs edges then runs a variable-length path query. Both lazy-import the optional extra and degrade to `available=False` when the package/endpoint is absent; the controller only uses them when `.available`. The `search`/`graph` extras already exist in root `pyproject.toml` (`elasticsearch>=8.0` / `neo4j>=5.0`).
+- **New `docker-compose.full.yml`** — overlay adding single-node Elasticsearch 8.14 (security disabled, 512m heap) + Neo4j 5.22 (auth `neo4j/memtrace-neo4j`, cypher-shell healthcheck), named volumes, ports 9200 / 7474+7687. Layered onto core postgres; NOT started by default demos/tests/benchmark. `docker compose -f docker-compose.yml -f docker-compose.full.yml config` validated OK.
+- **New `scripts/smoke-advanced-backends.sh`** — opt-in end-to-end smoke (inline `uv run python` heredoc, reproduce.sh style): checks ES BM25 (ranks the matching memory first) + Neo4j graph (distance-weighted neighbors from a 3-node chain). Skips cleanly per backend when the extra isn't installed or the endpoint is unreachable (distinguishes skip vs real fail); exits non-zero only on a functional defect. Verified it **skips cleanly** here (extras not installed).
+- **Docs:** `docs/deployment.md` "Compose layering" now lists the **full** tier (was "deferred") with a 4-step enable/verify recipe + the `inmemory` zero-dep alternative + local-dev-only security note; README advanced-retrieval table gained a full-tier pointer.
+- **Could NOT run the real containers here:** the sandbox denies `docker compose up` (needs daemon + network to pull images). Validated everything short of that — compose config OK, smoke skips clean, backend code paths confirmed self-contained. The user can run the 4-step recipe to prove `=elasticsearch`/`=neo4j` end-to-end (I built the smoke exactly for that).
+- **Hygiene note:** the release-hygiene guard flags literal `PASSWORD=<value>` in docs — used a `your-neo4j-password` placeholder in the export example (allowlisted) and relied on the smoke's built-in default; compose/scripts are not scanned by hygiene.
+- **Verification:** release hygiene passed; `git diff --check` clean; deterministic benchmark **16/16** (no app/runtime code changed — only compose + shell + docs).
+- **Next recommended action:** none selected. When you have docker + the extras, run `scripts/smoke-advanced-backends.sh` against a live full tier to confirm end-to-end. Distinct axis: the `inmemory` hybrid/graph modes are already fully functional with zero deps.
+
 ## Latest Session (2026-07-01 — tree-shaped long-horizon execution-tree benchmark)
 
 User asked for a "树状长程完整流程" dataset — complex enough that MemTrace's advantage shows properly. Built a real-runtime execution-tree benchmark (the honest place MemTrace wins). Benchmark stays **16/16**.
