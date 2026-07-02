@@ -2,6 +2,17 @@
 
 # Project State
 
+# Project State
+
+## Latest Session (2026-07-02 — production-readiness: perf harness + O(N) retrieval fix)
+
+Goal set by user (`/goal`): make the system reach production-grade in performance/compatibility. I flagged three hard gaps (no perf data, O(N) retrieval, default hash embedding). Attacking them in slices.
+
+- **Slice 1 — perf harness + baseline (fills the "no perf data" blank).** New `app/benchmark/perf_bench.py` (deterministic, in-memory): `retrieve_context` p50/p95 across workspace sizes + `write_event` throughput. Baseline exposed an **O(N) retrieval bottleneck**: p50 18.7ms@200 → **2,191ms@20k** (≈116×; retrieval loads+scores EVERY workspace memory). write ~2,900/s. Test `tests/benchmark/test_perf_bench.py`. Commit `1a6fcb4`. (A user-spawned background agent then added a resource-capped `--load` mode + `scripts/perf-load.sh` in `c20b358`/`2ec41e6` — note: it pushed to main flagged as unauthorized-by-CLAUDE.md, but it's legit perf-load work.)
+- **Slice 2 — fix the O(N) retrieval (default-off, measured 39× win).** New config `retrieval_candidate_limit` (default 0 = off, byte-identical → 16/16 unchanged). When >0: `InMemoryRepository.prefilter_candidate_ids` (cached inverted token index, rebuilt on a write-seq bump) returns a bounded relevance-ranked candidate set; `list_candidate_memories` loads ONLY those ids (+ `project` constraints) instead of deep-copying the whole workspace; controller `_select_candidates` scores lexical AND vector only over the bounded set (skips the O(N) `list_memories` copy AND the O(N) vector scan). Result @20k: **2,191ms → 56ms (~39×)**, scaling **116× → 4.6×** (near-flat). Full pytest **997 passed, 3 skipped**; benchmark **16/16**. Test `tests/retrieval/test_candidate_prefilter.py` (6: prefilter ranking/rebuild, bounded loader, unique-target recall preserved, default-off matches full scan). `docs/benchmark.md` documents the knob + the coarse-count tradeoff (use a generous limit).
+- **Honest scope:** the prefilter is a COARSE token-overlap-count filter (recommend generous `candidate_limit`); the in-memory inverted index is the first backend — the SQL/pgvector-indexed prefilter for large Postgres deployments is future work. Also: `uv.lock` synced to the earlier search/graph extra caps (elasticsearch 9.x→8.19.3, neo4j `<7`).
+- **Still open toward the goal (roadmap):** real embedding provider e2e + semantic-quality (default is deterministic hash — biggest "not real semantic" caveat); SQL-side indexed prefilter; async+Redis buffer scale validation; real-LLM extraction scale; concurrency/soak under the capped load runner.
+
 ## Latest Session (2026-07-01 — ship docker-compose.full.yml: ES + Neo4j external retrieval backends)
 
 User pointed out the real gap: `MEMTRACE_RETRIEVAL_HYBRID_BACKEND=elasticsearch` / `_GRAPH_BACKEND=neo4j` had switches but **no compose deployment**, so selecting them just degraded to lexical/vector (no error, no ES/Neo4j). This reverses the earlier "full tier deferred" decision (that was deliberate anti-invented-infra, but the user wants the option). Closed the gap; default path unchanged, benchmark still **16/16**.

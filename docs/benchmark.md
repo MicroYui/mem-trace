@@ -255,3 +255,22 @@ PERF_CPUS=1 PERF_MEM=1g PERF_CONCURRENCY=16 PERF_DURATION=15 ./scripts/perf-load
 ```
 
 Both modes are measurement tools, not CI gates.
+
+### Bounded candidate prefilter (`MEMTRACE_RETRIEVAL_CANDIDATE_LIMIT`)
+
+The scaling mode exposed an O(N) hot path: by default `retrieve_context` loads and
+scores **every** retrievable workspace memory (lexical + vector + gate), so p50
+grows linearly — measured **18.7 ms @ 200 → 2,191 ms @ 20,000** memories (≈116×).
+
+`MEMTRACE_RETRIEVAL_CANDIDATE_LIMIT=N` (default `0` = off) fixes this: retrieval
+loads only a bounded, relevance-ranked candidate set from an inverted-index
+prefilter (plus always-relevant `project` constraints), and computes lexical +
+vector only over that set. With `N=800` the same curve flattens to **12 ms @ 200
+→ 56 ms @ 20,000** (≈4.6× — a **~39× speedup at 20k**), while the deterministic
+benchmark stays **16/16** (default `0` keeps candidate scoring byte-identical).
+
+Tradeoff (honest): the prefilter ranks by token-overlap **count**, so it is a
+coarse recall filter — set `N` generously (well above `top_k`) so a relevant
+memory sharing only common tokens is not crowded out. The in-memory inverted
+index is the first backend; the SQL/pgvector-indexed prefilter for large
+Postgres deployments is future work.

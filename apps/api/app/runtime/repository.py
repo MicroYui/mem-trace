@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Optional, Protocol, runtime_checkable
 from datetime import datetime
 
-from app.retrieval.similarity import cosine_similarity, stable_embedding
+from app.retrieval.similarity import cosine_similarity, stable_embedding, tokenize
 from app.runtime.models import (
     AdminActionAuditRecord,
     ApiKeyRecord,
@@ -314,6 +314,12 @@ class InMemoryRepository:
         self._events: dict[str, AgentEvent] = {}
         self._nodes: dict[str, StateNode] = {}
         self._memories: dict[str, MemoryItem] = {}
+        # Bounded-prefilter support: a monotonic write counter + a per-workspace
+        # cached inverted token index (token -> memory_ids), rebuilt lazily when the
+        # counter advances. Amortized cheap for read-heavy retrieval; only used when
+        # retrieval_candidate_limit > 0.
+        self._mem_write_seq: int = 0
+        self._prefilter_index: dict[str, tuple[int, dict[str, set[str]]]] = {}
         self._lifecycle_audits: dict[str, MemoryLifecycleAuditRecord] = {}
         self._retention_signals: dict[str, MemoryRetentionSignal] = {}
         self._memory_versions: dict[str, MemoryVersionRecord] = {}
@@ -421,6 +427,7 @@ class InMemoryRepository:
     async def add_memory(self, memory: MemoryItem) -> MemoryItem:
         ensure_embedding(memory)
         self._memories[memory.memory_id] = memory.model_copy(deep=True)
+        self._mem_write_seq += 1
         return memory
 
     async def get_memory(self, memory_id: str) -> Optional[MemoryItem]:
@@ -457,7 +464,75 @@ class InMemoryRepository:
                 )
             )
         self._memories[after.memory_id] = after.model_copy(deep=True)
+        self._mem_write_seq += 1
         return after
+
+    async def prefilter_candidate_ids(
+        self, *, workspace_id: Optional[str], query: str | None, limit: int
+    ) -> list[str]:
+        """Bounded, relevance-ranked candidate ids via a cached inverted token index.
+
+        Coarse recall-oriented prefilter for the retrieval hot path: returns up to
+        ``limit`` memory ids ranked by how many query tokens they contain, so the
+        controller can score lexical/vector/gate over a bounded set instead of every
+        workspace memory. The controller re-scores with the authoritative
+        ``lexical_similarity``; this only narrows the field. Deterministic tie-break
+        by memory id. Returns ``[]`` when disabled or query has no tokens.
+        """
+        if limit <= 0:
+            return []
+        query_tokens = set(tokenize(query))
+        if not query_tokens:
+            return []
+        cached = self._prefilter_index.get(workspace_id or "")
+        if cached is None or cached[0] != self._mem_write_seq:
+            index: dict[str, set[str]] = {}
+            for mem in self._memories.values():
+                if workspace_id is not None and mem.workspace_id != workspace_id:
+                    continue
+                for token in set(tokenize(mem.content)):
+                    index.setdefault(token, set()).add(mem.memory_id)
+            cached = (self._mem_write_seq, index)
+            self._prefilter_index[workspace_id or ""] = cached
+        index = cached[1]
+        counts: dict[str, int] = {}
+        for token in query_tokens:
+            for memory_id in index.get(token, ()):  # postings list for the token
+                counts[memory_id] = counts.get(memory_id, 0) + 1
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [memory_id for memory_id, _ in ranked[:limit]]
+
+    async def list_candidate_memories(
+        self,
+        *,
+        workspace_id: Optional[str],
+        ids: list[str],
+        include_types: tuple[str, ...] = (),
+    ) -> list[MemoryItem]:
+        """Bounded load for the retrieval hot path: only memories whose id is in
+        ``ids`` (fetched O(1) each) plus any of ``include_types`` (e.g. always-
+        relevant ``project`` constraints). Avoids deep-copying the whole workspace.
+        """
+        out: list[MemoryItem] = []
+        seen: set[str] = set()
+        for memory_id in ids:
+            mem = self._memories.get(memory_id)
+            if mem is None or (workspace_id is not None and mem.workspace_id != workspace_id):
+                continue
+            out.append(mem.model_copy(deep=True))
+            seen.add(memory_id)
+        if include_types:
+            types = set(include_types)
+            for mem in self._memories.values():
+                if mem.memory_id in seen:
+                    continue
+                if workspace_id is not None and mem.workspace_id != workspace_id:
+                    continue
+                if mem.memory_type.value in types:
+                    out.append(mem.model_copy(deep=True))
+                    seen.add(mem.memory_id)
+        out.sort(key=lambda m: m.created_at)
+        return out
 
     def _next_memory_version_no(self, memory_id: str) -> int:
         return 1 + sum(1 for version in self._memory_versions.values() if version.memory_id == memory_id)

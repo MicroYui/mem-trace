@@ -27,7 +27,7 @@ from app.retrieval.query_planner import (
     plan_query,
     rewrite_query,
 )
-from app.retrieval.similarity import lexical_similarity, stable_embedding
+from app.retrieval.similarity import cosine_similarity, lexical_similarity, stable_embedding
 from app.config import get_settings
 from app.providers.registry import ProviderRegistry
 from app.runtime.models import (
@@ -186,6 +186,7 @@ class RetrievalController:
         self._graph_backend_name = (settings.retrieval_graph_backend or "off").lower()
         # ROADMAP §4: deterministic task-intent ranking profiles (default-off).
         self._ranking_profiles_enabled = settings.retrieval_ranking_profiles_enabled
+        self._candidate_limit = max(0, settings.retrieval_candidate_limit)
 
     def _gate_config(self, strategy: RetrievalStrategy) -> "gatemod.GateConfig":
         config = gatemod.GateConfig.for_strategy(strategy)
@@ -812,8 +813,6 @@ class RetrievalController:
         ):
             return []
 
-        memories = await self._repo.list_memories(workspace_id=workspace_id)
-
         # ROADMAP §4 query rewrite (only under "full"): expand structural entity
         # terms (dotted keys, paths) into their component words so prose memories
         # that spell the words out still match. The original query is preserved;
@@ -823,17 +822,50 @@ class RetrievalController:
         if self._query_planner == "full":
             lexical_query = rewrite_query(query, task_intent).text
 
-        # Vector signal: deterministic embedding cosine via pgvector KNN (SQL)
-        # or in-memory cosine. Map memory_id -> cosine so we can blend it with
-        # the lexical signal per candidate. Falls back to lexical-only if vector
+        # Load candidates. Bounded prefilter (default-off) loads ONLY a bounded,
+        # relevance-ranked candidate set (via an inverted-index prefilter) plus
+        # always-relevant project constraints, instead of every workspace memory —
+        # so retrieval is not O(N) at scale. `include_all` (long_context) always
+        # loads everything. Default (candidate_limit=0) loads all, unchanged.
+        prefilter = getattr(self._repo, "prefilter_candidate_ids", None)
+        list_candidates = getattr(self._repo, "list_candidate_memories", None)
+        bounded = False
+        if (
+            self._candidate_limit > 0
+            and not include_all
+            and prefilter is not None
+            and list_candidates is not None
+        ):
+            cand_ids = await prefilter(
+                workspace_id=workspace_id, query=lexical_query, limit=self._candidate_limit
+            )
+            memories = await list_candidates(
+                workspace_id=workspace_id, ids=cand_ids, include_types=("project",)
+            )
+            bounded = True
+        else:
+            memories = await self._repo.list_memories(workspace_id=workspace_id)
+
+        retrievable = [m for m in memories if m.status in _RETRIEVABLE_STATUSES]
+
+        # Vector signal: deterministic embedding cosine. The default path uses the
+        # repo KNN (pgvector index on SQL) over the whole workspace; under the
+        # bounded prefilter, cosine is computed only over the narrowed candidate set
+        # so the vector cost is bounded too. Falls back to lexical-only when vector
         # retrieval is disabled or yields nothing (e.g. no embeddings stored).
         vector_scores: dict[str, float] = {}
         if self._use_vector:
             q_vec = await self._embed_query(lexical_query)
-            knn = await self._repo.search_memories_by_vector(
-                embedding=q_vec, workspace_id=workspace_id, top_k=max(top_k * 2, top_k)
-            )
-            vector_scores = {m.memory_id: sim for m, sim in knn}
+            if bounded:
+                vector_scores = {
+                    m.memory_id: cosine_similarity(q_vec, m.embedding_vector)
+                    for m in retrievable if m.embedding_vector
+                }
+            else:
+                knn = await self._repo.search_memories_by_vector(
+                    embedding=q_vec, workspace_id=workspace_id, top_k=max(top_k * 2, top_k)
+                )
+                vector_scores = {m.memory_id: sim for m, sim in knn}
 
         w_vec = self._vector_weight if (self._use_vector and vector_scores) else 0.0
         w_lex = 1.0 - w_vec
@@ -845,8 +877,6 @@ class RetrievalController:
         hints: tuple[str, ...] = ()
         if self._query_planner in ("hints", "full"):
             hints = plan_query(query, task_intent).hints
-
-        retrievable = [m for m in memories if m.status in _RETRIEVABLE_STATUSES]
 
         # ROADMAP §4 hybrid BM25 (default-off): an optional third lexical signal
         # from an external/deterministic backend. When it returns scores, scale

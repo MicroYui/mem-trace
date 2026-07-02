@@ -211,6 +211,15 @@ class Settings(BaseSettings):
     # multipliers chosen from the request's task_intent. Default-off leaves the
     # blend unchanged.
     retrieval_ranking_profiles_enabled: bool = False
+    # Bounded candidate prefilter (production scaling, ROADMAP §4, default-off).
+    # 0 (default) == off: retrieval loads and scores lexical + vector + gate over
+    # EVERY retrievable workspace memory, which is O(N) and dominates latency at
+    # scale (measured ~2.2s p50 at 20k memories). When > 0 and the repository
+    # provides an inverted-index prefilter (in-memory today), only a bounded,
+    # relevance-ranked candidate set (plus always-relevant project constraints) is
+    # scored, flattening retrieve latency. Default 0 keeps candidate scoring
+    # byte-identical, so the benchmark stays 16/16.
+    retrieval_candidate_limit: int = 0
     # Deterministic state-tree subgoal auto-inference (ROADMAP §5, default-off).
     # When enabled, MemoryRuntime.infer_run_subgoals groups consecutive same-goal
     # steps into inferred subgoal nodes (read-side analysis; the stored tree is
@@ -296,6 +305,13 @@ class Settings(BaseSettings):
     def _validate_retrieval_multi_hop_max_cues(cls, value: int) -> int:
         if value < 1 or value > 16:
             raise ValueError("retrieval_multi_hop_max_cues must be between 1 and 16")
+        return value
+
+    @field_validator("retrieval_candidate_limit")
+    @classmethod
+    def _validate_retrieval_candidate_limit(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("retrieval_candidate_limit must be >= 0 (0 disables the prefilter)")
         return value
 
     @field_validator("retrieval_hybrid_backend")
