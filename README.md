@@ -19,6 +19,7 @@ Most "agent memory" is a vector store with extra steps. MemTrace treats memory a
   <a href="#-quickstart-5-minute-no-network-demo"><b>Quickstart</b></a> ·
   <a href="#-why-not-plain-vector-memory"><b>Why</b></a> ·
   <a href="#-how-it-works"><b>How it works</b></a> ·
+  <a href="#-system-architecture"><b>Architecture</b></a> ·
   <a href="#-benchmark-snapshot"><b>Benchmark</b></a> ·
   <a href="#-user-docs"><b>Docs</b></a> ·
   <a href="docs/design/ROADMAP.md"><b>Roadmap</b></a>
@@ -73,7 +74,69 @@ flowchart LR
 5. **Pack & compact.** The packer assembles bounded context, retaining protected constraints under budget pressure.
 6. **Replay everything.** Every retrieval is reconstructable from access/gate logs and a policy snapshot that distinguishes data drift from policy drift.
 
-> 📐 The diagram above is the hot path. For the **complete system architecture** — every component across all planes (runtime, providers, governance, async, observability/telemetry, storage, benchmark, integrations), including the default-off ones and the flag that enables each — see [docs/architecture-diagram.md](docs/architecture-diagram.md).
+## 🏗️ System architecture
+
+The whole system at a glance — solid = default-on, **dashed = default-off / opt-in**, blue = data stores. Everything dashed is degrade-safe: turn it off (or leave the service/extra absent) and candidate scoring is byte-identical, benchmark stays 16/16. For the exhaustive per-module diagram + the `MEMTRACE_*` flag that enables each optional piece, see [docs/architecture-diagram.md](docs/architecture-diagram.md).
+
+```mermaid
+flowchart TB
+  classDef core fill:#e6f4ea,stroke:#3fb950,color:#0b1f10;
+  classDef opt fill:#fff4e5,stroke:#e0a458,stroke-dasharray:5 4,color:#3a2a06;
+  classDef store fill:#e7efff,stroke:#4c8dff,color:#0a1a33;
+
+  subgraph CL["Clients & integrations"]
+    direction LR
+    C1["Python SDK · TS SDK · MCP server · CLI · demos"]:::core
+    C2["React dashboard · VS Code ext · Go/Rust collectors"]:::opt
+  end
+  subgraph AP["API — FastAPI /v1"]
+    direction LR
+    A1["routes · deps (DI + auth/quota) · static dashboard UI"]:::core
+    A2["admin API"]:::opt
+  end
+  subgraph CORE["Runtime core — MemoryRuntime facade"]
+    direction LR
+    R1["Trace + state tree<br/>root → step → recovery"]:::core
+    R2["Write / extract<br/>rule writer · resolver/conflict · buffer · summarizer · lifecycle"]:::core
+    R3["Retrieval controller<br/>lexical + vector · gate (hard/risk/soft) · packer + compaction · profiler"]:::core
+    R4["subgoal inference · MAGE planner"]:::opt
+    R5["LLM extraction · rolling summary · Redis buffer"]:::opt
+    R6["query planner · multi-hop · BM25 · graph · RRF · ranking profiles"]:::opt
+  end
+  subgraph SIDE["Cross-cutting planes"]
+    direction LR
+    P1["Providers<br/>embedding / extract / summarize / judge"]:::core
+    P4["Observability<br/>metrics · replay · reports"]:::core
+    P2["Governance<br/>auth/JWT · membership · admin · quota · redaction · encrypted store"]:::opt
+    P3["Async<br/>Celery · idempotency · lease · beat · worker"]:::opt
+    P5["Telemetry<br/>OTel/OpenInference exporters"]:::opt
+  end
+  subgraph ST["Storage"]
+    direction LR
+    S1["Repository → InMemory / SQL (Alembic)"]:::core
+    S2[("PostgreSQL + pgvector<br/>source of truth")]:::store
+    S3[("Redis")]:::store
+    S4[("Elasticsearch")]:::store
+    S5[("Neo4j")]:::store
+  end
+  subgraph BE["Benchmark & eval (offline)"]
+    direction LR
+    B1["runner · dataset_bench · trace_bench · plots"]:::core
+    B2["real-LLM: qa / locomo / llm bench"]:::opt
+  end
+
+  CL --> AP --> CORE --> ST
+  S1 --> S2
+  S1 -. opt .-> S3
+  R6 -. opt .-> S4
+  R6 -. opt .-> S5
+  CORE -. uses .-> P1
+  AP -. gated by .-> P2
+  CORE -. offload .-> P3
+  CORE --> P4
+  CORE -. fail-open .-> P5
+  B1 -. drives .-> CORE
+```
 
 ## ✨ What's implemented today
 
