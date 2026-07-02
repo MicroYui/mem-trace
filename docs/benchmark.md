@@ -233,3 +233,26 @@ for the gate to isolate (MemTrace's edge is agentic, shown in the synthetic scal
 run). Retrieval also uses lexical/deterministic vectors here (no real embedding
 endpoint), so absolute accuracy is modest. This proves the pipeline on real data
 + a real model; it is not a leaderboard submission.
+
+## Performance / load testing (resource-capped)
+
+`app/benchmark/perf_bench.py` measures wall-clock cost (the correctness benchmark
+does not). It has two modes, both in-memory (no Postgres/ES, negligible disk):
+
+- **Scaling** (default): `retrieve_context` p50/p95 vs workspace size + `write_event`
+  throughput. `uv run python -m app.benchmark.perf_bench --sizes 200,1000,5000,20000`.
+- **Load**: sustained concurrent retrieval for a fixed duration, reporting
+  throughput (RPS) + p50/p95/p99 latency.
+  `uv run python -m app.benchmark.perf_bench --load --concurrency 16 --duration 15`.
+
+To measure the throughput ceiling under a **fixed CPU/memory quota** without
+hogging the host, run the load mode inside a capped container via
+`scripts/perf-load.sh` — it wraps `docker run --cpus/--memory`, so the
+single-process asyncio load saturates exactly the allotted budget:
+
+```bash
+PERF_CPUS=1 PERF_MEM=1g PERF_CONCURRENCY=16 PERF_DURATION=15 ./scripts/perf-load.sh
+```
+
+Both modes are measurement tools, not CI gates.
+

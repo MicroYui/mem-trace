@@ -147,13 +147,92 @@ async def run_perf_bench(sizes: list[int], trials: int, write_events: int, outpu
     return payload
 
 
+async def run_load_bench(
+    *, concurrency: int, duration_s: float, workspace_size: int, output_dir: str | None
+) -> dict[str, Any]:
+    """Sustained-load mode: saturate the available CPU and report throughput + tail
+    latency over a fixed duration, on a fixed-size workspace.
+
+    Single-process asyncio (CPU-bound retrieval), so it naturally pegs ~one core —
+    which is exactly what you want under ``docker run --cpus=N --memory=M`` (see
+    scripts/perf-load.sh): it measures the retrieval throughput achievable within a
+    fixed CPU/memory quota, without hogging the host. In-memory repo only (no
+    Postgres/ES), so disk use is negligible.
+    """
+    concurrency = max(1, concurrency)
+    repo = InMemoryRepository()
+    ws = "perf_ws"
+    rt = MemoryRuntime(repo, default_workspace_id=ws, provider_registry=deterministic_provider_registry())
+    run = await rt.start_run(StartRunRequest(session_id="perf", task="load", workspace_id=ws))
+    step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="answer"))
+    await _seed(repo, ws, workspace_size)
+    for _ in range(3):  # warmup
+        await rt.retrieve_context(RetrievalRequest(
+            run_id=run.run_id, step_id=step.step_id, query="warmup module 1",
+            strategy=RetrievalStrategy.variant_2))
+
+    latencies: list[float] = []
+    counter = 0
+    stop_at = time.perf_counter() + duration_s
+
+    async def worker() -> None:
+        nonlocal counter
+        while time.perf_counter() < stop_at:
+            i = counter
+            counter += 1  # atomic in the single-threaded event loop (no await between)
+            q = f"what is the {_TOPICS[i % len(_TOPICS)]} value for module {(i * 7) % workspace_size}"
+            t0 = time.perf_counter()
+            await rt.retrieve_context(RetrievalRequest(
+                run_id=run.run_id, step_id=step.step_id, query=q, strategy=RetrievalStrategy.variant_2))
+            latencies.append((time.perf_counter() - t0) * 1000.0)
+
+    t_start = time.perf_counter()
+    await asyncio.gather(*[worker() for _ in range(concurrency)])
+    elapsed = time.perf_counter() - t_start
+    completed = len(latencies)
+    payload: dict[str, Any] = {
+        "mode": "load",
+        "workspace_memories": workspace_size,
+        "concurrency": concurrency,
+        "duration_s": round(elapsed, 2),
+        "completed_retrievals": completed,
+        "throughput_rps": round(completed / elapsed, 1) if elapsed else 0.0,
+        "retrieve_p50_ms": round(median(latencies), 3) if latencies else 0.0,
+        "retrieve_p95_ms": _pct(latencies, 0.95),
+        "retrieve_p99_ms": _pct(latencies, 0.99),
+        "note": ("single-process asyncio, CPU-bound; run via scripts/perf-load.sh "
+                 "(docker --cpus/--memory) to measure throughput under a fixed quota"),
+    }
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "load_bench_results.json"), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+    return payload
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Retrieval hot-path performance / scaling harness")
     parser.add_argument("--sizes", default="200,1000,5000,20000", help="comma-separated workspace sizes")
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--write-events", type=int, default=2000)
     parser.add_argument("--output-dir", default="reports")
+    parser.add_argument("--load", action="store_true", help="sustained-load mode (throughput under a CPU/memory quota)")
+    parser.add_argument("--concurrency", type=int, default=16, help="load mode: concurrent retrieval workers")
+    parser.add_argument("--duration", type=float, default=15.0, help="load mode: seconds to sustain load")
+    parser.add_argument("--workspace-size", type=int, default=2000, help="load mode: memories in the workspace")
     args = parser.parse_args()
+
+    if args.load:
+        payload = asyncio.run(run_load_bench(
+            concurrency=args.concurrency, duration_s=args.duration,
+            workspace_size=args.workspace_size, output_dir=args.output_dir))
+        print(f"load: workspace={payload['workspace_memories']} concurrency={payload['concurrency']} "
+              f"duration={payload['duration_s']}s")
+        print(f"  throughput: {payload['throughput_rps']} retrievals/s over {payload['completed_retrievals']} calls")
+        print(f"  latency p50/p95/p99 ms: {payload['retrieve_p50_ms']} / "
+              f"{payload['retrieve_p95_ms']} / {payload['retrieve_p99_ms']}")
+        return 0
+
     sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
     payload = asyncio.run(run_perf_bench(sizes, args.trials, args.write_events, args.output_dir))
     print(f"config: {payload['config']}")
