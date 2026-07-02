@@ -8,9 +8,14 @@ from __future__ import annotations
 from typing import Optional
 from datetime import datetime
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+import operator
+from functools import reduce
+
+from app.retrieval.similarity import tokenize
 
 from app.runtime.repository import (
     ensure_embedding,
@@ -962,6 +967,68 @@ class SqlRepository:
             if run_id is not None:
                 stmt = stmt.where(orm.MemoryORM.run_id == run_id)
             stmt = stmt.order_by(orm.MemoryORM.created_at)
+            rows = (await s.execute(stmt)).scalars().all()
+            return [_mem_from_orm(o) for o in rows]
+
+    async def prefilter_candidate_ids(
+        self, *, workspace_id: Optional[str], query: str | None, limit: int
+    ) -> list[str]:
+        """Bounded, relevance-ranked candidate ids (Postgres-side, ROADMAP §4).
+
+        Pushes the coarse lexical prefilter into the database: matches memories
+        whose content contains any query token (``ILIKE``) and returns the top
+        ``limit`` ranked by how many distinct query tokens they contain, so the
+        controller loads and scores only a bounded set instead of the whole
+        workspace. The controller re-scores with the authoritative
+        ``lexical_similarity``; this only narrows the field. A ``tsvector`` GIN
+        index would make this sublinear; even without one the DB filters + limits
+        server-side instead of streaming every row into Python.
+        """
+        if limit <= 0:
+            return []
+        tokens = sorted({t for t in tokenize(query)})
+        if not tokens:
+            return []
+        patterns = [f"%{token}%" for token in tokens]
+        overlap = reduce(
+            operator.add,
+            [case((orm.MemoryORM.content.ilike(pattern), 1), else_=0) for pattern in patterns],
+        )
+        async with self._sf() as s:
+            stmt = select(orm.MemoryORM.memory_id, overlap.label("overlap"))
+            if workspace_id is not None:
+                stmt = stmt.where(orm.MemoryORM.workspace_id == workspace_id)
+            stmt = (
+                stmt.where(or_(*[orm.MemoryORM.content.ilike(pattern) for pattern in patterns]))
+                .order_by(overlap.desc(), orm.MemoryORM.memory_id)
+                .limit(limit)
+            )
+            rows = (await s.execute(stmt)).all()
+            return [row[0] for row in rows]
+
+    async def list_candidate_memories(
+        self,
+        *,
+        workspace_id: Optional[str],
+        ids: list[str],
+        include_types: tuple[str, ...] = (),
+    ) -> list[MemoryItem]:
+        """Bounded load: memories whose id is in ``ids`` (PK-indexed) plus any of
+        ``include_types`` (e.g. always-relevant ``project`` constraints). Avoids
+        streaming the whole workspace into Python under the candidate prefilter.
+        """
+        conditions = []
+        if ids:
+            conditions.append(orm.MemoryORM.memory_id.in_(list(ids)))
+        if include_types:
+            conditions.append(orm.MemoryORM.memory_type.in_(list(include_types)))
+        if not conditions:
+            return []
+        async with self._sf() as s:
+            stmt = select(orm.MemoryORM)
+            if workspace_id is not None:
+                stmt = stmt.where(orm.MemoryORM.workspace_id == workspace_id)
+            stmt = stmt.where(or_(*conditions)).order_by(orm.MemoryORM.created_at)
             rows = (await s.execute(stmt)).scalars().all()
             return [_mem_from_orm(o) for o in rows]
 

@@ -271,6 +271,8 @@ benchmark stays **16/16** (default `0` keeps candidate scoring byte-identical).
 
 Tradeoff (honest): the prefilter ranks by token-overlap **count**, so it is a
 coarse recall filter — set `N` generously (well above `top_k`) so a relevant
-memory sharing only common tokens is not crowded out. The in-memory inverted
-index is the first backend; the SQL/pgvector-indexed prefilter for large
-Postgres deployments is future work.
+memory sharing only common tokens is not crowded out. Both backends implement it:
+the in-memory repo uses a cached inverted token index; `SqlRepository` pushes the
+prefilter into Postgres (`content ILIKE any-token` + `ORDER BY overlap LIMIT N`,
+and `list_candidate_memories` loads only the PK-matched ids). A `tsvector` GIN
+index is the further optimization to make the SQL prefilter sublinear.
