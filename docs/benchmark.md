@@ -274,7 +274,36 @@ coarse recall filter — set `N` generously (well above `top_k`) so a relevant
 memory sharing only common tokens is not crowded out. Both backends implement it:
 the in-memory repo uses a cached inverted token index; `SqlRepository` pushes the
 prefilter into Postgres (`content ILIKE any-token` + `ORDER BY overlap LIMIT N`,
-and `list_candidate_memories` loads only the PK-matched ids). Live-verified on
-Postgres (pgvector/pg16, 3,001 memories): retrieval **223 ms → 28 ms (~8×)** with
-`N=800`. A `tsvector` GIN index is the further optimization to make the SQL
-prefilter sublinear.
+and `list_candidate_memories` loads only the PK-matched ids). Migration `0014`
+adds a `pg_trgm` GIN index on `content` so the ILIKE prefilter is index-accelerated
+(sublinear), no query change. Live-verified on Postgres (pgvector/pg16): with the
+index, retrieval at **20,001 memories** is **1,143 ms → 15.8 ms (~72×)** with
+`N=800`, and the prefiltered latency stays ~flat with scale (28 ms @3k → 16 ms
+@20k) while the unbounded path grows with N.
+
+## Semantic embedding quality (real vs the hash default)
+
+The default `EMBEDDING_PROVIDER=deterministic` is a blake2b bag-of-words hash, so
+it is effectively **lexical** — a paraphrased query that shares no words with the
+relevant memory gets no vector signal. `app/benchmark/semantic_bench.py` quantifies
+what a real semantic model buys: 12 facts + 12 paraphrased questions (deliberately
+low lexical overlap), scored by MemTrace's own `cosine_similarity` at the 256-dim
+pgvector contract, hash vs **Qwen3-Embedding-0.6B** (FP16). Live-run on Apple MPS:
+
+| embedding | recall@1 | recall@3 | mean rank |
+| --- | --- | --- | --- |
+| hash default | 41.7% | 50% | 4.42 |
+| Qwen3-Embedding-0.6B | **91.7%** | **100%** | **1.08** |
+
+A single case also runs through the real `MemoryRuntime.retrieve_context` with an
+injected Qwen3 `EmbeddingProvider` and correctly recalls the semantically-matched
+memory for a paraphrase. **Production recommendation:** the deterministic hash is
+for reproducible tests/benchmarks; for real semantic recall, run a real embedding
+provider — set `MEMTRACE_EMBEDDING_PROVIDER=openai` + `MEMTRACE_EMBEDDING_BASE_URL`
+at an OpenAI-compatible `/embeddings` endpoint (e.g. Qwen3-Embedding served with
+256-dim MRL output to match the pgvector column). Opt-in / heavy (needs
+`sentence-transformers` + `torch` + the model download):
+
+```bash
+uv run --with sentence-transformers python -m app.benchmark.semantic_bench
+```
