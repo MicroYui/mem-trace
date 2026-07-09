@@ -2,14 +2,14 @@
 
 The large-scale counterpart to the deterministic suites: it runs the real
 LongMemEval long-term-memory benchmark through MemTrace with **real
-Qwen3-Embedding-0.6B** semantic vectors (in an in-process cosine index) and a
-**real LLM** answering + a **real LLM judge** — so the numbers come from a real
-dataset, real embeddings, and a real model rather than substring markers over a
-hash embedding.
+OpenAI-compatible embeddings** (``text-embedding-3-small``, 256-dim, in an
+in-process cosine index) and a **real LLM** answering + a **real LLM judge** — so
+the numbers come from a real dataset, real embeddings, and a real model rather
+than substring markers over a hash embedding.
 
 Each LongMemEval question ships its own haystack of chat sessions (a few gold
 sessions that contain the answer + dozens of distractor sessions). For each
-sampled question we ingest its haystack turns as episodic memories (real Qwen3
+sampled question we ingest its haystack turns as episodic memories (real semantic
 vectors) into a per-question workspace, then answer under three conditions over
 the identical store:
 
@@ -24,10 +24,10 @@ sub-score (questions whose answer is "not enough information") and **context
 precision** (injected tokens + distractor rate) for plain-vector vs MemTrace.
 
 HONEST SCOPE: on pure conversational recall MemTrace ties plain vector — its edge
-shows on abstention/precision and (with keyed extraction, see
-``run_knowledge_update_extraction``) knowledge-update. This harness proves the
-pipeline on real data + a real model + real embeddings; it is not a leaderboard
-submission.
+shows on abstention/precision (the opt-in relevance floor,
+``MEMTRACE_RETRIEVAL_MIN_RELEVANCE``) and, with hybrid retrieval, knowledge-update.
+This harness proves the pipeline on real data + a real model + real embeddings; it
+is not a leaderboard submission.
 
     ./scripts/fetch-longmemeval.sh s_cleaned          # -> /tmp/longmemeval_s_cleaned.json
     MEMTRACE_LLM_API_KEY=local MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 \
