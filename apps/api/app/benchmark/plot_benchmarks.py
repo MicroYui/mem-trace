@@ -229,6 +229,73 @@ def chart_trace_tokens(trace: dict, out: Path) -> None:
     plt.close(fig)
 
 
+def chart_longmemeval(lme: dict, out: Path) -> None:
+    """LongMemEval real-dataset accuracy: no-memory vs plain-vector vs MemTrace,
+    overall and per question_type. The headline is the real scale (tens of thousands
+    of real memories) and that memory transforms accuracy."""
+    conds = [("no_memory", _GRAY), ("plain_vector", _AMBER), ("memtrace", _GREEN)]
+    label = {"no_memory": "no memory", "plain_vector": "plain vector", "memtrace": "MemTrace"}
+    types = list(lme.get("accuracy_by_type", {}).keys())
+    groups = ["overall"] + types
+    fig, ax = plt.subplots(figsize=(max(8.0, 1.2 * len(groups) + 3), 4.8))
+    x = range(len(groups))
+    w = 0.26
+    for i, (cond, color) in enumerate(conds):
+        vals = [lme["accuracy"].get(cond, 0.0)] + [lme["accuracy_by_type"][t].get(cond, 0.0) for t in types]
+        bars = ax.bar([j + (i - 1) * w for j in x], vals, w, label=label[cond], color=color)
+        _annotate(ax, bars, vals)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([g.replace("-", "-\n") for g in groups], fontsize=8)
+    ax.set_ylim(0, 1.15)
+    ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+    ax.set_ylabel("answer accuracy (LLM-judged)")
+    ax.set_title(
+        f"LongMemEval — {lme['sample_size']} questions over {lme['total_memories']:,} real memories\n"
+        f"real embeddings ({lme.get('embedding', 'openai')}) + real LLM answer & judge "
+        f"({lme['endpoint']['model']})",
+        fontsize=10.5)
+    ax.legend(frameon=False, fontsize=9, ncol=3, loc="upper center")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+
+
+def chart_longmemeval_precision(lme: dict, out: Path) -> None:
+    """The MemTrace edge on LongMemEval: the relevance gate drops distractors, so
+    MemTrace answers with fewer injected tokens + lower distractor rate and abstains
+    correctly more often than plain vector."""
+    abst = lme.get("abstention_accuracy", {})
+    prec = lme.get("context_precision", {})
+    pv, mt = prec.get("plain_vector", {}), prec.get("memtrace", {})
+    panels = [
+        ("abstention\naccuracy", abst.get("plain_vector", 0.0), abst.get("memtrace", 0.0), "{:.0%}", 1.15),
+        ("distractor\nrate", pv.get("avg_distractor_rate", 0.0), mt.get("avg_distractor_rate", 0.0), "{:.0%}", 1.15),
+    ]
+    tok_pv, tok_mt = pv.get("avg_injected_tokens", 0.0), mt.get("avg_injected_tokens", 0.0)
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 4.4))
+    for ax, (title, v_pv, v_mt, fmt, ymax) in zip(axes[:2], panels):
+        bars = ax.bar(["plain\nvector", "MemTrace"], [v_pv, v_mt], color=[_AMBER, _GREEN])
+        for b, v in zip(bars, [v_pv, v_mt]):
+            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + ymax * 0.01, fmt.format(v),
+                    ha="center", va="bottom", fontsize=10, fontweight="bold")
+        ax.set_ylim(0, ymax)
+        ax.set_title(title, fontsize=10)
+        ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+        ax.spines[["top", "right"]].set_visible(False)
+    ax = axes[2]
+    bars = ax.bar(["plain\nvector", "MemTrace"], [tok_pv, tok_mt], color=[_AMBER, _GREEN])
+    for b, v in zip(bars, [tok_pv, tok_mt]):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + max(tok_pv, tok_mt, 1) * 0.01,
+                f"{v:.0f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    ax.set_title("avg injected tokens", fontsize=10)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.suptitle("LongMemEval — MemTrace's relevance gate: cleaner context, better abstention", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render committed benchmark charts from report JSONs")
     parser.add_argument("--reports-dir", default="reports")
@@ -253,6 +320,10 @@ def main() -> int:
     bench16 = _load(reports / "benchmark_results.json")
     qa = _load(reports / "qa_bench_results.json")
     locomo = _load(reports / "locomo_bench_results.json")
+    lme = _load(reports / "longmemeval_bench_results.json")
+    if lme is not None and not lme.get("skipped"):
+        chart_longmemeval(lme, assets / "benchmark_longmemeval.png")
+        chart_longmemeval_precision(lme, assets / "benchmark_longmemeval_precision.png")
     checks = (bench16 or {}).get("acceptance", {}).get("checks", {})
     summary = {
         "scale": {
@@ -285,6 +356,16 @@ def main() -> int:
             "sample_size": locomo.get("sample_size"),
             "accuracy": locomo.get("accuracy"),
             "accuracy_by_category": locomo.get("accuracy_by_category"),
+        },
+        "real_llm_longmemeval": None if (lme is None or lme.get("skipped")) else {
+            "model": lme.get("endpoint", {}).get("model"),
+            "embedding": lme.get("embedding"),
+            "sample_size": lme.get("sample_size"),
+            "total_memories": lme.get("total_memories"),
+            "accuracy": lme.get("accuracy"),
+            "accuracy_by_type": lme.get("accuracy_by_type"),
+            "abstention_accuracy": lme.get("abstention_accuracy"),
+            "context_precision": lme.get("context_precision"),
         },
     }
     (assets / "benchmark_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
