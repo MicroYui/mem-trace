@@ -108,19 +108,23 @@ def load_dataset(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def stream_stratified(path: str | os.PathLike[str], limit: int) -> list[dict[str, Any]]:
+def stream_stratified(path: str | os.PathLike[str], limit: int, keep=None) -> list[dict[str, Any]]:
     """Memory-bounded stratified sample. The full ``s_cleaned`` file is 264 MB and a
     plain ``json.load`` peaks at ~1.5 GB; stream it with ijson and keep only a small
     per-type bucket so peak memory stays ~tens of MB. Falls back to a full parse when
-    ijson is unavailable (used only by tests on tiny files)."""
+    ijson is unavailable (used only by tests on tiny files). ``keep`` is an optional
+    predicate to filter questions (e.g. abstention-only)."""
     try:
         import ijson  # optional, lightweight streaming parser (uv run --with ijson)
     except ImportError:
-        return stratified_sample(load_dataset(path), limit)
+        data = [q for q in load_dataset(path) if (keep is None or keep(q))]
+        return stratified_sample(data, limit)
     cap = max(4, limit // 4 + 4)  # per-type cap bounds held questions to ~6*cap
     buckets: dict[str, list[dict[str, Any]]] = {}
     with open(path, "rb") as fh:
         for q in ijson.items(fh, "item"):
+            if keep is not None and not keep(q):
+                continue
             b = buckets.setdefault(q.get("question_type", "other"), [])
             if len(b) < cap:
                 b.append(q)
@@ -295,20 +299,23 @@ def _precision(blocks: list[Any], gold_texts: list[str]) -> dict[str, Any]:
 # Embedded-record cache (embedding is the slow part; cache it so a Phase-B hiccup
 # or a floor-tuning re-run never forces a full re-embed)
 # --------------------------------------------------------------------------- #
-def _cache_path(dataset: str, limit: int, max_sessions: int) -> str:
+def _cache_path(dataset: str, limit: int, max_sessions: int, abstention_only: bool = False) -> str:
     stem = Path(dataset).stem
+    tag = "_abs" if abstention_only else ""
     return os.path.join(os.environ.get("MEMTRACE_LME_DIR", "/tmp"),
-                        f"lme_embcache_{stem}_l{limit}_s{max_sessions}.jsonl")
+                        f"lme_embcache_{stem}_l{limit}_s{max_sessions}{tag}.jsonl")
 
 
-async def _embedded_records(dataset: str, limit: int, max_sessions: int, emb_cfg, client, cache: str | None):
+async def _embedded_records(dataset: str, limit: int, max_sessions: int, emb_cfg, client, cache: str | None,
+                            abstention_only: bool = False):
     """Yield-list of per-question embedded records: {question, gold, type, abstention,
     contents, vectors, gold_texts}. Loads from cache if present, else embeds + writes it."""
     if cache and Path(cache).exists():
         recs = [json.loads(line) for line in Path(cache).read_text(encoding="utf-8").splitlines() if line.strip()]
         print(f"  loaded {len(recs)} embedded questions from cache {cache}", flush=True)
         return recs
-    questions = stream_stratified(dataset, limit)
+    keep = is_abstention if abstention_only else None
+    questions = stream_stratified(dataset, limit, keep=keep)
     recs: list[dict[str, Any]] = []
     total_mem = 0
     for qi, q in enumerate(questions):
@@ -347,6 +354,7 @@ async def run_longmemeval_bench(
     concurrency: int = 6,
     output_dir: str | None = "reports",
     use_cache: bool = True,
+    abstention_only: bool = False,
 ) -> dict[str, Any]:
     endpoints = _resolve_endpoints()
     resolved = dataset_path or os.environ.get("MEMTRACE_LONGMEMEVAL_PATH")
@@ -373,14 +381,14 @@ async def run_longmemeval_bench(
     registry = ProviderRegistry()
     registry.register(ProviderKind.embedding, query_provider, query_provider.capabilities)
 
-    cache = _cache_path(str(resolved), limit, max_sessions) if use_cache else None
+    cache = _cache_path(str(resolved), limit, max_sessions, abstention_only) if use_cache else None
 
     # ---- Phase A: embed (cached) then retrieve per condition (current floor) ---- #
     t_ingest = time.perf_counter()
     total_memories = 0
     prepared: list[dict[str, Any]] = []
     try:
-        records = await _embedded_records(str(resolved), limit, max_sessions, emb_cfg, embed_client, cache)
+        records = await _embedded_records(str(resolved), limit, max_sessions, emb_cfg, embed_client, cache, abstention_only)
         total_questions = len(records)
         for qi, rec in enumerate(records):
             contents, vectors, gold_texts = rec["contents"], rec["vectors"], rec["gold_texts"]
@@ -507,12 +515,13 @@ def main() -> int:
     parser.add_argument("--token-budget", type=int, default=1600)
     parser.add_argument("--concurrency", type=int, default=6)
     parser.add_argument("--no-cache", action="store_true", help="do not reuse/write the embedding cache")
+    parser.add_argument("--abstention-only", action="store_true", help="sample only abstention (_abs) questions")
     parser.add_argument("--output-dir", default="reports")
     args = parser.parse_args()
     payload = asyncio.run(run_longmemeval_bench(
         args.dataset, limit=args.limit, max_sessions=args.max_sessions, top_k=args.top_k,
         token_budget=args.token_budget, concurrency=args.concurrency, output_dir=args.output_dir,
-        use_cache=not args.no_cache))
+        use_cache=not args.no_cache, abstention_only=args.abstention_only))
     if payload.get("skipped"):
         print(f"longmemeval_bench skipped: {payload['reason']}")
         return 0
