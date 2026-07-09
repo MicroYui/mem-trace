@@ -1,0 +1,50 @@
+# Horizontal-scaling overlay (ROADMAP §production scaling): N stateless API
+# replicas behind an nginx load balancer, over the shared core Postgres. The API
+# is stateless and Postgres is the single source of truth, so replicas scale
+# retrieval throughput ~linearly (measured 1->4 workers ≈ 3.4x; see
+# scripts/perf-scale.sh and docs/deployment.md).
+#
+# Usage (layer onto the core compose; scale the api service to N):
+#   docker-compose up -d                      # start/keep Postgres
+#   uv run alembic upgrade head               # migrate once
+#   docker-compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale api=3
+#   curl http://localhost:8080/health         # through the nginx LB
+#
+# Like docker-compose.dev.yml's worker, the API runs on the uv base image with the
+# repo mounted (no separate build step). Opt-in only; not part of the default
+# demo/test/benchmark path.
+services:
+  api:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm
+    command: >
+      uv run uvicorn app.main:app
+      --app-dir apps/api --host 0.0.0.0 --port 8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MEMTRACE_DATABASE_URL: postgresql+asyncpg://memtrace:memtrace@postgres:5432/memtrace
+      MEMTRACE_SYNC_DATABASE_URL: postgresql+psycopg://memtrace:memtrace@postgres:5432/memtrace
+      # Bounded prefilter keeps per-request retrieval sublinear at scale (migration
+      # 0014's pg_trgm index accelerates it); generously above top_k.
+      MEMTRACE_RETRIEVAL_CANDIDATE_LIMIT: "800"
+      # Build the linux venv OUTSIDE the mounted repo so `uv run` never clobbers a
+      # host .venv mounted at /app/.venv.
+      UV_PROJECT_ENVIRONMENT: /opt/memtrace-venv
+      PYTHONPATH: apps/api
+    volumes:
+      - .:/app
+    working_dir: /app
+    expose:
+      - "8000"   # no host port -> the service can scale to N replicas
+    # No container_name: it must stay unset so `--scale api=N` can create N replicas.
+
+  nginx:
+    image: nginx:alpine
+    container_name: memtrace-lb
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro

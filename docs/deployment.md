@@ -65,6 +65,7 @@ the task needs (ROADMAP §7):
 | **core** | `docker-compose up -d` | API (run locally via `uv`) + PostgreSQL/pgvector — the only tier required for the default no-network demo, tests, and benchmark. |
 | **dev** | `docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d` | core **+** Redis **+** Celery worker, for the optional async path above. |
 | **full** | `docker-compose -f docker-compose.yml -f docker-compose.full.yml up -d` | core **+** Elasticsearch (hybrid BM25) **+** Neo4j (provenance graph), for the ROADMAP §4 external advanced-retrieval backends. Opt-in only. The `apps/web` dashboard runs as a separate Bun dev server (see `apps/web/README` / `docs/getting-started.md`), not a compose service. |
+| **scale** | `docker-compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale api=N` | core **+** N stateless API replicas **+** an nginx load balancer (`:8080`), for horizontal throughput scaling over the shared Postgres. Opt-in only (see "Horizontal scaling" below). |
 
 ### Full tier — external advanced-retrieval backends
 
@@ -300,8 +301,11 @@ and the settings that make retrieval production-grade at scale:
   asyncio pegs ~one core (~**16 retrievals/s**, p99 ~110 ms at 20k under 16-way
   concurrency — stable, no degradation). Requests are stateless and PostgreSQL is
   the shared source of truth, so run multiple API replicas / uvicorn workers
-  behind a load balancer to scale linearly. Size CPU/memory per replica and, for
-  a fixed quota, measure the ceiling with `scripts/perf-load.sh`.
+  behind a load balancer to scale linearly. `scripts/perf-scale.sh` measures this
+  directly: at 3k memories on the heavy path it saw **5.3 → 18.2 req/s going 1→4
+  `uvicorn --workers` (≈3.4×, ~86% of ideal)**. `docker-compose.scale.yml` is the
+  cross-host form — N stateless API replicas behind an nginx LB over the shared
+  core Postgres (see "Horizontal scaling" below).
 - **Offload writes.** Enable the async path (`MEMTRACE_ASYNC_TASKS_ENABLED=true`
   + Redis) so extraction/maintenance run off the write hot path and the candidate
   buffer is shared across workers (see the async section above). Two live opt-in
@@ -312,6 +316,35 @@ and the settings that make retrieval production-grade at scale:
   `scripts/smoke-async-worker.sh` drives a real (non-eager) Celery worker
   consuming from the Redis broker to extract a persisted event into Postgres,
   asserting the Redis idempotency store de-duplicates redelivery.
+
+### Horizontal scaling — multi-replica API behind a load balancer
+
+`docker-compose.scale.yml` is the deployable form of the "scale horizontally"
+guidance: **N stateless API replicas behind an nginx load balancer, over the
+shared core Postgres.** Like the dev worker, the API runs on the `uv` base image
+with the repo mounted (no separate build step), and it builds its linux venv
+outside the mount (`UV_PROJECT_ENVIRONMENT`) so it never clobbers a host `.venv`.
+
+```bash
+docker-compose up -d                       # start/keep Postgres (source of truth)
+uv run alembic upgrade head                # migrate once
+docker-compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale api=3
+curl http://localhost:8080/health          # through the nginx LB (:8080)
+```
+
+The nginx config (`deploy/nginx.conf`) uses per-request DNS resolution against
+Docker's embedded resolver, so it round-robins across every `--scale api=N`
+replica (a static upstream would pin to one). Because replicas are stateless and
+Postgres is the single source of truth, a run started on one replica is
+immediately usable on another.
+
+This was verified live: with `--scale api=2`, the LB distributed traffic across
+both replicas, and a full `POST /v1/runs` → `POST /v1/steps/start` →
+`POST /v1/context/retrieve` round-trip worked end-to-end through the LB (the run
+created on one replica, retrieved on another, over shared Postgres). For the
+single-host form and the measured 1→4-worker speedup, see
+`scripts/perf-scale.sh` above. Set `MEMTRACE_RETRIEVAL_CANDIDATE_LIMIT` (the
+overlay defaults it to `800`) so each replica's retrieval stays sublinear.
 
 ## Release posture
 
