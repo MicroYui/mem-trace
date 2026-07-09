@@ -304,7 +304,14 @@ and the settings that make retrieval production-grade at scale:
   a fixed quota, measure the ceiling with `scripts/perf-load.sh`.
 - **Offload writes.** Enable the async path (`MEMTRACE_ASYNC_TASKS_ENABLED=true`
   + Redis) so extraction/maintenance run off the write hot path and the candidate
-  buffer is shared across workers (see the async section above).
+  buffer is shared across workers (see the async section above). Two live opt-in
+  checks validate this end-to-end (both skip cleanly without the backends):
+  `tests/integration/test_async_cross_worker.py` proves a buffered write on one
+  worker is drained and extracted by a *separate* worker through the shared Redis
+  buffer + shared Postgres (with cross-worker idempotency), and
+  `scripts/smoke-async-worker.sh` drives a real (non-eager) Celery worker
+  consuming from the Redis broker to extract a persisted event into Postgres,
+  asserting the Redis idempotency store de-duplicates redelivery.
 
 ## Release posture
 
