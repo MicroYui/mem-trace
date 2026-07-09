@@ -182,6 +182,34 @@ uv run python -m app.benchmark.llm_bench --output-dir reports
 
 Do not make real provider calls part of default CI or first-time quickstarts.
 
+### Real semantic embeddings — Qwen3 embedding server
+
+The default `deterministic` embedding is a lexical hash (~42% recall@1 on
+paraphrased queries); a real semantic model gets ~92% (see
+`app/benchmark/semantic_bench.py`). `app/embedding_server.py` is a turnkey
+OpenAI-compatible `/v1/embeddings` server backed by Qwen3-Embedding-0.6B (FP16),
+honoring the `dimensions` param via Matryoshka truncation to the pgvector 256-dim
+column. Start it (heavy; needs the model, ~1.2GB) and point the runtime at it:
+
+```bash
+# 1. serve Qwen3 as an OpenAI-compatible /v1/embeddings endpoint
+uv run --with fastapi --with "uvicorn[standard]" --with sentence-transformers \
+  uvicorn app.embedding_server:app --app-dir apps/api --host 0.0.0.0 --port 8090
+
+# 2. verify end-to-end through MemTrace's provider (skips if the server is down)
+MEMTRACE_EMBEDDING_BASE_URL=http://localhost:8090/v1 ./scripts/smoke-embedding-server.sh
+
+# 3. wire the running MemTrace service to it (real semantic retrieval)
+export MEMTRACE_EMBEDDING_PROVIDER=openai
+export MEMTRACE_EMBEDDING_BASE_URL=http://localhost:8090/v1
+export MEMTRACE_EMBEDDING_MODEL=qwen3-embedding-0.6b
+export MEMTRACE_EMBEDDING_API_KEY=local   # the server does not check auth; the provider sends a Bearer
+```
+
+The provider degrades to the deterministic 256-dim embedding on any failure, so
+retrieval never breaks if the server is down. For production, run the embedding
+server as its own scaled service (GPU or CPU) behind the same load balancer.
+
 ## Optional telemetry export
 
 OpenTelemetry/OpenInference-compatible export is default-off and must be enabled explicitly. Local JSONL output is the safest no-network smoke path:
