@@ -38,12 +38,21 @@ services:
     expose:
       - "8000"   # no host port -> the service can scale to N replicas
     # No container_name: it must stay unset so `--scale api=N` can create N replicas.
+    healthcheck:
+      # Readiness (DB reachable), not liveness. urllib raises on 503 -> unhealthy.
+      # Uses stdlib python so no curl is required in the image.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 90s   # allow the first-run `uv sync` before counting failures
 
   nginx:
     image: nginx:alpine
     container_name: memtrace-lb
     depends_on:
-      - api
+      api:
+        condition: service_healthy   # wait for a ready (DB-connected) replica
     ports:
       - "8080:80"
     volumes:

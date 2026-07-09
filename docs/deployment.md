@@ -30,8 +30,13 @@ uv run uvicorn app.main:app --app-dir apps/api --reload
 Check health:
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8000/health        # liveness: process is up (never touches the DB)
+curl http://localhost:8000/health/ready   # readiness: 200 only when Postgres is reachable, else 503
 ```
+
+`/health` is liveness (use it for a k8s livenessProbe — a DB blip should not kill an
+otherwise-healthy replica); `/health/ready` is readiness (use it for a readinessProbe
+and load-balancer health so traffic routes only to DB-connected replicas).
 
 The compose file uses `pgvector/pgvector:pg16` and exposes PostgreSQL on host port `5433`. Existing PostgreSQL 15 volumes are incompatible with the PostgreSQL 16 image.
 
@@ -331,6 +336,11 @@ uv run alembic upgrade head                # migrate once
 docker-compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale api=3
 curl http://localhost:8080/health          # through the nginx LB (:8080)
 ```
+
+The `api` service healthcheck probes `/health/ready` (DB reachable), and nginx
+waits for a ready replica (`depends_on: condition: service_healthy`), so the LB
+never fronts a replica that cannot reach Postgres. In k8s, use `/health/ready` as
+the readinessProbe and `/health` as the livenessProbe.
 
 The nginx config (`deploy/nginx.conf`) uses per-request DNS resolution against
 Docker's embedded resolver, so it round-robins across every `--scale api=N`
