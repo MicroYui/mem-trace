@@ -250,9 +250,21 @@ class BatchEmbeddingProvider:
 # --------------------------------------------------------------------------- #
 # Answer + judge (reuses qa_bench._chat)
 # --------------------------------------------------------------------------- #
+async def _chat_retry(client, endpoint, system: str, user: str, *, tries: int = 4) -> str:
+    """_chat with retry/backoff: transient proxy timeouts must not kill a whole run."""
+    last: Exception | None = None
+    for i in range(tries):
+        try:
+            return await _chat(client, endpoint, system, user)
+        except Exception as exc:  # noqa: BLE001 - retry any transient network/proxy error
+            last = exc
+            await asyncio.sleep(1.5 * (i + 1))
+    raise last if last else RuntimeError("chat failed")
+
+
 async def _answer(context: str, question: str, client, endpoint) -> str:
     prompt = f"Memory snippets:\n{context}\n\nQuestion: {question}\nAnswer concisely:"
-    return await _chat(client, endpoint, _ANSWER_SYSTEM, prompt)
+    return await _chat_retry(client, endpoint, _ANSWER_SYSTEM, prompt)
 
 
 async def _judge(question: str, gold: str, prediction: str, client, endpoint) -> bool:
@@ -260,7 +272,7 @@ async def _judge(question: str, gold: str, prediction: str, client, endpoint) ->
         f"Question: {question}\nGold answer: {gold}\nPredicted answer: {prediction}\n\n"
         "Is the prediction CORRECT or INCORRECT?"
     )
-    verdict = (await _chat(client, endpoint, _JUDGE_SYSTEM, prompt)).strip().upper()
+    verdict = (await _chat_retry(client, endpoint, _JUDGE_SYSTEM, prompt)).strip().upper()
     return verdict.startswith("CORRECT")
 
 
@@ -280,6 +292,49 @@ def _precision(blocks: list[Any], gold_texts: list[str]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# Embedded-record cache (embedding is the slow part; cache it so a Phase-B hiccup
+# or a floor-tuning re-run never forces a full re-embed)
+# --------------------------------------------------------------------------- #
+def _cache_path(dataset: str, limit: int, max_sessions: int) -> str:
+    stem = Path(dataset).stem
+    return os.path.join(os.environ.get("MEMTRACE_LME_DIR", "/tmp"),
+                        f"lme_embcache_{stem}_l{limit}_s{max_sessions}.jsonl")
+
+
+async def _embedded_records(dataset: str, limit: int, max_sessions: int, emb_cfg, client, cache: str | None):
+    """Yield-list of per-question embedded records: {question, gold, type, abstention,
+    contents, vectors, gold_texts}. Loads from cache if present, else embeds + writes it."""
+    if cache and Path(cache).exists():
+        recs = [json.loads(line) for line in Path(cache).read_text(encoding="utf-8").splitlines() if line.strip()]
+        print(f"  loaded {len(recs)} embedded questions from cache {cache}", flush=True)
+        return recs
+    questions = stream_stratified(dataset, limit)
+    recs: list[dict[str, Any]] = []
+    total_mem = 0
+    for qi, q in enumerate(questions):
+        chosen = select_sessions(q, max_sessions)
+        mems, gold_texts = build_memories(q, f"{_WS_PREFIX}{qi}", chosen)
+        if not mems:
+            continue
+        vectors = await _embed_docs_batch(client, emb_cfg, [m.content or "" for m in mems])
+        recs.append({
+            "qi": qi, "question": q["question"], "gold": str(q.get("answer")),
+            "type": q.get("question_type", "other"), "abstention": is_abstention(q),
+            "contents": [m.content for m in mems], "vectors": vectors, "gold_texts": gold_texts,
+        })
+        total_mem += len(mems)
+        q.clear()
+        if (qi + 1) % 25 == 0:
+            print(f"  embedded {qi + 1}/{len(questions)} questions, {total_mem} memories …", flush=True)
+    if cache:
+        with open(cache, "w", encoding="utf-8") as fh:
+            for r in recs:
+                fh.write(json.dumps(r) + "\n")
+        print(f"  wrote embedding cache -> {cache}", flush=True)
+    return recs
+
+
+# --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
 async def run_longmemeval_bench(
@@ -291,6 +346,7 @@ async def run_longmemeval_bench(
     token_budget: int = 1600,
     concurrency: int = 6,
     output_dir: str | None = "reports",
+    use_cache: bool = True,
 ) -> dict[str, Any]:
     endpoints = _resolve_endpoints()
     resolved = dataset_path or os.environ.get("MEMTRACE_LONGMEMEVAL_PATH")
@@ -317,26 +373,27 @@ async def run_longmemeval_bench(
     registry = ProviderRegistry()
     registry.register(ProviderKind.embedding, query_provider, query_provider.capabilities)
 
-    data_questions = stream_stratified(resolved, limit)
-    total_questions = len(data_questions)
+    cache = _cache_path(str(resolved), limit, max_sessions) if use_cache else None
 
-    # ---- Phase A: ingest each question's haystack + retrieve per condition ---- #
+    # ---- Phase A: embed (cached) then retrieve per condition (current floor) ---- #
     t_ingest = time.perf_counter()
     total_memories = 0
     prepared: list[dict[str, Any]] = []
     try:
-        for qi, q in enumerate(data_questions):
-            ws = f"{_WS_PREFIX}{qi}"
-            chosen = select_sessions(q, max_sessions)
-            mems, gold_texts = build_memories(q, ws, chosen)
-            if not mems:
+        records = await _embedded_records(str(resolved), limit, max_sessions, emb_cfg, embed_client, cache)
+        total_questions = len(records)
+        for qi, rec in enumerate(records):
+            contents, vectors, gold_texts = rec["contents"], rec["vectors"], rec["gold_texts"]
+            if not contents:
                 continue
-            vectors = await _embed_docs_batch(embed_client, emb_cfg, [m.content or "" for m in mems])
+            ws = f"{_WS_PREFIX}{qi}"
             repo = InMemoryRepository()  # fresh per question -> live memory stays ~one haystack, not all
-            for m, v in zip(mems, vectors):
-                m.embedding_vector = v
-                await repo.add_memory(m)
-            total_memories += len(mems)
+            for ci, (content, vec) in enumerate(zip(contents, vectors)):
+                await repo.add_memory(MemoryItem(
+                    memory_id=f"{ws}_m{ci}", workspace_id=ws, memory_type=MemoryType.episodic,
+                    scope=MemoryScope.workspace, content=content, summary=(content or "")[:80],
+                    embedding_vector=vec))
+            total_memories += len(contents)
             rt = MemoryRuntime(repo, default_workspace_id=ws, provider_registry=registry)
             run = await rt.start_run(StartRunRequest(session_id=f"lme-{qi}", task="recall", workspace_id=ws))
             step = await rt.start_step(StartStepRequest(run_id=run.run_id, intent="answer"))
@@ -347,32 +404,32 @@ async def run_longmemeval_bench(
                     contexts[cond] = "(no memory provided)"
                     continue
                 ctx = await rt.retrieve_context(RetrievalRequest(
-                    run_id=run.run_id, step_id=step.step_id, query=q["question"],
+                    run_id=run.run_id, step_id=step.step_id, query=rec["question"],
                     strategy=strategy, token_budget=token_budget, top_k=top_k))
                 blocks = positive_blocks(ctx)
                 contexts[cond] = "\n".join(f"- {b.content}" for b in blocks) or "(no relevant memory found)"
                 precision[cond] = _precision(blocks, gold_texts)
             prepared.append({
-                "qi": qi, "question": q["question"], "gold": str(q.get("answer")),
-                "type": q.get("question_type", "other"), "abstention": is_abstention(q),
+                "qi": qi, "question": rec["question"], "gold": rec["gold"],
+                "type": rec["type"], "abstention": rec["abstention"],
                 "contexts": contexts, "precision": precision,
             })
-            q.clear()  # drop this question's haystack from memory once ingested
-            if (qi + 1) % 25 == 0:
-                print(f"  ingested/retrieved {qi + 1}/{total_questions} questions, {total_memories} memories …", flush=True)
         ingest_s = time.perf_counter() - t_ingest
         print(f"  Phase A done: {len(prepared)} questions, {total_memories} memories in {ingest_s:.0f}s", flush=True)
 
-        # ---- Phase B: answer + judge (concurrent, LLM-bound) ---- #
+        # ---- Phase B: answer + judge (concurrent, LLM-bound, per-question resilient) ---- #
         sem = asyncio.Semaphore(concurrency)
         async with httpx.AsyncClient() as client:
             async def _one(item: dict[str, Any]) -> dict[str, Any]:
                 by_condition: dict[str, Any] = {}
                 for cond, _strategy in _CONDITIONS:
-                    async with sem:
-                        pred = await _answer(item["contexts"][cond], item["question"], client, endpoint)
-                        correct = await _judge(item["question"], item["gold"], pred, client, endpoint)
-                    by_condition[cond] = {"answer": pred, "correct": correct}
+                    try:
+                        async with sem:
+                            pred = await _answer(item["contexts"][cond], item["question"], client, endpoint)
+                            correct = await _judge(item["question"], item["gold"], pred, client, endpoint)
+                        by_condition[cond] = {"answer": pred, "correct": correct}
+                    except Exception as exc:  # noqa: BLE001 - a persistent failure counts as wrong, never crashes the run
+                        by_condition[cond] = {"answer": f"<error: {type(exc).__name__}>", "correct": False, "error": True}
                 return {**{k: item[k] for k in ("qi", "question", "gold", "type", "abstention", "precision")},
                         "by_condition": by_condition}
             rows = await asyncio.gather(*(_one(it) for it in prepared))
@@ -449,11 +506,13 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--token-budget", type=int, default=1600)
     parser.add_argument("--concurrency", type=int, default=6)
+    parser.add_argument("--no-cache", action="store_true", help="do not reuse/write the embedding cache")
     parser.add_argument("--output-dir", default="reports")
     args = parser.parse_args()
     payload = asyncio.run(run_longmemeval_bench(
         args.dataset, limit=args.limit, max_sessions=args.max_sessions, top_k=args.top_k,
-        token_budget=args.token_budget, concurrency=args.concurrency, output_dir=args.output_dir))
+        token_budget=args.token_budget, concurrency=args.concurrency, output_dir=args.output_dir,
+        use_cache=not args.no_cache))
     if payload.get("skipped"):
         print(f"longmemeval_bench skipped: {payload['reason']}")
         return 0
