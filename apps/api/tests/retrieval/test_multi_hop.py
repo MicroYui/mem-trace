@@ -88,7 +88,8 @@ async def test_single_pass_misses_linked_memory(monkeypatch):
     await _seed_linked(repo, ws)
     controller = RetrievalController(repo)
     cands = await controller._select_candidates_multi_hop(  # noqa: SLF001
-        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512
+        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512,
+        strategy=RetrievalStrategy.variant_2,
     )
     ids = {c.memory.memory_id for c in cands}
     assert ids == {"m_a"}  # B not reachable from the query alone
@@ -105,12 +106,37 @@ async def test_multi_hop_surfaces_linked_memory(monkeypatch):
     controller = RetrievalController(repo)
     assert controller._multi_hop_hops == 1  # noqa: SLF001
     cands = await controller._select_candidates_multi_hop(  # noqa: SLF001
-        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512
+        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512,
+        strategy=RetrievalStrategy.variant_2,
     )
     by_id = {c.memory.memory_id: c for c in cands}
     assert "m_b" in by_id  # reached via the shared service.gateway cue
     assert by_id["m_a"].hop == 0
     assert by_id["m_b"].hop == 1  # provenance marks it as a hop expansion
+
+
+@pytest.mark.asyncio
+async def test_multi_hop_is_memtrace_tier_only(monkeypatch):
+    # Multi-hop is a MemTrace-tier retrieval feature: with HOPS enabled it runs for
+    # variant_2/variant_3 but NOT for the naive baseline_1 plain-vector store, so it
+    # is a genuine MemTrace-vs-plain differentiator.
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_MULTI_HOP_HOPS", "1")
+    monkeypatch.setenv("MEMTRACE_RETRIEVAL_USE_VECTOR", "false")
+    get_settings.cache_clear()
+    repo = InMemoryRepository()
+    ws = "ws_tier"
+    await _seed_linked(repo, ws)
+    controller = RetrievalController(repo)
+    plain = await controller._select_candidates_multi_hop(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512,
+        strategy=RetrievalStrategy.baseline_1,
+    )
+    memtrace = await controller._select_candidates_multi_hop(  # noqa: SLF001
+        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512,
+        strategy=RetrievalStrategy.variant_2,
+    )
+    assert {c.memory.memory_id for c in plain} == {"m_a"}  # plain: single pass, no hop
+    assert "m_b" in {c.memory.memory_id for c in memtrace}  # MemTrace: hop surfaces the linked memory
 
 
 @pytest.mark.asyncio
@@ -124,7 +150,8 @@ async def test_multi_hop_is_budget_bounded(monkeypatch):
     controller = RetrievalController(repo)
     # A tiny budget is already exceeded by the first-pass content, so no hop runs.
     cands = await controller._select_candidates_multi_hop(  # noqa: SLF001
-        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=1
+        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=1,
+        strategy=RetrievalStrategy.variant_2,
     )
     assert {c.memory.memory_id for c in cands} == {"m_a"}
 
@@ -191,6 +218,7 @@ async def test_multi_hop_skipped_under_include_all(monkeypatch):
         top_k=10,
         token_budget=512,
         include_all=True,
+        strategy=RetrievalStrategy.variant_2,
     )
     base = await controller._select_candidates(  # noqa: SLF001
         workspace_id=ws, run_id="r", query="auth flow", top_k=10, include_all=True
@@ -232,7 +260,8 @@ async def test_multi_hop_and_graph_expansion_dedupe(monkeypatch):
     assert controller._multi_hop_hops == 1  # noqa: SLF001
     assert controller._graph_backend is not None  # noqa: SLF001
     cands = await controller._select_candidates_multi_hop(  # noqa: SLF001
-        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512
+        workspace_id=ws, run_id="r", query="auth flow", top_k=10, token_budget=512,
+        strategy=RetrievalStrategy.variant_2,
     )
     ids = [c.memory.memory_id for c in cands]
     # No duplicates anywhere, and m_b surfaced exactly once despite two paths.

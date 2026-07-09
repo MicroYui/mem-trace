@@ -422,6 +422,7 @@ class RetrievalController:
             include_all=long_context,
             task_intent=request.task_intent,
             token_budget=budget,
+            strategy=request.strategy,
         )
         retrieval_ms = int((time.perf_counter() - t0) * 1000)
         retrieval_phase: dict[str, Any] = {
@@ -732,6 +733,7 @@ class RetrievalController:
         query: str,
         top_k: int,
         token_budget: int,
+        strategy: RetrievalStrategy,
         include_all: bool = False,
         task_intent: str | None = None,
     ) -> list[RetrievalCandidateTrace]:
@@ -744,6 +746,11 @@ class RetrievalController:
         token). Each hop appends only new, budget-fitting candidates; the request
         token budget caps cumulative content so expansion stays bounded. With
         ``hops == 0`` (default) or ``include_all`` this is exactly the single pass.
+
+        Multi-hop is a MemTrace-tier retrieval feature: the extra hops run only for
+        the advanced strategies (variant_2/variant_3), never for the naive
+        ``baseline_1`` plain-vector store, so it is a genuine MemTrace-vs-plain
+        differentiator (and irrelevant when hops == 0).
         """
         base = await self._select_candidates(
             workspace_id=workspace_id,
@@ -753,7 +760,8 @@ class RetrievalController:
             include_all=include_all,
             task_intent=task_intent,
         )
-        if self._multi_hop_hops <= 0 or include_all:
+        advanced = strategy in (RetrievalStrategy.variant_2, RetrievalStrategy.variant_3)
+        if self._multi_hop_hops <= 0 or include_all or not advanced:
             return base
 
         result = list(base)
