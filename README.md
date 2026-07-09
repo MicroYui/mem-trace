@@ -196,6 +196,17 @@ Memory transforms accuracy (**0% → 73%**), and with hybrid retrieval MemTrace 
 
 **vs published systems.** LongMemEval-S has no single agreed SOTA — reported numbers swing widely with the judge model, retrieval config, and harness, and some 90%+ vendor claims have been [independently disputed](https://agentos.sh/de/blog/memory-benchmark-transparency-audit/) (one had hardcoded answers). Against the credible independent reference (the [HINDSIGHT ACL-demo table](https://aclanthology.org/2026.acl-demo.27.pdf)), MemTrace's **72.7%** sits **above full-context GPT-4o (60.2%)** and around **Zep (71.2%)** — while retrieving a bounded, *gated* context instead of dumping the whole history. It is a pipeline proof on a real benchmark, not a leaderboard submission.
 
+**Head-to-head vs a real SOTA memory system — [Mem0](https://github.com/mem0ai/mem0).** Beyond published numbers, a direct comparison on a 30-question sample with the **same** real embeddings, the **same** LLM answering, and **one shared** LLM judge (`app/benchmark/mem0_compare.py`):
+
+| condition | accuracy | ingestion cost |
+| --- | --- | --- |
+| no memory | 0% | — |
+| Mem0 (LLM fact-extraction) | 56.7% | ~34 min / 30 Q (an LLM call per session) |
+| plain vector | 70.0% | seconds (deterministic) |
+| **MemTrace** | **66.7%** | seconds (deterministic) |
+
+Both retrieval approaches beat Mem0 — **MemTrace 66.7% vs Mem0 56.7%** — and at a fraction of the cost: Mem0 compresses each conversation into ~20 extracted facts (600 across the sample) via a per-session LLM call, which is both **~30× slower to ingest** and lossy on detail-recall questions. *(n=30 is a small sample: plain vector edges MemTrace here within noise; the 300-question run above has MemTrace ≥ plain vector on every type. Mem0 is too slow to run at 300. Mem0 on default Chroma + our proxy, not its hosted Platform.)*
+
 **Abstention — MemTrace's relevance gate.** On questions whose answer is *not* in memory, plain vector still injects distractors and the model can hallucinate; MemTrace's opt-in relevance floor (`MEMTRACE_RETRIEVAL_MIN_RELEVANCE`) drops the low-similarity distractors so the model abstains correctly more often — **86.7% vs 83.3%**, with **62% fewer** injected tokens (649 vs 1,708).
 
 <p align="center">
