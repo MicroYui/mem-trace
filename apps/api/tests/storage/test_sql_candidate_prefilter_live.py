@@ -7,6 +7,7 @@ prints the retrieve latency with the bounded prefilter off vs on at scale.
 """
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -27,7 +28,7 @@ from app.storage.db import make_engine, make_session_factory
 from app.storage.sql_repository import SqlRepository
 
 _WS = "perf_sql_ws"
-_N = 3000
+_N = int(os.environ.get("MEMTRACE_PERF_SQL_N", "3000"))  # scale up (e.g. 20000) to see the trgm index win
 _TOPICS = ["cache layer", "database", "test runner", "message broker", "cloud provider"]
 
 
