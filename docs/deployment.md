@@ -252,6 +252,32 @@ npm exec --yes --package playwright -- node apps/web/scripts/capture-showcase-sc
 
 The legacy `/v1/dashboard/ui` page remains a small built-in static viewer for environments that do not serve `apps/web`; it should not be expanded into the full dashboard.
 
+## Performance & scaling (production)
+
+Measured characteristics (see `docs/benchmark.md` and `app/benchmark/perf_bench.py`)
+and the settings that make retrieval production-grade at scale:
+
+- **Bound retrieval cost.** By default retrieval scores every workspace memory
+  (O(N)) — ~2.2 s p50 at 20k memories. Set `MEMTRACE_RETRIEVAL_CANDIDATE_LIMIT`
+  (e.g. `800`, generously above `top_k`) to load only a bounded, relevance-ranked
+  candidate set: in-memory ~**56 ms** @20k (~39×); on Postgres, with migration
+  `0014`'s `pg_trgm` GIN index, ~**16 ms** @20k (~72×) and latency stays ~flat
+  with workspace size.
+- **Use real semantic embeddings.** The default `deterministic` embedding is a
+  lexical hash (recall@1 ~42% on paraphrased queries). Point
+  `MEMTRACE_EMBEDDING_PROVIDER=openai` + `MEMTRACE_EMBEDDING_BASE_URL` at an
+  OpenAI-compatible `/embeddings` endpoint (e.g. Qwen3-Embedding served with
+  256-dim MRL to match the pgvector column) for real semantic recall (~92%).
+- **Scale throughput horizontally.** Retrieval is CPU-bound and single-process
+  asyncio pegs ~one core (~**16 retrievals/s**, p99 ~110 ms at 20k under 16-way
+  concurrency — stable, no degradation). Requests are stateless and PostgreSQL is
+  the shared source of truth, so run multiple API replicas / uvicorn workers
+  behind a load balancer to scale linearly. Size CPU/memory per replica and, for
+  a fixed quota, measure the ceiling with `scripts/perf-load.sh`.
+- **Offload writes.** Enable the async path (`MEMTRACE_ASYNC_TASKS_ENABLED=true`
+  + Redis) so extraction/maintenance run off the write hot path and the candidate
+  buffer is shared across workers (see the async section above).
+
 ## Release posture
 
 R1 release readiness is complete: public docs, package metadata/package-shape checks, default CI, release hygiene, deterministic benchmark/reproduce closeout, and the maintainer [release checklist](release-checklist.md) are in place. R1 does not publish npm or PyPI packages automatically. Maintainers should explicitly decide when to publish, run the checklist verification commands, verify generated artifact cleanup, and ensure no local reports, package tarballs, lockfile drift, `node_modules`, or TypeScript build info are tracked.
