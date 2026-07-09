@@ -220,6 +220,13 @@ class Settings(BaseSettings):
     # scored, flattening retrieve latency. Default 0 keeps candidate scoring
     # byte-identical, so the benchmark stays 16/16.
     retrieval_candidate_limit: int = 0
+    # Relevance floor for the gated (MemTrace) strategies only (default 0.0 = off).
+    # When > 0, variant_2/variant_3 reject any candidate whose blended relevance
+    # score is below the floor, so low-similarity distractors never enter the prompt
+    # (better precision + correct abstention when nothing is relevant). It never
+    # applies to baseline_1/long_context, so it is a MemTrace-specific gate. Default
+    # 0.0 keeps gate decisions byte-identical, so the benchmark stays 16/16.
+    retrieval_min_relevance: float = 0.0
     # Deterministic state-tree subgoal auto-inference (ROADMAP §5, default-off).
     # When enabled, MemoryRuntime.infer_run_subgoals groups consecutive same-goal
     # steps into inferred subgoal nodes (read-side analysis; the stored tree is
@@ -312,6 +319,13 @@ class Settings(BaseSettings):
     def _validate_retrieval_candidate_limit(cls, value: int) -> int:
         if value < 0:
             raise ValueError("retrieval_candidate_limit must be >= 0 (0 disables the prefilter)")
+        return value
+
+    @field_validator("retrieval_min_relevance")
+    @classmethod
+    def _validate_retrieval_min_relevance(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("retrieval_min_relevance must be in [0.0, 1.0] (0.0 disables the floor)")
         return value
 
     @field_validator("retrieval_hybrid_backend")

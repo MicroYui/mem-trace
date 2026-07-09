@@ -32,6 +32,33 @@ def _eval(mem, *, workspace_id="ws", config=None):
     )
 
 
+def test_relevance_floor_rejects_low_similarity_candidate():
+    mem = _mem(content="a weakly related distractor")
+    # below the floor -> hard reject as a distractor
+    out = gatemod.evaluate(mem, workspace_id="ws", relevance=0.10, state_match=0.4,
+                           config=GateConfig(min_relevance=0.3))
+    assert out.decision == GateDecisionType.reject
+    assert out.reject_reason == "below_relevance_floor"
+    # at/above the floor -> accepted
+    out2 = gatemod.evaluate(mem, workspace_id="ws", relevance=0.35, state_match=0.4,
+                            config=GateConfig(min_relevance=0.3))
+    assert out2.accepted
+
+
+def test_relevance_floor_default_off_is_noop():
+    mem = _mem(content="anything")
+    out = gatemod.evaluate(mem, workspace_id="ws", relevance=0.01, state_match=0.4,
+                           config=GateConfig())  # min_relevance defaults to 0.0
+    assert out.accepted
+
+
+def test_relevance_floor_exempts_pinned_memory():
+    mem = _mem(content="operator-pinned", status=MemoryStatus.pinned)
+    out = gatemod.evaluate(mem, workspace_id="ws", relevance=0.05, state_match=0.4,
+                           config=GateConfig(min_relevance=0.3))
+    assert out.accepted
+
+
 def test_hard_reject_workspace_mismatch():
     out = _eval(_mem(workspace_id="other"))
     assert out.decision == GateDecisionType.reject

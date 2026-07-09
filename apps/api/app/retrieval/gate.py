@@ -54,6 +54,11 @@ class GateConfig:
     # "outdated warning" instead of a silent hard reject. Never makes stale memory
     # positive context, so case_9 (variant_2 excludes stale memory) is preserved.
     enable_stale_warning: bool = False
+    # Relevance floor (default 0.0 = off). When > 0 a candidate whose blended
+    # relevance is below the floor is hard-rejected as a low-similarity distractor.
+    # Only set for the gated strategies (variant_2/3) by the controller, so it is a
+    # MemTrace-specific precision/abstention gate, never applied to baseline_1.
+    min_relevance: float = 0.0
     # failed-branch downweight factor for variant_1 (no hard reject)
     failed_branch_penalty: float = 0.5
 
@@ -132,6 +137,17 @@ def evaluate(
     # auditable, but the prompt context must never include them.
     if memory.status == MemoryStatus.quarantined:
         return _reject(memory, GateLayer.hard_policy, "invalid_status", relevance, state_match, freshness, trust, risk)
+
+    # Relevance floor (gated strategies only; default-off): a candidate that is only
+    # weakly related to the query is dropped so it never dilutes the prompt or lets
+    # the model hallucinate from a distractor. Pinned memories are exempt (an
+    # operator explicitly pinned them). Applies before the risk/soft layers.
+    if (
+        config.min_relevance > 0.0
+        and relevance < config.min_relevance
+        and memory.status != MemoryStatus.pinned
+    ):
+        return _reject(memory, GateLayer.risk_policy, "below_relevance_floor", relevance, state_match, freshness, trust, risk)
 
     # ---- Layer 1: hard policy ------------------------------------------- #
     if config.enable_hard_policy:

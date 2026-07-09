@@ -145,6 +145,7 @@ class RetrievalController:
         settings = get_settings()
         self._use_vector = settings.retrieval_use_vector
         self._vector_weight = settings.retrieval_vector_weight
+        self._min_relevance = max(0.0, float(getattr(settings, "retrieval_min_relevance", 0.0) or 0.0))
         self._fusion = (settings.retrieval_fusion or "linear").lower()
         self._rrf_k = max(1, settings.retrieval_rrf_k)
         self._embed_dim = EMBED_DIM
@@ -192,6 +193,12 @@ class RetrievalController:
         config = gatemod.GateConfig.for_strategy(strategy)
         if self._stale_warning and config.enable_failure_learning:
             config.enable_stale_warning = True
+        # Relevance floor is a MemTrace-only precision gate: enable it only for the
+        # gated strategies (variant_2/3, which set enable_failure_learning), never
+        # for baseline_1/long_context, so it is a genuine MemTrace-vs-plain-vector
+        # differentiator. Default 0.0 keeps 16/16 unchanged.
+        if self._min_relevance > 0.0 and config.enable_failure_learning:
+            config.min_relevance = self._min_relevance
         return config
 
     async def retrieve(self, request: RetrievalRequest, *, workspace_id: str) -> MemoryContext:
