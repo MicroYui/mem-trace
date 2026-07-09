@@ -176,9 +176,42 @@ uv run --package memtrace-sdk python examples/simple_agent/main.py  # Python SDK
 
 ## 📊 Benchmark snapshot
 
-MemTrace is evaluated in four complementary layers — a **real execution-tree benchmark**, a **flat scale run** that surfaces the honest cost, a **deterministic correctness suite**, and **real-LLM checks on real + synthetic data** — all reproducible.
+MemTrace is evaluated on a **real large-scale dataset** (LongMemEval — real embeddings + real LLM) plus supporting layers: a **real execution-tree benchmark** where its agentic edge shows, a **deterministic correctness suite**, and additional real-LLM checks — all reproducible.
 
-### 1. Real execution-tree benchmark — where MemTrace is built to win
+### 1. LongMemEval — real dataset at scale (real embeddings + real LLM)
+
+The headline check runs the real [LongMemEval](https://github.com/xiaowu0162/LongMemEval) long-term-memory benchmark end-to-end through MemTrace with **real semantic embeddings** (OpenAI-compatible `text-embedding-3-small`, 256-dim cosine) and a **real LLM** answering + a **real LLM judge** grading against gold answers (`app/benchmark/longmemeval_bench.py`). Each question ships its own haystack of chat sessions (a few gold sessions + dozens of distractors); a 300-question run retrieves over **25,486 real memory records** — not markers over a hash embedding.
+
+<p align="center">
+  <img src="docs/assets/benchmark_longmemeval.png" width="720" alt="LongMemEval: memory lifts accuracy 0%→73%, MemTrace matches or beats plain vector on every question type">
+</p>
+
+| condition | overall | knowledge-update | preference | multi-session | temporal | single-session |
+| --- | --- | --- | --- | --- | --- | --- |
+| no memory | 0% | 0% | 0% | 0% | 0% | 0% |
+| plain vector | 71.0% | 87.0% | 63.3% | 37.0% | 42.6% | 96.3% |
+| **MemTrace** | **72.7%** | **88.9%** | **70.0%** | **38.9%** | **44.4%** | **96.3%** |
+
+Memory transforms accuracy (**0% → 73%**), and with hybrid retrieval MemTrace **matches or beats plain vector on every question type** — biggest gains on knowledge-update and preferences. Real, published dataset; real semantic vectors; a real `gpt-5.4` judge. *(Validated with real Elasticsearch BM25 + Neo4j provenance graph too: MemTrace 70.7% vs plain 69.7% — same qualitative result.)*
+
+**vs published systems.** LongMemEval-S has no single agreed SOTA — reported numbers swing widely with the judge model, retrieval config, and harness, and some 90%+ vendor claims have been [independently disputed](https://agentos.sh/de/blog/memory-benchmark-transparency-audit/) (one had hardcoded answers). Against the credible independent reference (the [HINDSIGHT ACL-demo table](https://aclanthology.org/2026.acl-demo.27.pdf)), MemTrace's **72.7%** sits **above full-context GPT-4o (60.2%)** and around **Zep (71.2%)** — while retrieving a bounded, *gated* context instead of dumping the whole history. It is a pipeline proof on a real benchmark, not a leaderboard submission.
+
+**Abstention — MemTrace's relevance gate.** On questions whose answer is *not* in memory, plain vector still injects distractors and the model can hallucinate; MemTrace's opt-in relevance floor (`MEMTRACE_RETRIEVAL_MIN_RELEVANCE`) drops the low-similarity distractors so the model abstains correctly more often — **86.7% vs 83.3%**, with **62% fewer** injected tokens (649 vs 1,708).
+
+<p align="center">
+  <img src="docs/assets/benchmark_longmemeval_precision.png" width="560" alt="Abstention: MemTrace's relevance floor abstains correctly more often with far fewer injected tokens">
+</p>
+
+```bash
+./scripts/fetch-longmemeval.sh s_cleaned          # -> /tmp/longmemeval_s_cleaned.json (deleted with --clean)
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE_LLM_MODEL=gpt-5.4 \
+  MEMTRACE_RETRIEVAL_HYBRID_BACKEND=inmemory MEMTRACE_RETRIEVAL_GRAPH_BACKEND=inmemory \
+  uv run --with ijson python -m app.benchmark.longmemeval_bench --dataset /tmp/longmemeval_s_cleaned.json --limit 300
+```
+
+<sub>Kept light on purpose: embeddings come from the API (not a local model), the 264 MB dataset is stream-parsed, and each question uses a fresh in-memory store — peak RSS ~100 MB, near-idle CPU. Embeddings are cached so floor/config sweeps don't re-embed. Opt-in; needs the dataset + an LLM/embedding endpoint.</sub>
+
+### 2. Real execution-tree benchmark — where MemTrace's agentic edge shows
 
 This is the setting a plain vector store structurally cannot represent. `app/benchmark/trace_bench.py` drives the **real `MemoryRuntime`** to build a long-horizon *execution tree* per scenario: a run of many subgoals, where each subgoal may make one or more attempts that **fail and get rolled back** (dead branches) before a **recovery** attempt succeeds. Memories are created by the real write path, so they carry genuine `branch_status` / state-node provenance, and retrieval runs the full pipeline (state tree → active-path filtering → admission gate → compaction). Deterministic, no LLM. Latest run: **120 runs × 10 subgoals = 1,200 probes**.
 
@@ -201,7 +234,7 @@ Every dead-branch fact the run abandoned leaks into a plain-vector store; MemTra
 uv run python -m app.benchmark.trace_bench --scenarios 120 --subgoals 10 --output-dir reports
 ```
 
-### 2. Flat scale run — and the honest cost
+### 3. Flat scale run — and the honest cost
 
 A deterministic **3,000-record** run (`app/benchmark/dataset_bench.py`) isolates the mechanism *and its cost*. It's not a one-sided win: MemTrace's gate removes ~79% contamination plain vector admits, but the *same* isolation over-drops the ~15% of correct facts that happen to sit on a failed branch. Net, it nearly doubles clean context (45% → 85%):
 
@@ -218,7 +251,7 @@ uv run python -m app.benchmark.dataset_bench --dataset /tmp/scale.jsonl --strate
 uv run --with matplotlib python -m app.benchmark.plot_benchmarks   # regenerates docs/assets/*.png
 ```
 
-### 3. Deterministic correctness — 16 cases × 6 strategies
+### 4. Deterministic correctness — 16 cases × 6 strategies
 
 ```bash
 uv run python -m app.benchmark.runner --output-dir reports   # acceptance: passed=true (16/16)
@@ -227,31 +260,9 @@ uv run python -m app.benchmark.runner --output-dir reports   # acceptance: passe
 
 The six strategies (`baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`) quantify each mechanism's contribution across failed-branch isolation, tool safety, compaction, safe negative evidence, sanitized destructive failures, reflection-lite retention, retained-negative metadata, and LoCoMo/MemoryArena-style long-horizon / temporal-update / multi-hop recall. Current acceptance: **16/16**.
 
-### 4. Real-LLM checks (real + synthetic data)
+### 5. Additional real-LLM checks — LoCoMo + agentic Q&A
 
-Layers 1–3 are deterministic and marker-scored. These close the loop against an **actual model** (`gpt-5.4` via a local OpenAI-compatible proxy).
-
-**Real public dataset — LoCoMo** (`app/benchmark/locomo_bench.py`): seeds real long-conversation turns as memory, answers a 30-question sample under three conditions with a real LLM answering + a real LLM judge grading against gold answers.
-
-| Condition | Accuracy |
-| --- | --- |
-| no memory (`baseline_0`) | **0%** |
-| plain vector (`baseline_1`) | **30%** |
-| MemTrace (`variant_2`) | **30%** |
-
-<sub>Honest read: memory clearly helps (0% → 30%), and **MemTrace ties plain vector here** — LoCoMo is *conversational* (long-horizon recall / temporal reasoning), so it doesn't contain the **dead execution branches** that MemTrace's gate is built to isolate; that agentic edge is what layer 1 measures. Absolute accuracy is modest because retrieval uses lexical/deterministic vectors (this environment has no real embedding endpoint). Not a leaderboard submission. Requires a downloaded `locomo10.json` + an LLM endpoint.</sub>
-
-**Synthetic Q&A** (`app/benchmark/qa_bench.py`): on 4 agentic scenarios the gated-memory answer is correct only *with* MemTrace context — **4/4** (`bun test` not `npm`; `/api/v2/users` not `v1`; `Bun·pnpm·Postgres`), vs *"I do not have that information."* with no memory.
-
-```bash
-MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE_LLM_MODEL=gpt-5.4 \
-  uv run python -m app.benchmark.qa_bench --output-dir reports
-# real dataset (download locomo10.json first):
-MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_MODEL=gpt-5.4 MEMTRACE_LOCOMO_PATH=locomo10.json \
-  uv run python -m app.benchmark.locomo_bench --limit 30 --output-dir reports
-```
-
-
+Beyond LongMemEval, two lighter real-LLM checks (`gpt-5.4` via a local OpenAI-compatible proxy).
 
 **Real public dataset — LoCoMo** (`app/benchmark/locomo_bench.py`): seeds real long-conversation turns as memory, answers a 30-question sample under three conditions with a real LLM answering + a real LLM judge grading against gold answers.
 

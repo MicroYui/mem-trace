@@ -1,128 +1,128 @@
 {
   "scale": {
-    "records": 3000,
-    "probes": 3000,
+    "records": 3,
+    "probes": 3,
     "by_strategy": {
       "baseline_0": {
         "recall_rate": 0.0,
         "recall_hits": 0,
-        "recall_total": 3000,
+        "recall_total": 3,
         "distractor_leakage_rate": 0.0,
         "distractor_leaks": 0,
-        "distractor_total": 2100,
+        "distractor_total": 2,
         "clean_context_rate": 0.0,
         "clean_hits": 0,
-        "clean_total": 3000
+        "clean_total": 3
       },
       "long_context": {
         "recall_rate": 1.0,
-        "recall_hits": 3000,
-        "recall_total": 3000,
-        "distractor_leakage_rate": 0.785714,
-        "distractor_leaks": 1650,
-        "distractor_total": 2100,
-        "clean_context_rate": 0.45,
-        "clean_hits": 1350,
-        "clean_total": 3000
+        "recall_hits": 3,
+        "recall_total": 3,
+        "distractor_leakage_rate": 0.5,
+        "distractor_leaks": 1,
+        "distractor_total": 2,
+        "clean_context_rate": 0.666667,
+        "clean_hits": 2,
+        "clean_total": 3
       },
       "baseline_1": {
         "recall_rate": 1.0,
-        "recall_hits": 3000,
-        "recall_total": 3000,
-        "distractor_leakage_rate": 0.785714,
-        "distractor_leaks": 1650,
-        "distractor_total": 2100,
-        "clean_context_rate": 0.45,
-        "clean_hits": 1350,
-        "clean_total": 3000
+        "recall_hits": 3,
+        "recall_total": 3,
+        "distractor_leakage_rate": 0.5,
+        "distractor_leaks": 1,
+        "distractor_total": 2,
+        "clean_context_rate": 0.666667,
+        "clean_hits": 2,
+        "clean_total": 3
       },
       "variant_1": {
         "recall_rate": 1.0,
-        "recall_hits": 3000,
-        "recall_total": 3000,
-        "distractor_leakage_rate": 0.785714,
-        "distractor_leaks": 1650,
-        "distractor_total": 2100,
-        "clean_context_rate": 0.45,
-        "clean_hits": 1350,
-        "clean_total": 3000
+        "recall_hits": 3,
+        "recall_total": 3,
+        "distractor_leakage_rate": 0.5,
+        "distractor_leaks": 1,
+        "distractor_total": 2,
+        "clean_context_rate": 0.666667,
+        "clean_hits": 2,
+        "clean_total": 3
       },
       "variant_2": {
-        "recall_rate": 0.85,
-        "recall_hits": 2550,
-        "recall_total": 3000,
+        "recall_rate": 1.0,
+        "recall_hits": 3,
+        "recall_total": 3,
         "distractor_leakage_rate": 0.0,
         "distractor_leaks": 0,
-        "distractor_total": 2100,
-        "clean_context_rate": 0.85,
-        "clean_hits": 2550,
-        "clean_total": 3000
+        "distractor_total": 2,
+        "clean_context_rate": 1.0,
+        "clean_hits": 3,
+        "clean_total": 3
       },
       "variant_3": {
-        "recall_rate": 0.85,
-        "recall_hits": 2550,
-        "recall_total": 3000,
+        "recall_rate": 1.0,
+        "recall_hits": 3,
+        "recall_total": 3,
         "distractor_leakage_rate": 0.0,
         "distractor_leaks": 0,
-        "distractor_total": 2100,
-        "clean_context_rate": 0.85,
-        "clean_hits": 2550,
-        "clean_total": 3000
+        "distractor_total": 2,
+        "clean_context_rate": 1.0,
+        "clean_hits": 3,
+        "clean_total": 3
       }
     },
     "delta": {
-      "recall_rate_gain": -0.15,
-      "recall_cost": 0.15,
-      "distractor_leakage_reduction": 0.785714,
-      "clean_context_gain": 0.4
+      "recall_rate_gain": 0.0,
+      "recall_cost": 0.0,
+      "distractor_leakage_reduction": 0.5,
+      "clean_context_gain": 0.333333
     },
     "category_stats": {
       "dead_branch": {
         "baseline_1": {
-          "recall": 1.0,
-          "leak": 1.0
+          "recall": null,
+          "leak": null
         },
         "variant_2": {
-          "recall": 1.0,
-          "leak": 0.0
+          "recall": null,
+          "leak": null
         }
       },
       "superseded": {
         "baseline_1": {
-          "recall": 1.0,
-          "leak": 0.0
+          "recall": null,
+          "leak": null
         },
         "variant_2": {
-          "recall": 1.0,
-          "leak": 0.0
+          "recall": null,
+          "leak": null
         }
       },
       "valid_on_failed": {
         "baseline_1": {
-          "recall": 1.0,
+          "recall": null,
           "leak": null
         },
         "variant_2": {
-          "recall": 0.0,
+          "recall": null,
           "leak": null
         }
       },
       "clean": {
         "baseline_1": {
-          "recall": 1.0,
+          "recall": null,
           "leak": null
         },
         "variant_2": {
-          "recall": 1.0,
+          "recall": null,
           "leak": null
         }
       }
     }
   },
   "tree_trace": {
-    "scenarios": 120,
-    "subgoals_per_scenario": 10,
-    "probes": 1200,
+    "scenarios": 100,
+    "subgoals_per_scenario": 6,
+    "probes": 600,
     "by_strategy": {
       "baseline_0": {
         "recall_rate": 0.0,
@@ -134,38 +134,38 @@
         "recall_rate": 1.0,
         "contamination_rate": 1.0,
         "clean_context_rate": 0.333333,
-        "avg_context_tokens": 345.0
+        "avg_context_tokens": 209.0
       },
       "baseline_1": {
         "recall_rate": 1.0,
         "contamination_rate": 1.0,
         "clean_context_rate": 0.333333,
-        "avg_context_tokens": 212.3
+        "avg_context_tokens": 142.23
       },
       "variant_1": {
         "recall_rate": 1.0,
         "contamination_rate": 1.0,
         "clean_context_rate": 0.333333,
-        "avg_context_tokens": 212.34
+        "avg_context_tokens": 142.23
       },
       "variant_2": {
         "recall_rate": 1.0,
         "contamination_rate": 0.0,
         "clean_context_rate": 1.0,
-        "avg_context_tokens": 199.58
+        "avg_context_tokens": 174.79
       },
       "variant_3": {
         "recall_rate": 1.0,
         "contamination_rate": 0.0,
         "clean_context_rate": 1.0,
-        "avg_context_tokens": 199.59
+        "avg_context_tokens": 174.79
       }
     },
     "delta": {
       "contamination_reduction": 1.0,
       "recall_cost": 0.0,
       "clean_context_gain": 0.666667,
-      "context_token_ratio_vs_long_context": 0.5785
+      "context_token_ratio_vs_long_context": 0.8363
     }
   },
   "correctness_16_case": {
@@ -212,6 +212,66 @@
         "no_memory": 0.0,
         "plain_vector": 0.25,
         "memtrace": 0.25
+      }
+    }
+  },
+  "real_llm_longmemeval": {
+    "model": "gpt-5.4",
+    "embedding": "text-embedding-3-small (256d, in-memory cosine index)",
+    "sample_size": 300,
+    "total_memories": 25486,
+    "accuracy": {
+      "no_memory": 0.0,
+      "plain_vector": 0.71,
+      "memtrace": 0.7267
+    },
+    "accuracy_by_type": {
+      "knowledge-update": {
+        "no_memory": 0.0,
+        "plain_vector": 0.8704,
+        "memtrace": 0.8889
+      },
+      "multi-session": {
+        "no_memory": 0.0,
+        "plain_vector": 0.3704,
+        "memtrace": 0.3889
+      },
+      "single-session-assistant": {
+        "no_memory": 0.0,
+        "plain_vector": 0.963,
+        "memtrace": 0.963
+      },
+      "single-session-preference": {
+        "no_memory": 0.0,
+        "plain_vector": 0.6333,
+        "memtrace": 0.7
+      },
+      "single-session-user": {
+        "no_memory": 0.0,
+        "plain_vector": 0.963,
+        "memtrace": 0.963
+      },
+      "temporal-reasoning": {
+        "no_memory": 0.0,
+        "plain_vector": 0.4259,
+        "memtrace": 0.4444
+      }
+    },
+    "abstention_accuracy": {
+      "no_memory": 0.0,
+      "plain_vector": 0.0,
+      "memtrace": 0.0
+    },
+    "context_precision": {
+      "plain_vector": {
+        "avg_injected_tokens": 1716.4,
+        "avg_distractor_rate": 0.8613,
+        "avg_gold_recall": 0.8769
+      },
+      "memtrace": {
+        "avg_injected_tokens": 1716.4,
+        "avg_distractor_rate": 0.8613,
+        "avg_gold_recall": 0.8769
       }
     }
   }

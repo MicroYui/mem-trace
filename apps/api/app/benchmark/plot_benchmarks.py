@@ -262,35 +262,32 @@ def chart_longmemeval(lme: dict, out: Path) -> None:
 
 
 def chart_longmemeval_precision(lme: dict, out: Path) -> None:
-    """The MemTrace edge on LongMemEval: the relevance gate drops distractors, so
-    MemTrace answers with fewer injected tokens + lower distractor rate and abstains
-    correctly more often than plain vector."""
-    abst = lme.get("abstention_accuracy", {})
+    """The MemTrace edge on abstention: its relevance gate drops distractors, so on
+    questions whose answer is NOT in memory it abstains correctly more often than
+    plain vector while injecting far fewer tokens."""
+    abst = lme.get("abstention_accuracy") or lme.get("accuracy", {})
     prec = lme.get("context_precision", {})
     pv, mt = prec.get("plain_vector", {}), prec.get("memtrace", {})
-    panels = [
-        ("abstention\naccuracy", abst.get("plain_vector", 0.0), abst.get("memtrace", 0.0), "{:.0%}", 1.15),
-        ("distractor\nrate", pv.get("avg_distractor_rate", 0.0), mt.get("avg_distractor_rate", 0.0), "{:.0%}", 1.15),
-    ]
-    tok_pv, tok_mt = pv.get("avg_injected_tokens", 0.0), mt.get("avg_injected_tokens", 0.0)
-    fig, axes = plt.subplots(1, 3, figsize=(10.5, 4.4))
-    for ax, (title, v_pv, v_mt, fmt, ymax) in zip(axes[:2], panels):
-        bars = ax.bar(["plain\nvector", "MemTrace"], [v_pv, v_mt], color=[_AMBER, _GREEN])
-        for b, v in zip(bars, [v_pv, v_mt]):
-            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + ymax * 0.01, fmt.format(v),
-                    ha="center", va="bottom", fontsize=10, fontweight="bold")
-        ax.set_ylim(0, ymax)
-        ax.set_title(title, fontsize=10)
-        ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
-        ax.spines[["top", "right"]].set_visible(False)
-    ax = axes[2]
-    bars = ax.bar(["plain\nvector", "MemTrace"], [tok_pv, tok_mt], color=[_AMBER, _GREEN])
-    for b, v in zip(bars, [tok_pv, tok_mt]):
-        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + max(tok_pv, tok_mt, 1) * 0.01,
-                f"{v:.0f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
-    ax.set_title("avg injected tokens", fontsize=10)
-    ax.spines[["top", "right"]].set_visible(False)
-    fig.suptitle("LongMemEval — MemTrace's relevance gate: cleaner context, better abstention", fontsize=11)
+    fig, axes = plt.subplots(1, 2, figsize=(8.2, 4.4))
+    # panel 1: abstention accuracy
+    a_pv, a_mt = abst.get("plain_vector", 0.0), abst.get("memtrace", 0.0)
+    bars = axes[0].bar(["plain\nvector", "MemTrace\n+floor"], [a_pv, a_mt], color=[_AMBER, _GREEN])
+    for b, v in zip(bars, [a_pv, a_mt]):
+        axes[0].text(b.get_x() + b.get_width() / 2, b.get_height() + 0.01, f"{v:.0%}",
+                     ha="center", va="bottom", fontsize=11, fontweight="bold")
+    axes[0].set_ylim(0, 1.15)
+    axes[0].set_title("abstention accuracy\n(answer not in memory)", fontsize=10)
+    axes[0].yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+    axes[0].spines[["top", "right"]].set_visible(False)
+    # panel 2: injected tokens
+    t_pv, t_mt = pv.get("avg_injected_tokens", 0.0), mt.get("avg_injected_tokens", 0.0)
+    bars = axes[1].bar(["plain\nvector", "MemTrace\n+floor"], [t_pv, t_mt], color=[_AMBER, _GREEN])
+    for b, v in zip(bars, [t_pv, t_mt]):
+        axes[1].text(b.get_x() + b.get_width() / 2, b.get_height() + max(t_pv, t_mt, 1) * 0.01,
+                     f"{v:.0f}", ha="center", va="bottom", fontsize=11, fontweight="bold")
+    axes[1].set_title("avg injected tokens", fontsize=10)
+    axes[1].spines[["top", "right"]].set_visible(False)
+    fig.suptitle("LongMemEval abstention — MemTrace's relevance gate: correct abstention, leaner context", fontsize=11)
     fig.tight_layout()
     fig.savefig(out, dpi=140)
     plt.close(fig)
@@ -321,9 +318,11 @@ def main() -> int:
     qa = _load(reports / "qa_bench_results.json")
     locomo = _load(reports / "locomo_bench_results.json")
     lme = _load(reports / "longmemeval_bench_results.json")
+    lme_abs = _load(reports / "longmemeval_abstention_results.json")
     if lme is not None and not lme.get("skipped"):
         chart_longmemeval(lme, assets / "benchmark_longmemeval.png")
-        chart_longmemeval_precision(lme, assets / "benchmark_longmemeval_precision.png")
+        if lme_abs is not None and not lme_abs.get("skipped"):
+            chart_longmemeval_precision(lme_abs, assets / "benchmark_longmemeval_precision.png")
     checks = (bench16 or {}).get("acceptance", {}).get("checks", {})
     summary = {
         "scale": {
