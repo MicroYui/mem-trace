@@ -115,7 +115,22 @@ async def _propose(client, endpoint, task: str, history: list[str], memory: str)
     mem_block = f"\nMEMORY (past sessions):\n{memory}\n" if memory else ""
     hist = "\n".join(history[-8:]) or "(no commands yet)"
     prompt = f"Task: {task}\n{mem_block}\nSession so far:\n{hist}\n\nNext single shell command:"
-    raw = (await _chat(client, endpoint, _AGENT_SYSTEM, prompt)).strip()
+    # Retry transient errors / empty responses (some models, e.g. gemini, occasionally
+    # return a 5xx or an empty completion) so a flaky call doesn't drop a whole trial.
+    raw = ""
+    last_exc: Exception | None = None
+    for attempt in range(4):
+        try:
+            raw = (await _chat(client, endpoint, _AGENT_SYSTEM, prompt)).strip()
+            if raw:
+                break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+        await asyncio.sleep(1.0 * (attempt + 1))
+    if not raw:
+        if last_exc is not None:
+            raise last_exc
+        return "DONE"
     if raw.startswith("```"):  # strip a markdown code fence + any language tag line
         raw = "\n".join(ln for ln in raw.splitlines() if not ln.strip().startswith("```")).strip()
     for line in raw.splitlines():
@@ -162,7 +177,7 @@ async def _run_agent(client, endpoint, rt: MemoryRuntime, ws: str, task: str, pr
         if cmd.upper().startswith("DONE"):
             break
         steps += 1
-        rc, out = _execute(cmd, project)
+        rc, out = await asyncio.to_thread(_execute, cmd, project)  # thread so concurrent trials don't block
         failed = rc != 0
         if failed:
             failed_cmds += 1
@@ -185,58 +200,99 @@ async def _run_agent(client, endpoint, rt: MemoryRuntime, ws: str, task: str, pr
     return {"steps": steps, "failed_commands": failed_cmds, "stumbled": failed_cmds > 0, "succeeded": succeeded}
 
 
-async def run_dogfood_ab(*, root: str, trials: int = 3, output_dir: str | None = "reports") -> dict[str, Any]:
+async def _one_trial(t: int, client, endpoint, task: str, root: str) -> dict[str, Any]:
+    """One independent A/B trial (own repo/runtime/projects)."""
+    repo = InMemoryRepository()
+    ws = f"dogfood_{t}"
+    rt = MemoryRuntime(repo, default_workspace_id=ws)
+    # Three SEPARATE fresh projects: phase-1 learn, and one each for A and B, so A's
+    # setup can't initialize B's project (that would rig the comparison).
+    proj1, proj_a, proj_b = _make_project(root), _make_project(root), _make_project(root)
+    try:
+        learn = await _run_agent(client, endpoint, rt, ws, task, proj1, use_memory=False)
+        a = await _run_agent(client, endpoint, rt, f"{ws}_A", task, proj_a, use_memory=False)
+        b = await _run_agent(client, endpoint, rt, ws, task, proj_b, use_memory=True)
+    finally:
+        for p in (proj1, proj_a, proj_b):
+            shutil.rmtree(p, ignore_errors=True)
+    return {"trial": t, "learn": learn, "A": a, "B": b}
+
+
+def _agg(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate a list of trial rows into the A/B stats."""
+    n = len(rows)
+
+    def _sum(side: str, key: str) -> int:
+        return sum(r[side][key] for r in rows)
+
+    a_stumble = sum(1 for r in rows if r["A"]["stumbled"])
+    b_stumble = sum(1 for r in rows if r["B"]["stumbled"])
+    return {
+        "trials": n,
+        "A_no_memory": {"total_steps": _sum("A", "steps"), "total_failed_commands": _sum("A", "failed_commands"),
+                        "trials_stumbled": a_stumble, "success_rate": round(_sum("A", "succeeded") / max(1, n), 3)},
+        "B_memtrace": {"total_steps": _sum("B", "steps"), "total_failed_commands": _sum("B", "failed_commands"),
+                       "trials_stumbled": b_stumble, "success_rate": round(_sum("B", "succeeded") / max(1, n), 3)},
+        "delta": {"steps_saved": _sum("A", "steps") - _sum("B", "steps"),
+                  "failed_commands_saved": _sum("A", "failed_commands") - _sum("B", "failed_commands"),
+                  "stumbles_avoided": a_stumble - b_stumble},
+    }
+
+
+async def run_dogfood_ab(*, root: str, models: list[str] | None = None, trials: int = 100,
+                         concurrency: int = 8, output_dir: str | None = "reports") -> dict[str, Any]:
     endpoints = _resolve_endpoints()
     if not endpoints:
         return {"skipped": True, "reason": "needs MEMTRACE_LLM_API_KEY (+ BASE_URL/MODEL)"}
-    endpoint = endpoints[0]
+    base = endpoints[0]
+    model_list = models or [base["model"]]
     task = ("Verify this project by running ./check.sh — it should print PASS. If it does not, "
             "get it to PASS.")
-    trial_rows: list[dict[str, Any]] = []
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _run_for(endpoint: dict[str, Any], client) -> list[dict[str, Any]]:
+        done = 0
+        lock = asyncio.Lock()
+
+        async def _bounded(t: int) -> dict[str, Any] | None:
+            nonlocal done
+            async with sem:
+                try:
+                    row = await _one_trial(t, client, endpoint, task, root)
+                except Exception as exc:  # noqa: BLE001 - one flaky trial must not kill the batch
+                    row = None
+                    if done < 2:
+                        print(f"  [{endpoint['model']}] trial {t} errored ({type(exc).__name__})", flush=True)
+            async with lock:
+                done += 1
+                if done % 25 == 0:
+                    print(f"  [{endpoint['model']}] {done}/{trials} trials …", flush=True)
+            return row
+
+        results = await asyncio.gather(*(_bounded(t) for t in range(trials)))
+        return [r for r in results if r is not None]
+
+    by_model: dict[str, Any] = {}
+    all_rows: list[dict[str, Any]] = []
     async with httpx.AsyncClient() as client:
-        for t in range(trials):
-            repo = InMemoryRepository()
-            ws = f"dogfood_{t}"
-            rt = MemoryRuntime(repo, default_workspace_id=ws)
-            # Three SEPARATE fresh projects: phase-1 learn, and one each for A and B, so
-            # A's setup can't initialize B's project (that would rig the comparison).
-            proj1, proj_a, proj_b = _make_project(root), _make_project(root), _make_project(root)
-            try:
-                # Phase 1 — learn on project #1 (records the failed check + the working
-                # setup->check sequence to MemTrace).
-                learn = await _run_agent(client, endpoint, rt, ws, task, proj1, use_memory=False)
-                # Phase 2 — A (no memory, separate workspace) vs B (retrieves phase-1's lesson).
-                a = await _run_agent(client, endpoint, rt, f"{ws}_A", task, proj_a, use_memory=False)
-                b = await _run_agent(client, endpoint, rt, ws, task, proj_b, use_memory=True)
-            finally:
-                for p in (proj1, proj_a, proj_b):
-                    shutil.rmtree(p, ignore_errors=True)
-            trial_rows.append({"trial": t, "learn": learn, "A": a, "B": b})
+        for model in model_list:
+            rows = await _run_for({**base, "model": model}, client)
+            if rows:
+                by_model[model] = _agg(rows)
+                all_rows.extend(rows)
+            else:
+                print(f"  model {model}: all trials errored (not accessible?) — excluded", flush=True)
+    if not all_rows:
+        return {"skipped": True, "reason": "all trials errored across all models (endpoint unreachable?)"}
 
-    def _sum(side: str, key: str) -> int:
-        return sum(r[side][key] for r in trial_rows)
-
-    a_steps, b_steps = _sum("A", "steps"), _sum("B", "steps")
-    a_fail, b_fail = _sum("A", "failed_commands"), _sum("B", "failed_commands")
-    a_stumble = sum(1 for r in trial_rows if r["A"]["stumbled"])
-    b_stumble = sum(1 for r in trial_rows if r["B"]["stumbled"])
     payload = {
         "skipped": False,
-        "endpoint": {"base_url": endpoint["base_url"], "model": endpoint["model"]},
+        "endpoint": {"base_url": base["base_url"], "model": " · ".join(by_model.keys())},
         "task": task,
-        "trials": trials,
-        "A_no_memory": {"total_steps": a_steps, "total_failed_commands": a_fail,
-                        "trials_stumbled": a_stumble,
-                        "success_rate": round(_sum("A", "succeeded") / trials, 3)},
-        "B_memtrace": {"total_steps": b_steps, "total_failed_commands": b_fail,
-                       "trials_stumbled": b_stumble,
-                       "success_rate": round(_sum("B", "succeeded") / trials, 3)},
-        "delta": {
-            "steps_saved": a_steps - b_steps,
-            "failed_commands_saved": a_fail - b_fail,
-            "stumbles_avoided": a_stumble - b_stumble,
-        },
-        "trial_rows": trial_rows,
+        "models": list(by_model.keys()),
+        "trials_per_model": trials,
+        **_agg(all_rows),  # overall: trials, A_no_memory, B_memtrace, delta
+        "by_model": by_model,
     }
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -248,16 +304,25 @@ async def run_dogfood_ab(*, root: str, trials: int = 3, output_dir: str | None =
 def main() -> int:
     p = argparse.ArgumentParser(description="Dogfooding A/B: does MemTrace stop an agent repeating a mistake?")
     p.add_argument("--root", default=tempfile.gettempdir(), help="parent dir for throwaway projects")
-    p.add_argument("--trials", type=int, default=3)
+    p.add_argument("--trials", type=int, default=100, help="trials PER model")
+    p.add_argument("--models", default="", help="comma-separated model ids (default: MEMTRACE_LLM_MODEL)")
+    p.add_argument("--concurrency", type=int, default=8, help="trials to run in parallel")
     p.add_argument("--output-dir", default="reports")
     a = p.parse_args()
-    payload = asyncio.run(run_dogfood_ab(root=a.root, trials=a.trials, output_dir=a.output_dir))
+    models = [m.strip() for m in a.models.split(",") if m.strip()] or None
+    payload = asyncio.run(run_dogfood_ab(root=a.root, models=models, trials=a.trials,
+                                         concurrency=a.concurrency, output_dir=a.output_dir))
     if payload.get("skipped"):
         print(f"dogfood_agent skipped: {payload['reason']}")
         return 0
-    print(f"model={payload['endpoint']['model']}  trials={payload['trials']}")
-    print(f"  A (no memory):  {payload['A_no_memory']}")
-    print(f"  B (MemTrace):   {payload['B_memtrace']}")
+    print(f"models={payload['endpoint']['model']}  trials/model={payload['trials_per_model']}  "
+          f"total_trials={payload['trials']}")
+    print(f"  OVERALL  A (no memory): {payload['A_no_memory']}")
+    print(f"  OVERALL  B (MemTrace):  {payload['B_memtrace']}")
+    for model, agg in payload.get("by_model", {}).items():
+        print(f"  [{model}]  A stumbled {agg['A_no_memory']['trials_stumbled']}/{agg['trials']}  "
+              f"B stumbled {agg['B_memtrace']['trials_stumbled']}/{agg['trials']}  "
+              f"steps {agg['A_no_memory']['total_steps']}->{agg['B_memtrace']['total_steps']}")
     d = payload["delta"]
     print(f"  A/B delta: steps_saved={d['steps_saved']}  failed_commands_saved={d['failed_commands_saved']}  "
           f"stumbles_avoided={d['stumbles_avoided']}")

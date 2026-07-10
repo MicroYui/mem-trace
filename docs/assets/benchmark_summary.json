@@ -274,5 +274,50 @@
         "avg_gold_recall": 0.8769
       }
     }
+  },
+  "agentic_real_trajectory": {
+    "trajectories": 3048,
+    "total_steps": 81758,
+    "total_failed_steps": 5061,
+    "by_condition": {
+      "plain_vector": {
+        "contamination_rate": 0.0866,
+        "failed_block_share": 0.0077,
+        "recall_rate": 0.8219,
+        "avg_context_tokens": 972.4403
+      },
+      "memtrace": {
+        "contamination_rate": 0.0,
+        "failed_block_share": 0.0,
+        "recall_rate": 0.8064,
+        "avg_context_tokens": 974.2247
+      }
+    },
+    "delta": {
+      "contamination_reduction": 0.0866,
+      "failed_block_share_reduction": 0.0077,
+      "recall_delta": -0.0155
+    }
+  },
+  "dogfood_agent_ab": {
+    "model": "gpt-5.4 · claude-sonnet-5 · gemini-3.1-pro-preview",
+    "trials": 298,
+    "A_no_memory": {
+      "total_steps": 902,
+      "total_failed_commands": 298,
+      "trials_stumbled": 298,
+      "success_rate": 1.0
+    },
+    "B_memtrace": {
+      "total_steps": 599,
+      "total_failed_commands": 88,
+      "trials_stumbled": 88,
+      "success_rate": 1.0
+    },
+    "delta": {
+      "steps_saved": 303,
+      "failed_commands_saved": 210,
+      "stumbles_avoided": 210
+    }
   }
 }

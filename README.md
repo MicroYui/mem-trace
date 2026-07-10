@@ -226,37 +226,39 @@ MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE
 
 Where MemTrace is *built* to win — now measured on **real** data, not synthetic markers.
 
-**Real SWE-agent trajectories.** `app/benchmark/agentic_trace_bench.py` ingests real [SWE-agent](https://github.com/SWE-agent/SWE-agent) execution trajectories (agents solving SWE-bench / SWE-smith issues; a failed step = non-zero `<returncode>`) into the real runtime with failed steps rolled back, then A/B compares retrieval over the identical memory. Latest run: **10,392 real agent steps (637 failed) across 400 trajectories**.
+**Real SWE-agent trajectories.** `app/benchmark/agentic_trace_bench.py` ingests real [SWE-agent](https://github.com/SWE-agent/SWE-agent) execution trajectories (agents solving SWE-bench / SWE-smith issues; a failed step = non-zero `<returncode>`) into the real runtime with failed steps rolled back, then A/B compares retrieval over the identical memory. Latest run: **81,758 real agent steps (5,061 failed) across 3,048 trajectories**.
 
 <p align="center">
-  <img src="docs/assets/benchmark_agentic_trace.png" width="640" alt="Real SWE-agent trajectories: MemTrace isolates dead-branch commands, contamination 10%→0%">
+  <img src="docs/assets/benchmark_agentic_trace.png" width="640" alt="Real SWE-agent trajectories: MemTrace isolates dead-branch commands, contamination 8.7%→0%">
 </p>
 
 | | dead-branch contamination | recall of working commands |
 | --- | --- | --- |
-| A: plain vector | 10.2% | 84.8% |
-| B: **MemTrace** | **0.0%** | 83.5% |
+| A: plain vector | 8.7% | 82.2% |
+| B: **MemTrace** | **0.0%** | 80.6% |
 
-A plain vector store re-surfaces the failed commands the agent already abandoned; MemTrace's gate isolates **all** of them (**10.2% → 0%**) at a ~1-pt recall cost — on real traces, at scale.
+A plain vector store re-surfaces the failed commands the agent already abandoned; MemTrace's gate isolates **all** of them (**8.7% → 0%**) at a ~1.6-pt recall cost — on **82k real agent steps**.
 
-**Dogfooding — does memory stop an agent repeating a mistake?** `app/benchmark/dogfood_agent.py` runs a **sandboxed** coding agent (a real LLM proposes shell commands; a deny-listed executor runs them in a throwaway project) as an A/B: **A = no memory** vs **B = MemTrace**, over 8 trials of a task whose fix (a required setup step) is only learnable by *trying* it.
+**Dogfooding — does memory stop an agent repeating a mistake?** `app/benchmark/dogfood_agent.py` runs a **sandboxed** coding agent (a real LLM proposes shell commands; a deny-listed executor runs them in a throwaway project) as an A/B — **A = no memory** vs **B = MemTrace** — on a task whose fix (a required setup step) is only learnable by *trying* it. Run across **3 model families, ~100 trials each (298 total)**:
 
 <p align="center">
-  <img src="docs/assets/benchmark_dogfood.png" width="560" alt="Dogfooding: MemTrace's negative memory stops the agent repeating a mistake in all 8 trials, 42% fewer steps">
+  <img src="docs/assets/benchmark_dogfood.png" width="620" alt="Dogfooding across 3 models: MemTrace's negative memory cuts repeated mistakes from 298/298 to 88/298">
 </p>
 
-| | trials it repeated the mistake | steps to solve |
+| model | A: repeated the mistake | B: **MemTrace** |
 | --- | --- | --- |
-| A: no memory | **8/8** | 24 |
-| B: **MemTrace** | **0/8** | 14 |
+| gpt-5.4 | 100/100 | **0/100** |
+| gemini-3.1-pro | 98/98 | **0/98** |
+| claude-sonnet-5 | 100/100 | 88/100 |
+| **overall** | **298/298** | **88/298** |
 
-With MemTrace's failure-aware **negative memory** (the *avoided-attempts* channel a plain vector store doesn't have), the agent avoids the mistake it made before in **every** trial and solves **42% faster**.
+With MemTrace's failure-aware **negative memory** (the *avoided-attempts* channel a plain vector store doesn't have), the agent stops repeating the mistake it made before — **eliminated** for gpt-5.4 and gemini (100% → 0%), and cut **298 → 88 (70% fewer)** overall, with ~34% fewer steps. *(Honest: claude-sonnet-5 tends to run the check first regardless of memory, so the benefit depends on the model heeding memory — MemTrace supplies the signal; the model has to use it.)*
 
 ```bash
 ./scripts/fetch-swe-trajectories.sh              # stream N real trajectories (bounded, MEMTRACE_SWE_N)
 uv run python -m app.benchmark.agentic_trace_bench --dir /tmp/swe_trajs --output-dir reports
-MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE_LLM_MODEL=gpt-5.4 \
-  uv run python -m app.benchmark.dogfood_agent --trials 8 --output-dir reports
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 \
+  uv run python -m app.benchmark.dogfood_agent --models "gpt-5.4,claude-sonnet-5,gemini-3.1-pro-preview" --trials 100
 ```
 
 ### 3. Synthetic execution-tree — the mechanism in isolation

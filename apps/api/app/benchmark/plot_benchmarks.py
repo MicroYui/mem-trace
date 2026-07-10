@@ -324,8 +324,41 @@ def chart_agentic_trace(a: dict, out: Path) -> None:
 
 
 def chart_dogfood(d: dict, out: Path) -> None:
-    """Dogfooding A/B: MemTrace's negative memory stops a coding agent repeating a
-    mistake (trials stumbled) and solves in fewer steps."""
+    """Dogfooding A/B: does MemTrace's negative memory stop a coding agent repeating a
+    mistake? Per-model stumble rate (A: no memory vs B: MemTrace) when run across
+    models; a single-model steps/stumbles view otherwise."""
+    by_model = d.get("by_model") or {}
+    if by_model:
+        models = list(by_model.keys())
+        def _rate(m, side):
+            g = by_model[m]
+            return g[side]["trials_stumbled"] / max(1, g["trials"])
+        a_rates = [_rate(m, "A_no_memory") for m in models]
+        b_rates = [_rate(m, "B_memtrace") for m in models]
+        fig, ax = plt.subplots(figsize=(max(7.2, 2.2 * len(models) + 2.5), 4.7))
+        x = range(len(models))
+        w = 0.36
+        b1 = ax.bar([i - w / 2 for i in x], a_rates, w, label="A: no memory", color=_RED)
+        b2 = ax.bar([i + w / 2 for i in x], b_rates, w, label="B: MemTrace", color=_GREEN)
+        _annotate(ax, b1, a_rates)
+        _annotate(ax, b2, b_rates)
+        ax.set_xticks(list(x))
+        ax.set_xticklabels([m.replace("-preview", "").replace("-", "-\n", 1) for m in models], fontsize=8.5)
+        ax.set_ylim(0, 1.18)
+        ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+        ax.set_ylabel("trials the agent repeated the mistake")
+        ax.set_title(
+            f"Dogfooding across {len(models)} models — {d['trials_per_model']} trials each\n"
+            f"MemTrace's negative memory: agent repeated the mistake in "
+            f"{d['A_no_memory']['trials_stumbled']}/{d['trials']} → {d['B_memtrace']['trials_stumbled']}/{d['trials']} runs overall",
+            fontsize=10)
+        ax.legend(frameon=False, fontsize=9, ncol=2, loc="upper center")
+        ax.spines[["top", "right"]].set_visible(False)
+        fig.tight_layout()
+        fig.savefig(out, dpi=140)
+        plt.close(fig)
+        return
+
     T = d["trials"]
     a, b = d["A_no_memory"], d["B_memtrace"]
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 4.4))
