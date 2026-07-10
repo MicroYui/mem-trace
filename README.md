@@ -176,7 +176,7 @@ uv run --package memtrace-sdk python examples/simple_agent/main.py  # Python SDK
 
 ## 📊 Benchmark snapshot
 
-MemTrace is evaluated on a **real large-scale dataset** (LongMemEval — real embeddings + real LLM) plus supporting layers: a **real execution-tree benchmark** where its agentic edge shows, a **deterministic correctness suite**, and additional real-LLM checks — all reproducible.
+MemTrace is evaluated on a **real large-scale dataset** (LongMemEval — real embeddings + real LLM), on **real agent trajectories + live dogfooding** (its agentic home turf), and on a **deterministic correctness suite** — plus supporting synthetic/real-LLM layers. All reproducible.
 
 ### 1. LongMemEval — real dataset at scale (real embeddings + real LLM)
 
@@ -222,7 +222,44 @@ MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE
 
 <sub>Kept light on purpose: embeddings come from the API (not a local model), the 264 MB dataset is stream-parsed, and each question uses a fresh in-memory store — peak RSS ~100 MB, near-idle CPU. Embeddings are cached so floor/config sweeps don't re-embed. Opt-in; needs the dataset + an LLM/embedding endpoint.</sub>
 
-### 2. Real execution-tree benchmark — where MemTrace's agentic edge shows
+### 2. Real agent trajectories + dogfooding — MemTrace's home turf
+
+Where MemTrace is *built* to win — now measured on **real** data, not synthetic markers.
+
+**Real SWE-agent trajectories.** `app/benchmark/agentic_trace_bench.py` ingests real [SWE-agent](https://github.com/SWE-agent/SWE-agent) execution trajectories (agents solving SWE-bench / SWE-smith issues; a failed step = non-zero `<returncode>`) into the real runtime with failed steps rolled back, then A/B compares retrieval over the identical memory. Latest run: **10,392 real agent steps (637 failed) across 400 trajectories**.
+
+<p align="center">
+  <img src="docs/assets/benchmark_agentic_trace.png" width="640" alt="Real SWE-agent trajectories: MemTrace isolates dead-branch commands, contamination 10%→0%">
+</p>
+
+| | dead-branch contamination | recall of working commands |
+| --- | --- | --- |
+| A: plain vector | 10.2% | 84.8% |
+| B: **MemTrace** | **0.0%** | 83.5% |
+
+A plain vector store re-surfaces the failed commands the agent already abandoned; MemTrace's gate isolates **all** of them (**10.2% → 0%**) at a ~1-pt recall cost — on real traces, at scale.
+
+**Dogfooding — does memory stop an agent repeating a mistake?** `app/benchmark/dogfood_agent.py` runs a **sandboxed** coding agent (a real LLM proposes shell commands; a deny-listed executor runs them in a throwaway project) as an A/B: **A = no memory** vs **B = MemTrace**, over 8 trials of a task whose fix (a required setup step) is only learnable by *trying* it.
+
+<p align="center">
+  <img src="docs/assets/benchmark_dogfood.png" width="560" alt="Dogfooding: MemTrace's negative memory stops the agent repeating a mistake in all 8 trials, 42% fewer steps">
+</p>
+
+| | trials it repeated the mistake | steps to solve |
+| --- | --- | --- |
+| A: no memory | **8/8** | 24 |
+| B: **MemTrace** | **0/8** | 14 |
+
+With MemTrace's failure-aware **negative memory** (the *avoided-attempts* channel a plain vector store doesn't have), the agent avoids the mistake it made before in **every** trial and solves **42% faster**.
+
+```bash
+./scripts/fetch-swe-trajectories.sh              # stream N real trajectories (bounded, MEMTRACE_SWE_N)
+uv run python -m app.benchmark.agentic_trace_bench --dir /tmp/swe_trajs --output-dir reports
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE_LLM_MODEL=gpt-5.4 \
+  uv run python -m app.benchmark.dogfood_agent --trials 8 --output-dir reports
+```
+
+### 3. Synthetic execution-tree — the mechanism in isolation
 
 This is the setting a plain vector store structurally cannot represent. `app/benchmark/trace_bench.py` drives the **real `MemoryRuntime`** to build a long-horizon *execution tree* per scenario: a run of many subgoals, where each subgoal may make one or more attempts that **fail and get rolled back** (dead branches) before a **recovery** attempt succeeds. Memories are created by the real write path, so they carry genuine `branch_status` / state-node provenance, and retrieval runs the full pipeline (state tree → active-path filtering → admission gate → compaction). Deterministic, no LLM. Latest run: **120 runs × 10 subgoals = 1,200 probes**.
 
@@ -245,7 +282,7 @@ Every dead-branch fact the run abandoned leaks into a plain-vector store; MemTra
 uv run python -m app.benchmark.trace_bench --scenarios 120 --subgoals 10 --output-dir reports
 ```
 
-### 3. Flat scale run — and the honest cost
+### 4. Flat scale run — and the honest cost
 
 A deterministic **3,000-record** run (`app/benchmark/dataset_bench.py`) isolates the mechanism *and its cost*. It's not a one-sided win: MemTrace's gate removes ~79% contamination plain vector admits, but the *same* isolation over-drops the ~15% of correct facts that happen to sit on a failed branch. Net, it nearly doubles clean context (45% → 85%):
 
@@ -262,7 +299,7 @@ uv run python -m app.benchmark.dataset_bench --dataset /tmp/scale.jsonl --strate
 uv run --with matplotlib python -m app.benchmark.plot_benchmarks   # regenerates docs/assets/*.png
 ```
 
-### 4. Deterministic correctness — 16 cases × 6 strategies
+### 5. Deterministic correctness — 16 cases × 6 strategies
 
 ```bash
 uv run python -m app.benchmark.runner --output-dir reports   # acceptance: passed=true (16/16)
@@ -271,7 +308,7 @@ uv run python -m app.benchmark.runner --output-dir reports   # acceptance: passe
 
 The six strategies (`baseline_0`, `long_context`, `baseline_1`, `variant_1`, `variant_2`, `variant_3`) quantify each mechanism's contribution across failed-branch isolation, tool safety, compaction, safe negative evidence, sanitized destructive failures, reflection-lite retention, retained-negative metadata, and LoCoMo/MemoryArena-style long-horizon / temporal-update / multi-hop recall. Current acceptance: **16/16**.
 
-### 5. Additional real-LLM checks — LoCoMo + agentic Q&A
+### 6. Additional real-LLM checks — LoCoMo + agentic Q&A
 
 Beyond LongMemEval, two lighter real-LLM checks (`gpt-5.4` via a local OpenAI-compatible proxy).
 

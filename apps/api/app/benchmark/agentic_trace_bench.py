@@ -57,8 +57,11 @@ _CONDITIONS = [("plain_vector", RetrievalStrategy.baseline_1), ("memtrace", Retr
 # Parse mini-swe-agent trajectories
 # --------------------------------------------------------------------------- #
 def parse_trajectory(traj: dict[str, Any]) -> list[dict[str, Any]]:
-    """Pair each assistant action with the following tool observation. Failed steps
-    are those whose observation reports a non-zero ``<returncode>``."""
+    """Pair each assistant action with the following execution observation. The
+    observation is the next message carrying a ``<returncode>`` — its role is ``tool``
+    in some mini-swe-agent exports and ``user`` in others, so we accept either and use
+    the returncode presence to distinguish a real observation from the initial task/PR
+    text. Failed steps are those whose observation reports a non-zero ``<returncode>``."""
     messages = traj.get("messages") or []
     steps: list[dict[str, Any]] = []
     pending_action: str | None = None
@@ -66,15 +69,16 @@ def parse_trajectory(traj: dict[str, Any]) -> list[dict[str, Any]]:
         role, content = msg.get("role"), (msg.get("content") or "")
         if role == "assistant":
             pending_action = content.strip()
-        elif role == "tool" and pending_action is not None:
+        elif role in ("tool", "user") and pending_action is not None:
             m = _RETURNCODE.search(content)
-            rc = int(m.group(1)) if m else 0
-            failed = rc != 0
+            if m is None:
+                continue  # not an execution observation (e.g. task/PR text) — keep waiting
+            rc = int(m.group(1))
             steps.append({
                 "action": pending_action[:600],
                 "observation": content.strip()[:1200],
                 "returncode": rc,
-                "failed": failed,
+                "failed": rc != 0,
             })
             pending_action = None
     return steps

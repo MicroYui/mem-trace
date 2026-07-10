@@ -293,6 +293,64 @@ def chart_longmemeval_precision(lme: dict, out: Path) -> None:
     plt.close(fig)
 
 
+def chart_agentic_trace(a: dict, out: Path) -> None:
+    """Real SWE-agent trajectories: plain vector re-surfaces failed commands; MemTrace
+    isolates them. A/B on dead-branch contamination + recall of working commands."""
+    by = a["by_condition"]
+    conds = [("plain_vector", "plain vector", _AMBER), ("memtrace", "MemTrace", _GREEN)]
+    metrics = [("contamination_rate", "dead-branch\ncontamination"), ("recall_rate", "recall of\nworking commands")]
+    fig, ax = plt.subplots(figsize=(7.6, 4.7))
+    x = range(len(metrics))
+    w = 0.34
+    for i, (c, label, color) in enumerate(conds):
+        vals = [by[c][m[0]] for m in metrics]
+        bars = ax.bar([j + (i - 0.5) * w for j in x], vals, w, label=label, color=color)
+        _annotate(ax, bars, vals)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([m[1] for m in metrics])
+    ax.set_ylim(0, 1.15)
+    ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+    ax.set_title(
+        f"Real SWE-agent trajectories — {a['total_steps']:,} steps "
+        f"({a['total_failed_steps']} failed) over {a['trajectories']} runs\n"
+        f"MemTrace isolates dead-branch commands: contamination "
+        f"{by['plain_vector']['contamination_rate']:.0%} → {by['memtrace']['contamination_rate']:.0%}",
+        fontsize=10.5)
+    ax.legend(frameon=False, fontsize=9, ncol=2, loc="upper center")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+
+
+def chart_dogfood(d: dict, out: Path) -> None:
+    """Dogfooding A/B: MemTrace's negative memory stops a coding agent repeating a
+    mistake (trials stumbled) and solves in fewer steps."""
+    T = d["trials"]
+    a, b = d["A_no_memory"], d["B_memtrace"]
+    fig, axes = plt.subplots(1, 2, figsize=(8.6, 4.4))
+    s = [a["trials_stumbled"], b["trials_stumbled"]]
+    bars = axes[0].bar(["A: no\nmemory", "B: MemTrace"], s, color=[_RED, _GREEN])
+    for bar, v in zip(bars, s):
+        axes[0].text(bar.get_x() + bar.get_width() / 2, v + T * 0.02, f"{v}/{T}",
+                     ha="center", va="bottom", fontsize=12, fontweight="bold")
+    axes[0].set_ylim(0, T * 1.18)
+    axes[0].set_title("trials the agent repeated\nthe mistake (lower better)", fontsize=10)
+    st = [a["total_steps"], b["total_steps"]]
+    bars = axes[1].bar(["A: no\nmemory", "B: MemTrace"], st, color=[_RED, _GREEN])
+    for bar, v in zip(bars, st):
+        axes[1].text(bar.get_x() + bar.get_width() / 2, v + max(st) * 0.02, f"{v}",
+                     ha="center", va="bottom", fontsize=12, fontweight="bold")
+    axes[1].set_title("total steps to solve\n(lower better)", fontsize=10)
+    for ax in axes:
+        ax.spines[["top", "right"]].set_visible(False)
+    fig.suptitle(f"Dogfooding — MemTrace's negative memory stops a repeated mistake "
+                 f"({T} trials, {d['endpoint']['model']})", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render committed benchmark charts from report JSONs")
     parser.add_argument("--reports-dir", default="reports")
@@ -323,6 +381,12 @@ def main() -> int:
         chart_longmemeval(lme, assets / "benchmark_longmemeval.png")
         if lme_abs is not None and not lme_abs.get("skipped"):
             chart_longmemeval_precision(lme_abs, assets / "benchmark_longmemeval_precision.png")
+    agentic = _load(reports / "agentic_trace_bench_results.json")
+    if agentic is not None and not agentic.get("skipped"):
+        chart_agentic_trace(agentic, assets / "benchmark_agentic_trace.png")
+    dogfood = _load(reports / "dogfood_agent_results.json")
+    if dogfood is not None and not dogfood.get("skipped"):
+        chart_dogfood(dogfood, assets / "benchmark_dogfood.png")
     checks = (bench16 or {}).get("acceptance", {}).get("checks", {})
     summary = {
         "scale": {
@@ -365,6 +429,20 @@ def main() -> int:
             "accuracy_by_type": lme.get("accuracy_by_type"),
             "abstention_accuracy": lme.get("abstention_accuracy"),
             "context_precision": lme.get("context_precision"),
+        },
+        "agentic_real_trajectory": None if (agentic is None or agentic.get("skipped")) else {
+            "trajectories": agentic.get("trajectories"),
+            "total_steps": agentic.get("total_steps"),
+            "total_failed_steps": agentic.get("total_failed_steps"),
+            "by_condition": agentic.get("by_condition"),
+            "delta": agentic.get("delta"),
+        },
+        "dogfood_agent_ab": None if (dogfood is None or dogfood.get("skipped")) else {
+            "model": dogfood.get("endpoint", {}).get("model"),
+            "trials": dogfood.get("trials"),
+            "A_no_memory": dogfood.get("A_no_memory"),
+            "B_memtrace": dogfood.get("B_memtrace"),
+            "delta": dogfood.get("delta"),
         },
     }
     (assets / "benchmark_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))

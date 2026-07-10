@@ -3,15 +3,18 @@
 A minimal but REAL coding-agent loop (a real LLM proposes shell commands, a sandboxed
 executor runs them, results are recorded to MemTrace) run as a controlled **A/B**:
 
-  - Phase 1 (learn): the agent solves a task in project #1. It discovers by trial that
-    the check only passes with a specific incantation (``APP_ENV=test bash check.sh``);
-    the naive command fails. Both the failed and the successful commands are recorded
-    to MemTrace via the real runtime.
-  - Phase 2 (test): a *fresh* agent solves the same-shaped task in project #2, twice:
-      * **A = no memory** — no prior context.
-      * **B = MemTrace** — it first retrieves the lesson from MemTrace.
-    We measure whether the agent **repeats the known-bad command** and how many steps
-    it takes to succeed.
+  - Phase 1 (learn): the agent solves a task in project #1. The obvious first move —
+    running ``./check.sh`` — FAILS, because the project must be initialized with
+    ``./setup.sh`` first; that prerequisite is stated nowhere in a readable file, only
+    in the check's runtime failure output. So the agent learns it by *trying*, and the
+    failed command + the working ``setup -> check`` sequence are recorded to MemTrace.
+  - Phase 2 (test): a *fresh* agent solves the same-shaped task in a fresh project,
+    twice:
+      * **A = no memory** — no prior context, so it tends to run the check first and
+        stumble on the same trap.
+      * **B = MemTrace** — it first retrieves the lesson and sets up before checking.
+    We measure, over N trials, how often each **stumbles** (runs a command that fails)
+    and how many steps each takes to succeed.
 
 If MemTrace works, B avoids the mistake it made (and recorded) in phase 1 and solves
 in fewer steps than A.
@@ -55,29 +58,33 @@ from app.runtime.models import (
 from app.runtime.repository import InMemoryRepository
 
 # Deny-list: block obviously destructive / exfiltrating commands. The scenario only
-# needs ls/cat/bash check.sh, so this never rejects a legitimate step.
+# needs ls/cat/setup.sh/check.sh, so this never rejects a legitimate step.
 _DENY = re.compile(
     r"\b(rm\s+-|sudo|mkfs|dd\s+if=|:\s*\(\s*\)|chmod\s+-R|chown\s+-R|curl|wget|nc\s|ncat|"
     r"scp|ssh|>\s*/dev/|/etc/|~/\.ssh|shutdown|reboot|kill\s+-9\s+1)\b",
     re.IGNORECASE,
 )
-# The mistake the agent should learn to avoid: running the check WITHOUT APP_ENV=test.
-_BAD_MARKER = "bash check.sh"  # a plain invocation (no APP_ENV) -> fails
-_GOOD_MARKER = "app_env=test"  # the incantation that works
 
 
 def _make_project(root: str) -> str:
-    """A throwaway project whose check.sh passes only with APP_ENV=test."""
+    """A throwaway project whose check.sh only passes AFTER ./setup.sh has been run
+    (it creates a ``.ready`` marker). The prerequisite is NOT stated in any readable
+    file — check.sh only tests for ``.ready`` — so an agent learns it by *running* the
+    check and reading the runtime failure, exactly the kind of lesson MemTrace can
+    carry forward. The obvious first move ("run the check") therefore fails once,
+    until the agent knows to set up first."""
     d = tempfile.mkdtemp(prefix="dogfood_", dir=root)
     Path(d, "check.sh").write_text(
         '#!/usr/bin/env bash\n'
-        'if [ "$APP_ENV" = "test" ]; then echo "PASS: checks green"; exit 0; fi\n'
-        'echo "FAIL: this project\'s checks require APP_ENV=test in the environment" >&2\n'
+        'if [ -f .ready ]; then echo "PASS: checks green"; exit 0; fi\n'
+        'echo "FAIL: project not initialized. run ./setup.sh first, then re-run this check." >&2\n'
         'exit 1\n',
         encoding="utf-8",
     )
-    Path(d, "README.md").write_text("Run the project's checks (see check.sh) and make them pass.\n", encoding="utf-8")
-    os.chmod(Path(d, "check.sh"), 0o755)
+    Path(d, "setup.sh").write_text('#!/usr/bin/env bash\ntouch .ready\necho "setup complete"\n', encoding="utf-8")
+    Path(d, "README.md").write_text("Verify this project by running ./check.sh — it should print PASS.\n", encoding="utf-8")
+    for f in ("check.sh", "setup.sh"):
+        os.chmod(Path(d, f), 0o755)
     return d
 
 
@@ -86,10 +93,7 @@ def _execute(cmd: str, cwd: str, timeout: int = 10) -> tuple[int, str]:
     if _DENY.search(cmd):
         return 126, "blocked by safety policy (destructive/exfiltrating command refused)"
     try:
-        # Clear APP_ENV in the base env so a plain `bash check.sh` fails; the agent must
-        # supply `APP_ENV=test` inline (a shell var-assignment prefix) for it to pass.
-        env = {**os.environ, "APP_ENV": ""}
-        p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
+        p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         out = (p.stdout or "") + (p.stderr or "")
         return p.returncode, out.strip()[:800]
     except subprocess.TimeoutExpired:
@@ -123,11 +127,14 @@ async def _propose(client, endpoint, task: str, history: list[str], memory: str)
 
 async def _run_agent(client, endpoint, rt: MemoryRuntime, ws: str, task: str, project: str,
                      *, use_memory: bool, max_steps: int = 6) -> dict[str, Any]:
-    """One agent episode. Records each command+result to MemTrace. Returns metrics."""
+    """One agent episode. Records each command+result to MemTrace. Returns metrics.
+
+    ``stumbled`` = the agent ran a command that failed (i.e. it hit the uninitialized-
+    project trap instead of setting up first). With the phase-1 lesson in memory, B
+    should go straight to the working sequence and not stumble."""
     run = await rt.start_run(StartRunRequest(session_id=f"dog-{ws}", task=task, workspace_id=ws))
     history: list[str] = []
     failed_cmds = 0
-    repeated_bad = False
     succeeded = False
     steps = 0
     for _ in range(max_steps):
@@ -136,9 +143,21 @@ async def _run_agent(client, endpoint, rt: MemoryRuntime, ws: str, task: str, pr
         if use_memory:
             ctx = await rt.retrieve_context(RetrievalRequest(
                 run_id=run.run_id, step_id=step.step_id,
-                query="how to run this project's checks; what command failed and what worked",
-                strategy=RetrievalStrategy.variant_2, token_budget=800, top_k=10))
-            memory = "\n".join(f"- {b.content}" for b in positive_blocks(ctx))
+                query="how to run this project's checks; what setup is required and what command failed or worked",
+                strategy=RetrievalStrategy.variant_2, token_budget=900, top_k=10))
+            pos = positive_blocks(ctx)
+            # MemTrace's failure-aware negative evidence: the commands that FAILED before
+            # (avoided-attempts channel). Surfacing it is the whole point — it tells the
+            # agent what NOT to do, not just what worked.
+            neg = [b for b in ctx.context_blocks
+                   if b.type == "avoided_attempts" or b.source == "negative_evidence"]
+            parts: list[str] = []
+            if pos:
+                parts.append("What worked in past sessions:\n" + "\n".join(f"- {b.content}" for b in pos))
+            if neg:
+                parts.append("AVOID — these FAILED in past sessions (do not repeat):\n"
+                             + "\n".join(f"- {b.content}" for b in neg))
+            memory = "\n\n".join(parts)
         cmd = await _propose(client, endpoint, task, history, memory)
         if cmd.upper().startswith("DONE"):
             break
@@ -147,9 +166,6 @@ async def _run_agent(client, endpoint, rt: MemoryRuntime, ws: str, task: str, pr
         failed = rc != 0
         if failed:
             failed_cmds += 1
-            # "repeated the known-bad approach": ran the plain check (no APP_ENV) and failed
-            if _BAD_MARKER in cmd.lower() and _GOOD_MARKER not in cmd.lower():
-                repeated_bad = True
         history.append(f"$ {cmd}\n(exit {rc}) {out[:200]}")
         # record command + result to MemTrace (failed steps get rolled back)
         await rt.write_event(WriteEventRequest(
@@ -166,7 +182,7 @@ async def _run_agent(client, endpoint, rt: MemoryRuntime, ws: str, task: str, pr
         if not failed and "PASS" in out:
             succeeded = True
             break
-    return {"steps": steps, "failed_commands": failed_cmds, "repeated_bad": repeated_bad, "succeeded": succeeded}
+    return {"steps": steps, "failed_commands": failed_cmds, "stumbled": failed_cmds > 0, "succeeded": succeeded}
 
 
 async def run_dogfood_ab(*, root: str, trials: int = 3, output_dir: str | None = "reports") -> dict[str, Any]:
@@ -174,25 +190,27 @@ async def run_dogfood_ab(*, root: str, trials: int = 3, output_dir: str | None =
     if not endpoints:
         return {"skipped": True, "reason": "needs MEMTRACE_LLM_API_KEY (+ BASE_URL/MODEL)"}
     endpoint = endpoints[0]
-    task = ("Make this project's checks pass. Inspect the files, run the check script, and if it "
-            "fails, work out the required setup and run it correctly.")
+    task = ("Verify this project by running ./check.sh — it should print PASS. If it does not, "
+            "get it to PASS.")
     trial_rows: list[dict[str, Any]] = []
     async with httpx.AsyncClient() as client:
         for t in range(trials):
             repo = InMemoryRepository()
             ws = f"dogfood_{t}"
             rt = MemoryRuntime(repo, default_workspace_id=ws)
-            proj1, proj2 = _make_project(root), _make_project(root)
+            # Three SEPARATE fresh projects: phase-1 learn, and one each for A and B, so
+            # A's setup can't initialize B's project (that would rig the comparison).
+            proj1, proj_a, proj_b = _make_project(root), _make_project(root), _make_project(root)
             try:
-                # Phase 1 — learn on project #1 (records failed + working commands to MemTrace).
+                # Phase 1 — learn on project #1 (records the failed check + the working
+                # setup->check sequence to MemTrace).
                 learn = await _run_agent(client, endpoint, rt, ws, task, proj1, use_memory=False)
-                # Phase 2 — A (no memory) vs B (MemTrace) on project #2. A uses a separate
-                # workspace (no memory); B retrieves phase-1's lesson from `ws`.
-                a = await _run_agent(client, endpoint, rt, f"{ws}_A", task, proj2, use_memory=False)
-                b = await _run_agent(client, endpoint, rt, ws, task, proj2, use_memory=True)
+                # Phase 2 — A (no memory, separate workspace) vs B (retrieves phase-1's lesson).
+                a = await _run_agent(client, endpoint, rt, f"{ws}_A", task, proj_a, use_memory=False)
+                b = await _run_agent(client, endpoint, rt, ws, task, proj_b, use_memory=True)
             finally:
-                shutil.rmtree(proj1, ignore_errors=True)
-                shutil.rmtree(proj2, ignore_errors=True)
+                for p in (proj1, proj_a, proj_b):
+                    shutil.rmtree(p, ignore_errors=True)
             trial_rows.append({"trial": t, "learn": learn, "A": a, "B": b})
 
     def _sum(side: str, key: str) -> int:
@@ -200,23 +218,23 @@ async def run_dogfood_ab(*, root: str, trials: int = 3, output_dir: str | None =
 
     a_steps, b_steps = _sum("A", "steps"), _sum("B", "steps")
     a_fail, b_fail = _sum("A", "failed_commands"), _sum("B", "failed_commands")
-    a_mistake = sum(1 for r in trial_rows if r["A"]["repeated_bad"])
-    b_mistake = sum(1 for r in trial_rows if r["B"]["repeated_bad"])
+    a_stumble = sum(1 for r in trial_rows if r["A"]["stumbled"])
+    b_stumble = sum(1 for r in trial_rows if r["B"]["stumbled"])
     payload = {
         "skipped": False,
         "endpoint": {"base_url": endpoint["base_url"], "model": endpoint["model"]},
         "task": task,
         "trials": trials,
         "A_no_memory": {"total_steps": a_steps, "total_failed_commands": a_fail,
-                        "trials_with_repeated_mistake": a_mistake,
+                        "trials_stumbled": a_stumble,
                         "success_rate": round(_sum("A", "succeeded") / trials, 3)},
         "B_memtrace": {"total_steps": b_steps, "total_failed_commands": b_fail,
-                       "trials_with_repeated_mistake": b_mistake,
+                       "trials_stumbled": b_stumble,
                        "success_rate": round(_sum("B", "succeeded") / trials, 3)},
         "delta": {
             "steps_saved": a_steps - b_steps,
             "failed_commands_saved": a_fail - b_fail,
-            "mistakes_avoided": a_mistake - b_mistake,
+            "stumbles_avoided": a_stumble - b_stumble,
         },
         "trial_rows": trial_rows,
     }
@@ -242,7 +260,7 @@ def main() -> int:
     print(f"  B (MemTrace):   {payload['B_memtrace']}")
     d = payload["delta"]
     print(f"  A/B delta: steps_saved={d['steps_saved']}  failed_commands_saved={d['failed_commands_saved']}  "
-          f"mistakes_avoided={d['mistakes_avoided']}")
+          f"stumbles_avoided={d['stumbles_avoided']}")
     return 0
 
 
