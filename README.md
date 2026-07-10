@@ -126,17 +126,17 @@ A plain vector store re-surfaces the failed commands the agent already abandoned
 `app/benchmark/dogfood_agent.py` runs a **sandboxed** coding agent (a real LLM proposes shell commands; a deny-listed executor runs them in a throwaway project) as an A/B — **A = no memory** vs **B = MemTrace** — on a task whose fix is only learnable by *trying* it. Run across **3 model families, ~100 trials each (298 total)**:
 
 <p align="center">
-  <img src="docs/assets/benchmark_dogfood.png" width="620" alt="Dogfooding across 3 models: MemTrace's negative memory cuts repeated mistakes from 298/298 to 88/298">
+  <img src="docs/assets/benchmark_dogfood.png" width="760" alt="Dogfooding across 3 models: MemTrace's negative memory cuts repeated mistakes 298→88 and steps to solve 902→599">
 </p>
 
-| model | A: repeated the mistake | B: **MemTrace** |
-| --- | --- | --- |
-| gpt-5.4 | 100/100 | **0/100** |
-| gemini-3.1-pro | 98/98 | **0/98** |
-| claude-sonnet-5 | 100/100 | 88/100 |
-| **overall** | **298/298** | **88/298** |
+| model | A: repeated the mistake | B: **MemTrace** | steps to solve (A → B) |
+| --- | --- | --- | --- |
+| gpt-5.4 | 100/100 | **0/100** | 298 → **154** (−48%) |
+| gemini-3.1-pro | 98/98 | **0/98** | 304 → **196** (−36%) |
+| claude-sonnet-5 | 100/100 | 88/100 | 300 → **249** (−17%) |
+| **overall** | **298/298** | **88/298** | 902 → **599** (−34%) |
 
-With MemTrace's failure-aware **negative memory** (the *avoided-attempts* channel a plain vector store doesn't have), the agent stops repeating its prior mistake — **eliminated** for gpt-5.4 and gemini (100% → 0%), and cut **298 → 88 (70% fewer)** overall, with ~34% fewer steps. *(Honest: claude-sonnet-5 tends to run the check first regardless of memory, so the benefit depends on the model heeding memory — MemTrace supplies the signal; the model has to use it.)*
+Two signals, same story. **Repeated mistakes:** with MemTrace's failure-aware **negative memory** (the *avoided-attempts* channel a plain vector store doesn't have), the agent stops repeating its prior mistake — **eliminated** for gpt-5.4 and gemini (100% → 0%), and cut **298 → 88 (70% fewer)** overall. **Steps to solve:** it also gets there in **~34% fewer steps** overall (902 → 599), up to −48% for gpt-5.4. *(Honest: claude-sonnet-5 tends to run the check first regardless of memory, so it barely repeats fewer mistakes here (100 → 88) yet still saves 17% of its steps — the benefit depends on the model heeding the signal MemTrace supplies.)*
 
 ```bash
 ./scripts/fetch-swe-trajectories.sh              # stream N real trajectories (bounded, MEMTRACE_SWE_N)

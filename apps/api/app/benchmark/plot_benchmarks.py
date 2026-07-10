@@ -333,27 +333,51 @@ def chart_dogfood(d: dict, out: Path) -> None:
         def _rate(m, side):
             g = by_model[m]
             return g[side]["trials_stumbled"] / max(1, g["trials"])
+        def _avg_steps(m, side):
+            g = by_model[m]
+            return g[side]["total_steps"] / max(1, g["trials"])
         a_rates = [_rate(m, "A_no_memory") for m in models]
         b_rates = [_rate(m, "B_memtrace") for m in models]
-        fig, ax = plt.subplots(figsize=(max(7.2, 2.2 * len(models) + 2.5), 4.7))
+        a_steps = [_avg_steps(m, "A_no_memory") for m in models]
+        b_steps = [_avg_steps(m, "B_memtrace") for m in models]
         x = range(len(models))
         w = 0.36
+        labels = [m.replace("-preview", "").replace("-", "-\n", 1) for m in models]
+        fig, axes = plt.subplots(1, 2, figsize=(max(11.0, 2.7 * len(models) + 4.5), 4.7))
+
+        # panel 1 — repeated-mistake rate (lower better)
+        ax = axes[0]
         b1 = ax.bar([i - w / 2 for i in x], a_rates, w, label="A: no memory", color=_RED)
         b2 = ax.bar([i + w / 2 for i in x], b_rates, w, label="B: MemTrace", color=_GREEN)
         _annotate(ax, b1, a_rates)
         _annotate(ax, b2, b_rates)
-        ax.set_xticks(list(x))
-        ax.set_xticklabels([m.replace("-preview", "").replace("-", "-\n", 1) for m in models], fontsize=8.5)
+        ax.set_xticks(list(x)); ax.set_xticklabels(labels, fontsize=8.5)
         ax.set_ylim(0, 1.18)
         ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
         ax.set_ylabel("trials the agent repeated the mistake")
-        ax.set_title(
-            f"Dogfooding across {len(models)} models — {d['trials_per_model']} trials each\n"
-            f"MemTrace's negative memory: agent repeated the mistake in "
-            f"{d['A_no_memory']['trials_stumbled']}/{d['trials']} → {d['B_memtrace']['trials_stumbled']}/{d['trials']} runs overall",
-            fontsize=10)
+        ax.set_title("Repeated the mistake (lower better)", fontsize=10)
         ax.legend(frameon=False, fontsize=9, ncol=2, loc="upper center")
         ax.spines[["top", "right"]].set_visible(False)
+
+        # panel 2 — avg steps per trial (lower better)
+        ax = axes[1]
+        b3 = ax.bar([i - w / 2 for i in x], a_steps, w, label="A: no memory", color=_RED)
+        b4 = ax.bar([i + w / 2 for i in x], b_steps, w, label="B: MemTrace", color=_GREEN)
+        _annotate(ax, b3, a_steps, fmt="{:.2f}")
+        _annotate(ax, b4, b_steps, fmt="{:.2f}")
+        ax.set_xticks(list(x)); ax.set_xticklabels(labels, fontsize=8.5)
+        ax.set_ylim(0, max(a_steps + b_steps) * 1.22)
+        ax.set_ylabel("avg steps to solve per trial")
+        ax.set_title("Steps to solve (lower better)", fontsize=10)
+        ax.legend(frameon=False, fontsize=9, ncol=2, loc="upper center")
+        ax.spines[["top", "right"]].set_visible(False)
+
+        fig.suptitle(
+            f"Dogfooding across {len(models)} models — {d['trials_per_model']} trials each   ·   "
+            f"repeated the mistake {d['A_no_memory']['trials_stumbled']}/{d['trials']} → "
+            f"{d['B_memtrace']['trials_stumbled']}/{d['trials']}, steps "
+            f"{d['A_no_memory']['total_steps']} → {d['B_memtrace']['total_steps']} overall",
+            fontsize=10.5)
         fig.tight_layout()
         fig.savefig(out, dpi=140)
         plt.close(fig)
