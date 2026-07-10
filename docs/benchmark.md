@@ -2,6 +2,8 @@
 
 MemTrace includes a deterministic benchmark that compares memory strategies across agent-memory failure modes. It is designed to prove that state-aware retrieval, admission gating, negative evidence, and compaction improve prompt context without relying on live LLM calls.
 
+Beyond the deterministic core, several **opt-in** benches validate the same claims on real data — real SWE-agent execution trajectories, live cross-model dogfooding, and the real LongMemEval / LoCoMo datasets with real embeddings and a real LLM judge (plus a head-to-head vs Mem0). Each skips cleanly without an endpoint and never affects the 16/16 acceptance.
+
 ## Run the benchmark
 
 ```bash
@@ -97,7 +99,7 @@ benchmark / reproducibility impact). Against a local OpenAI-compatible proxy:
 ```bash
 MEMTRACE_LLM_API_KEY=sk-local \
 MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 \
-MEMTRACE_LLM_MODEL=gpt-5-mini \
+MEMTRACE_LLM_MODEL=gpt-5.4 \
 uv run python -m app.benchmark.qa_bench --output-dir reports
 ```
 
@@ -233,6 +235,102 @@ for the gate to isolate (MemTrace's edge is agentic, shown in the synthetic scal
 run). Retrieval also uses lexical/deterministic vectors here (no real embedding
 endpoint), so absolute accuracy is modest. This proves the pipeline on real data
 + a real model; it is not a leaderboard submission.
+
+## Real dataset at scale — LongMemEval + Mem0 head-to-head (opt-in)
+
+`app/benchmark/longmemeval_bench.py` runs the real
+[LongMemEval](https://github.com/xiaowu0162/LongMemEval) long-term-memory benchmark
+end-to-end with **real semantic embeddings** (OpenAI-compatible
+`text-embedding-3-small`, 256-dim cosine), a **real LLM** answering, and a **real
+LLM judge** grading against gold answers. Each question ships its own haystack of
+gold + distractor sessions; a 300-question run retrieves over **25,486 real memory
+records**. This is the current headline real-dataset check.
+
+```bash
+./scripts/fetch-longmemeval.sh s_cleaned          # -> /tmp/longmemeval_s_cleaned.json (264MB; `oracle`=14MB smoke; `--clean` deletes)
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE_LLM_MODEL=gpt-5.4 \
+  MEMTRACE_RETRIEVAL_HYBRID_BACKEND=inmemory MEMTRACE_RETRIEVAL_GRAPH_BACKEND=inmemory \
+  uv run --with ijson python -m app.benchmark.longmemeval_bench --dataset /tmp/longmemeval_s_cleaned.json --limit 300
+```
+
+On a 300-question run (`gpt-5.4` judge): no-memory **0%** → plain vector **71.0%** →
+MemTrace **72.7%**, with MemTrace **≥ plain vector on every question type** (clearest
+lift on preferences, 63.3% → 70.0%). Memory is what turns 0% into ~73%; the
+state-aware gate then adds a small consistent edge. Kept light on purpose:
+embeddings come from the API, the 264MB file is stream-parsed (`--with ijson`), each
+question uses a fresh in-memory store (peak RSS ~100MB), and embeddings are cached
+between runs. Useful flags: `--max-sessions` (haystack depth), `--abstention-only`
+(the `_abs` questions — pair with `MEMTRACE_RETRIEVAL_MIN_RELEVANCE` to measure the
+relevance floor: **86.7%** correct abstention vs **83.3%** with **62% fewer**
+injected tokens), `--concurrency`, `--no-cache`.
+
+**Head-to-head vs Mem0.** `app/benchmark/mem0_compare.py` compares four conditions —
+no-memory, plain vector, [Mem0](https://github.com/mem0ai/mem0) (LLM fact-extraction
++ semantic recall, configured *fairly* with per-fact timestamps), and MemTrace — over
+the **same** questions, embeddings, LLM answering, and one shared LLM judge. It is
+resumable via a checkpoint JSONL, so a killed run continues where it left off.
+
+```bash
+./scripts/fetch-longmemeval.sh s_cleaned
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 MEMTRACE_LLM_MODEL=gpt-5.4 \
+  MEMTRACE_RETRIEVAL_HYBRID_BACKEND=inmemory \
+  uv run --with ijson --with mem0ai --with chromadb \
+    python -m app.benchmark.mem0_compare --dataset /tmp/longmemeval_s_cleaned.json --limit 30
+```
+
+On a 30-question sample: no-memory **0%**, Mem0 **56.7%**, plain vector **70.0%**,
+MemTrace **66.7%**. Both retrieval approaches beat Mem0, whose per-session LLM
+fact-extraction is **~30× slower to ingest** and lossy on detail-recall questions.
+(n=30 is small — plain vector edges MemTrace within noise here; the 300-question run
+above has MemTrace ≥ plain vector on every type. Mem0 runs on default Chroma + the
+local proxy, not its hosted Platform.)
+
+## Real agent trajectories + dogfooding (opt-in)
+
+The synthetic execution-tree bench above shows the mechanism in isolation; these two
+run it on **real** agent data — MemTrace's home turf.
+
+**Real SWE-agent trajectories.** `app/benchmark/agentic_trace_bench.py` ingests real
+[SWE-agent](https://github.com/SWE-agent/SWE-agent) (mini-swe-agent) execution
+trajectories — sequences of (assistant action, tool observation) turns that include
+genuinely failed shell commands (non-zero `<returncode>`) — into the real
+`MemoryRuntime` with failed steps finished `failed` and rolled back, then A/B
+compares retrieval over the identical memory (`baseline_1` plain vector vs
+`variant_2` MemTrace). Deterministic (no LLM); trajectories are streamed bounded from
+HuggingFace, so the full 66k-trajectory dataset is never downloaded.
+
+```bash
+./scripts/fetch-swe-trajectories.sh              # stream MEMTRACE_SWE_N (default 250) trajectories -> /tmp/swe_trajs
+uv run python -m app.benchmark.agentic_trace_bench --dir /tmp/swe_trajs --output-dir reports
+```
+
+Latest run — **3,048 trajectories / 81,758 real steps (5,061 failed)**: plain vector
+re-surfaces dead-branch commands the agent already abandoned (contamination
+**8.7%**), while MemTrace's gate isolates **all** of them (**0.0%**) at a ~1.6-pt
+recall cost (82.2% → 80.6%). `--limit` caps trajectories; `--top-k` /
+`--token-budget` tune retrieval.
+
+**Cross-model dogfooding A/B.** `app/benchmark/dogfood_agent.py` wires MemTrace into
+a real coding-agent loop (a real LLM proposes shell commands; a **sandboxed**,
+deny-listed executor runs them in a throwaway temp project) and measures whether
+memory stops the agent repeating a mistake. Phase 1 the agent learns a trap by
+hitting it (a required `./setup.sh` before `./check.sh`, discoverable only by
+running); phase 2 a fresh agent solves the same-shaped task **A = no memory** vs
+**B = MemTrace** — B surfaces both what worked and the failure-aware
+*avoided-attempts* negative channel. `--models` runs it across model families,
+`--trials` per model, `--concurrency` in parallel.
+
+```bash
+MEMTRACE_LLM_API_KEY=... MEMTRACE_LLM_BASE_URL=http://localhost:4141/v1 \
+  uv run python -m app.benchmark.dogfood_agent --models "gpt-5.4,claude-sonnet-5,gemini-3.1-pro-preview" --trials 100
+```
+
+Across 3 model families × ~100 trials (**298 total**): the agent repeated the
+mistake **298/298** with no memory → **88/298** with MemTrace (~34% fewer steps).
+Per model: gpt-5.4 100 → **0**, gemini-3.1-pro 98 → **0**, claude-sonnet-5 100 → 88.
+Honest read: the negative-memory channel eliminates the repeat for models that heed
+memory; claude-sonnet-5 tends to run the check first regardless, so the benefit
+depends on the model using the signal MemTrace supplies.
 
 ## Performance / load testing (resource-capped)
 
